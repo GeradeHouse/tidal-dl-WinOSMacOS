@@ -310,3 +310,4 @@ Tidal-Media-Downloader//dist/
 Tidal-Media-Downloader/.rooignore
 
 Tidal-Media-Downloader/.history/.gitignore_*
+cache/*
