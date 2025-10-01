@@ -1,0 +1,51 @@
+# -*- mode: python ; coding: utf-8 -*-
+
+
+a = Analysis(
+    ['main.py'],
+    pathex=['TIDALDL-PY', '../AIGPY'],
+    binaries=[],
+    datas=[('TIDALDL-PY/tidal_dl/assets/icons', 'tidal_dl/assets/icons'), ('TIDALDL-PY/tidal_dl/assets/fonts', 'tidal_dl/assets/fonts'), ('TIDALDL-PY/tidal_dl/assets/images', 'tidal_dl/assets/images')],
+    hiddenimports=['aigpy'],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=['PyQt5', 'PySide2', 'torch', 'torchvision', 'tensorflow', 'tkinter', 'matplotlib'],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='tidal-dl-gui',
+    debug=True,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=['TIDALDL-PY/tidal_dl/assets/icons/icon-tidal-dl-gui.icns'],
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='tidal-dl-gui',
+)
+app = BUNDLE(
+    coll,
+    name='tidal-dl-gui.app',
+    icon='TIDALDL-PY/tidal_dl/assets/icons/icon-tidal-dl-gui.icns',
+    bundle_identifier=None,
+)

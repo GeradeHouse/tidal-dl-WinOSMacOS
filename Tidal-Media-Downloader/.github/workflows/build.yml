@@ -1,0 +1,82 @@
+name: Build GUI exe # Changed workflow name
+
+on: [workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest] # Re-enable macOS build
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python 3.12.6
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12.6'
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+          python -m pip install --upgrade pip wheel --break-system-packages
+          # Ensure GUI deps and pyinstaller are installed
+          pip install pyinstaller PyQt6 qt-material moviepy --break-system-packages
+          pip install -r requirements.txt --upgrade --break-system-packages
+        else
+          python -m pip install --upgrade pip wheel
+          # Ensure GUI deps and pyinstaller are installed
+          pip install pyinstaller PyQt6 qt-material moviepy
+          pip install -r requirements.txt --upgrade
+        fi
+      working-directory: TIDALDL-PY
+
+    - name: Clean directory
+      shell: bash
+      run: |
+        rm -rf dist
+        rm -rf build
+        rm -rf tidal_dl.egg-info
+        rm -rf tidal_gui.egg-info
+        rm -rf MANIFEST.in
+      working-directory: TIDALDL-PY
+
+    - name: Build tidal-dl-gui # Changed step name
+      shell: bash # Use bash for consistency
+      run: |
+        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          echo "Building Windows GUI executable..."
+          # Restored --windowed, kept fixes
+          pyinstaller --debug all --windowed -F ../main.py -n tidal-dl-gui -p . --exclude-module PyQt5 --exclude-module PySide2 --icon="tidal_dl/assets/icons/icon-tidal-dl-gui.ico" --add-data "tidal_dl/assets/icons;tidal_dl/assets/icons" > pyinstaller_build.log 2>&1 || (echo "PyInstaller failed, check pyinstaller_build.log" && exit 1)
+        elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+          echo "Building macOS app bundle..."
+          # Kept fixes
+          pyinstaller --debug all --windowed -D ../main.py -n tidal-dl-gui -p . --exclude-module PyQt5 --exclude-module PySide2 --icon="tidal_dl/assets/icons/icon-tidal-dl-gui.icns" --add-data "tidal_dl/assets/icons:tidal_dl/assets/icons" > pyinstaller_build.log 2>&1 || (echo "PyInstaller failed, check pyinstaller_build.log" && exit 1)
+        fi
+      working-directory: TIDALDL-PY
+
+    - name: List build output
+      shell: bash
+      run: ls -l dist/ || echo "Dist directory not found or empty."
+      working-directory: TIDALDL-PY
+      continue-on-error: true
+
+    - name: Upload Windows artifact
+      if: matrix.os == 'windows-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: tidal-dl-gui-${{ matrix.os }}
+        path: TIDALDL-PY/dist # Upload the entire dist directory
+
+    - name: Upload macOS artifact
+      if: matrix.os == 'macos-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: tidal-dl-gui-${{ matrix.os }}
+        path: TIDALDL-PY/dist # Upload the entire dist directory for macOS

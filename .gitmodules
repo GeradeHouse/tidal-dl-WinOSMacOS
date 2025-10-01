@@ -1,0 +1,3 @@
+[submodule "AIGPY"]
+	path = AIGPY
+	url = https://github.com/GeradeHouse/AIGPY

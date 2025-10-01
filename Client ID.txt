@@ -1,0 +1,6 @@
+Client ID
+16db632cb1744be3a1cee38056763a9e
+App Status
+Development mode
+Client secret
+9031f012c9584474a812ef4b320da557

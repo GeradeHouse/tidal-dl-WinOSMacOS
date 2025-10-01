@@ -1,0 +1,6 @@
+{
+    "python.analysis.extraPaths": [
+        "./Tidal-Media-Downloader/TIDALDL-PY",
+        "./AIGPY"
+    ]
+}

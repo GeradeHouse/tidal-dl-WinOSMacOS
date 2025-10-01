@@ -1,0 +1,124 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+
+  "settings": {
+    // ────────────── Git (per-folder) ──────────────
+    ".": {                       // keep root .git_disabled hidden
+      "git.enabled": false
+    },
+    "AIGPY": {                   // re-enabled earlier
+      "git.enabled": true
+    },
+    "Tidal-Media-Downloader": {  // active repo you just restored
+      "git.enabled": true
+    },
+
+    // ────────────── File Exclusions ──────────────
+
+    // Hide large/unnecessary folders from Explorer view
+    "files.exclude": {
+      "**/.git_disabled": true,
+      "**/.history": true,
+      "**/.lh": true,
+      "**/.roo": true,
+      "**/.venv": false,
+      "**/.vscode": false,
+      "**/backup": true,
+      "**/cache": true,
+      "**/download": false,
+      "AIGPY/.git_disabled": true,
+      "AIGPY/__pycache__": true,
+      "AIGPY/aigpy/__pycache__": true,
+      "Tidal-Media-Downloader/.git": true,
+      "Tidal-Media-Downloader/build": true,
+      "Tidal-Media-Downloader/dist": false,
+      "Tidal-Media-Downloader/__pycache__": true,
+      "Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/__pycache__": true
+    },
+
+    // Omit these paths from “Search in Files”
+    "search.exclude": {
+      "**/.git_disabled": true,
+      "**/.history": true,
+      "**/.lh": true,
+      "**/.roo": true,
+      "**/.venv": true,
+      "**/.vscode": true,
+      "**/backup": true,
+      "**/cache": true,
+      "**/download": true,
+      "AIGPY/.git_disabled": true,
+      "AIGPY/__pycache__": true,
+      "AIGPY/aigpy/__pycache__": true,
+      "Tidal-Media-Downloader/.git": true,
+      "Tidal-Media-Downloader/build": true,
+      "Tidal-Media-Downloader/dist": true,
+      "Tidal-Media-Downloader/__pycache__": true,
+      "Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/__pycache__": true
+    },
+
+    // Instruct file-watcher to skip these large directories
+    "files.watcherExclude": {
+      "**/.git_disabled/**": true,
+      "**/.history/**": true,
+      "**/.lh/**": true,
+      "**/.roo/**": true,
+      "**/.venv/**": true,
+      "**/.vscode/**": true,
+      "**/backup/**": true,
+      "**/cache/**": true,
+      "**/download/**": true,
+      "AIGPY/.git_disabled/**": true,
+      "AIGPY/__pycache__/**": true,
+      "AIGPY/aigpy/__pycache__/**": true,
+      "Tidal-Media-Downloader/.git/**": true,
+      "Tidal-Media-Downloader/build/**": true,
+      "Tidal-Media-Downloader/dist/**": true,
+      "Tidal-Media-Downloader/__pycache__/**": true,
+      "Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/__pycache__/**": true
+    },
+
+    // ────────────── Python / Pylance ──────────────
+
+    // tell VS Code to use the venv in <workspace>/.venv
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+
+    // DO NOT exclude the virtual-env: Pylance needs it
+    "python.analysis.exclude": [
+      "**/.history",
+      "**/.lh",
+      "**/.roo",
+      "**/backup",
+      "**/cache",
+      "**/download",
+      "**/Tidal-Media-Downloader/build",
+      "**/Tidal-Media-Downloader/dist"
+    ],
+
+    // make Pylance index the local packages first
+    "python.analysis.extraPaths": [
+      "Tidal-Media-Downloader/TIDALDL-PY/tidal_dl",
+      "AIGPY"
+    ],
+
+    // strict type-checking level
+    "python.analysis.typeCheckingMode": "standard",
+
+    // diagnostics tweaks
+    "python.analysis.diagnosticSeverityOverrides": {
+      "reportMissingImports": "error",
+      "reportMissingTypeStubs": "none"
+    },
+
+    // let Pylance auto-discover libs in site-packages
+    "python.analysis.autoSearchPaths": true,
+    "python.analysis.useLibraryCodeForTypes": true,
+
+    // don’t auto-activate venv in terminals
+    "python.terminal.activateEnvironment": false
+  }
+}

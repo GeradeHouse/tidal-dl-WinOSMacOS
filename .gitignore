@@ -1,0 +1,312 @@
+# history
+.history/
+.lh/
+
+# Virtual enviroment
+.venv/
+.venv/*
+
+download/
+
+# Tidal-Media-Downloader files to ignore
+Tidal-Media-Downloader/Dll/AIGS.vshost.exe
+Tidal-Media-Downloader/Dll/AIGS.vshost.exe.manifest
+Tidal-Media-Downloader/Dll/AIGS.pdb
+Tidal-Media-Downloader/TIDALDL-PY/tidal-dl.ini
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl.egg-info
+Tidal-Media-Downloader/TIDALDL-PY/build
+Tidal-Media-Downloader/TIDALDL-PY/dist
+Tidal-Media-Downloader/TIDALDL-PY/__main__.spec
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/__pycache__
+Tidal-Media-Downloader/TIDALDL-PY/exe/Track
+Tidal-Media-Downloader/TIDALDL-PY/exe/Video
+Tidal-Media-Downloader/TIDALDL-PY/exe/tidal-dl.ini
+Tidal-Media-Downloader/TIDALDL-PY/exe/Album
+Tidal-Media-Downloader/TIDALDL-PY/exe/Playlist
+Tidal-Media-Downloader/TIDALDL-UI/obj
+Tidal-Media-Downloader/TIDALDL-UI/bin/Release
+Tidal-Media-Downloader/TIDALDL-UI/bin/Debug/Tidal-Media-Downloader.pdb
+Tidal-Media-Downloader/TIDALDL-UI/bin/Debug/AIGS.pdb
+Tidal-Media-Downloader/TIDALDL-UI/bin/Debug/MaterialDesignThemes.Wpf.pdb
+Tidal-Media-Downloader/TIDALDL-UI/bin/Debug/MaterialDesignThemes.Wpf.xml
+Tidal-Media-Downloader/TIDALDL-UI/bin/Debug/Tidal-dl.ini
+Tidal-Media-Downloader/TIDALDL-UI/bin/Debug/Tidal-Media-Downloader.exe.config
+Tidal-Media-Downloader/TIDALDL-CMD-1
+Tidal-Media-Downloader/TIDALDL-UI-1
+Tidal-Media-Downloader/trunk
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/MaterialDesignThemes.Wpf.xml
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/policy.2.0.taglib-sharp.config
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/Stylet.xml
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-dl.ini
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-downloader.exe.config
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-downloader.pdb
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/obj
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI.v12.suo
+Tidal-Media-Downloader/TIDALDL-UI/.vs
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-ui-dl.exe.config
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-ui-dl.pdb
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-gui.application
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-gui.exe.config
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-gui.exe.manifest
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-gui.pdb
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-gui.vshost.application
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-gui.vshost.exe
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-gui.vshost.exe.config
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Debug/tidal-gui.vshost.exe.manifest
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Release/tidal-dl.ini
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Release/tidal-gui.application
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Release/tidal-gui.exe.config
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Release/tidal-gui.exe.manifest
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Release/tidal-gui.pdb
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Release/app.publish
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Release/MaterialDesignThemes.Wpf.xml
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Release/policy.2.0.taglib-sharp.config
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin/Release/Stylet.xml
+Tidal-Media-Downloader/TIDALDL-PY/.vscode
+Tidal-Media-Downloader/TIDALDL-UI/packages/Costura.Fody.3.3.0
+Tidal-Media-Downloader/TIDALDL-UI/packages/Fody.3.3.5
+Tidal-Media-Downloader/TIDALDL-UI/packages/MaterialDesignColors.1.1.3
+Tidal-Media-Downloader/TIDALDL-UI/packages/MaterialDesignThemes.2.5.1
+Tidal-Media-Downloader/TIDALDL-UI/packages/PropertyChanged.Fody.2.6.0
+Tidal-Media-Downloader/TIDALDL-UI/packages/Stylet.1.1.22
+Tidal-Media-Downloader/TIDALDL-UI/packages/Stylet.Start.1.1.22
+Tidal-Media-Downloader/TIDALDL-UI/packages/taglib.2.1.0.0
+Tidal-Media-Downloader/TIDALDL-UI/TIDALDL-UI/bin
+Tidal-Media-Downloader/TIDALDL-PY/__pycache__/setup.cpython-37.pyc
+Tidal-Media-Downloader/.gitignore
+Tidal-Media-Downloader/.gitignore
+Tidal-Media-Downloader/TIDALDL-PY/settings.json
+Tidal-Media-Downloader/TIDALDL-PY/usersettings.json
+Tidal-Media-Downloader/TIDALDL-PY/__init__.spec
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/__init__.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/arabic.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/chinese.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/czech.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/english.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/filipino.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/italian.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/language.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/russian.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/turkish.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/__init__.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/__main__.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/cmdHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/configHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/convertHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/ffmpegHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/fileHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/httpHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/logHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/m3u8Helper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/mathHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/netHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/pathHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/pipHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/progressHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/serverHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/stringHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/systemHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/tagHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/threadHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/updateHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/versionHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原/build/__main__/aigpy-2020.7.3.0-py3.7.egg/aigpy/__pycache__/zipHelper.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY-原
+Tidal-Media-Downloader/TIDALDL-UI-原
+Tidal-Media-Downloader/TIDALDL-PY/download
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/croatian.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/spanish.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl_test.egg-info/dependency_links.txt
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl_test.egg-info/entry_points.txt
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl_test.egg-info/PKG-INFO
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl_test.egg-info/requires.txt
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl_test.egg-info/SOURCES.txt
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl_test.egg-info/top_level.txt
+Tidal-Media-Downloader/TIDALDL-PY/downloadd/Album/Capital Cities/[E] Solarize/01 - Space.flac.part
+Tidal-Media-Downloader/TIDALDL-PY/downloadd/Album/Capital Cities/[E] Solarize/cover.jpg
+Tidal-Media-Downloader/TIDALDL-PY/downloadd/Album/Capital Cities/[E] Solarize/01 - Space.flac.part
+Tidal-Media-Downloader/TIDALDL-PY/downloadd/Album/Capital Cities/[E] Solarize/cover.jpg
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__/ukrainian.cpython-37.pyc
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/lang/__pycache__
+Tidal-Media-Downloader/旧版备份
+Tidal-Media-Downloader/usersettings.json
+Tidal-Media-Downloader/settings.json
+
+Tidal-Media-Downloader/download
+
+Tidal-Media-Downloader/TIDALDL-GUI
+Tidal-Media-Downloader/.vscode/.env
+Tidal-Media-Downloader/.vscode/settings.json
+Tidal-Media-Downloader/TIDALDL-PY/test/track.json
+Tidal-Media-Downloader/TIDALDL-PY/test/video.json
+Tidal-Media-Downloader/__init__.spec
+Tidal-Media-Downloader/test.py
+Tidal-Media-Downloader/TIDALDL-GUI-CROSS/MANIFEST.in
+Tidal-Media-Downloader/TIDALDL-GUI-CROSS/__init__.spec
+Tidal-Media-Downloader/TIDALDL-GUI-CROSS/workspace.code-workspace
+Tidal-Media-Downloader/TIDALDL-GUI-CROSS/.idea
+Tidal-Media-Downloader/TIDALDL-GUI-CROSS/tidal_gui/__pycache__
+Tidal-Media-Downloader/TIDALDL-GUI-CROSS/tidal_gui/.tidal-dl.log
+Tidal-Media-Downloader/.idea
+Tidal-Media-Downloader/tidal_dl-BAK
+Tidal-Media-Downloader/TIDALDL-PY2/tidal_dl
+Tidal-Media-Downloader/TIDALDL-GUI-CROSS/tidal_gui/view/__pycache__
+Tidal-Media-Downloader/TIDALDL-GUI-CROSS/tidal_gui/viewModel/__pycache__
+Tidal-Media-Downloader/TIDALDL-GUI-CROSS/tidal_gui/control/__pycache__
+Tidal-Media-Downloader/__pycache__
+Tidal-Media-Downloader/clean.sh
+Tidal-Media-Downloader/TIDALDL-PY/MANIFEST.in
+Tidal-Media-Downloader/TIDALDL-PY/exe/resource
+Tidal-Media-Downloader/TIDALDL-PY/exe/tidal_dl_win.tar.gz
+Tidal-Media-Downloader/.github/workflows/continuous-integration-workflow copy.yml
+Tidal-Media-Downloader/TIDALDL-PY/tidal-gui.spec
+Tidal-Media-Downloader/.history/
+Tidal-Media-Downloader/.gitignore
+Tidal-Media-Downloader/TIDALDL-PY/tidal_dl_old
+Tidal-Media-Downloader/TIDALDL-PY/tidal_gui_old
+Tidal-Media-Downloader/TIDALDL-PY/tidal_gui
+.venv/Lib/site-packages/aigpy/__pycache__/tagHelper.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/_iff.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/_riff.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/ac3.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/aiff.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/apev2.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/dsdiff.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/dsf.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/easyid3.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/monkeysaudio.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/musepack.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/ogg.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/oggflac.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/oggopus.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/oggspeex.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/oggtheora.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/oggvorbis.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/optimfrog.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/smf.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/tak.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/trueaudio.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/wave.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/__pycache__/wavpack.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/asf/__pycache__/__init__.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/asf/__pycache__/_attrs.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/asf/__pycache__/_objects.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/asf/__pycache__/_util.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/mp3/__pycache__/__init__.cpython-312.pyc
+.venv/Lib/site-packages/mutagen/mp3/__pycache__/_util.cpython-312.pyc
+.venv/Lib/site-packages/aigpy/__pycache__/tagHelper.cpython-312.pyc
+# ====================
+# Visual Studio / C# Projects
+# ====================
+Tidal-Media-Downloader/*.suo
+Tidal-Media-Downloader/*.user
+Tidal-Media-Downloader/*.userosscache
+Tidal-Media-Downloader/*.sln.docstates
+Tidal-Media-Downloader/.vs/
+Tidal-Media-Downloader/**/bin/
+Tidal-Media-Downloader/**/obj/
+Tidal-Media-Downloader/TIDALDL-UI/packages/
+
+# ====================
+# Python
+# ====================
+Tidal-Media-Downloader/__pycache__/
+Tidal-Media-Downloader/*.py[cod]
+Tidal-Media-Downloader/*.pyo
+Tidal-Media-Downloader/*.pyd
+Tidal-Media-Downloader/build/
+Tidal-Media-Downloader/dist/
+Tidal-Media-Downloader/*.egg-info/
+Tidal-Media-Downloader/pip-wheel-metadata/
+Tidal-Media-Downloader/*.spec
+Tidal-Media-Downloader/.venv/
+Tidal-Media-Downloader/env/
+Tidal-Media-Downloader/venv/
+
+# ====================
+# Project-Specific (Tidal-Media-Downloader)
+# ====================
+
+# Precompiled DLLs and related debug files
+Tidal-Media-Downloader//Dll/
+
+# TIDALDL-PY build outputs and caches
+Tidal-Media-Downloader//TIDALDL-PY/build/
+Tidal-Media-Downloader//TIDALDL-PY/dist/
+Tidal-Media-Downloader//TIDALDL-PY/*.egg-info/
+Tidal-Media-Downloader//TIDALDL-PY/tidal_dl.egg-info/
+Tidal-Media-Downloader//TIDALDL-PY/tidal_dl/__pycache__/
+Tidal-Media-Downloader//TIDALDL-PY/exe/
+
+# TIDALDL-PY user-specific settings
+Tidal-Media-Downloader//TIDALDL-PY/settings.json
+Tidal-Media-Downloader//TIDALDL-PY/usersettings.json
+
+# TIDALDL-PY runtime/configuration files
+Tidal-Media-Downloader//TIDALDL-PY/tidal-dl.ini
+
+# TIDALDL-PY test artifacts
+Tidal-Media-Downloader//TIDALDL-PY/test/*.json
+
+# TIDALDL-PY download folders
+Tidal-Media-Downloader//TIDALDL-PY/download/
+Tidal-Media-Downloader//TIDALDL-PY/downloadd/
+
+# Legacy / backup TIDALDL-PY directories
+Tidal-Media-Downloader//TIDALDL-PY-原/
+Tidal-Media-Downloader//TIDALDL-PY/tidal_dl_old/
+Tidal-Media-Downloader//TIDALDL-PY/tidal_gui_old/
+
+# Legacy / backup TIDALDL-UI directories
+Tidal-Media-Downloader//TIDALDL-UI-原/
+Tidal-Media-Downloader//TIDALDL-UI-1/
+
+# Remnants of old subprojects and branches
+Tidal-Media-Downloader//TIDALDL-CMD-1/
+Tidal-Media-Downloader//TIDALDL-UI-1/
+Tidal-Media-Downloader//trunk/
+Tidal-Media-Downloader//TIDALDL-GUI/
+Tidal-Media-Downloader//TIDALDL-GUI-CROSS/
+Tidal-Media-Downloader//TIDALDL-PY2/
+
+# Download and cache folders (root)
+Tidal-Media-Downloader//download/
+Tidal-Media-Downloader//cache/
+
+# Root-level user-specific JSON/token files
+Tidal-Media-Downloader//settings.json
+Tidal-Media-Downloader//usersettings.json
+Tidal-Media-Downloader//.spotify_token_cache.json
+Tidal-Media-Downloader//.tidal-dl.json
+Tidal-Media-Downloader//.tidal-dl.token.json
+
+# Workspace and IDE files (any level)
+Tidal-Media-Downloader/.history/*
+Tidal-Media-Downloader/.lh/*
+Tidal-Media-Downloader/.vscode/*
+Tidal-Media-Downloader/*.code-workspace
+Tidal-Media-Downloader/.idea/
+
+# Logs
+Tidal-Media-Downloader/*.log
+
+# Backup files and folders
+Tidal-Media-Downloader/*-BAK
+Tidal-Media-Downloader//旧版备份/
+
+# Miscellaneous generated files
+Tidal-Media-Downloader//__init__.spec
+Tidal-Media-Downloader//test.py
+Tidal-Media-Downloader/*.exe
+Tidal-Media-Downloader/*.dll
+Tidal-Media-Downloader/*.pdb
+
+# Asset files to ignore
+Tidal-Media-Downloader/*.xcf
+
+# Root build artifacts
+Tidal-Media-Downloader//build/
+Tidal-Media-Downloader//dist/
+Tidal-Media-Downloader/.rooignore
+
+Tidal-Media-Downloader/.history/.gitignore_*
