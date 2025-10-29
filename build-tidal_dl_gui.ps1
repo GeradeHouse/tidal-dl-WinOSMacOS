@@ -31,34 +31,74 @@ Builds the 'Windowed' executable.
 param(
     [Parameter(Mandatory=$false)]
     [ValidateSet("Windowed", "Console")]
-    [string]$BuildType = "Windowed" # Default build type
+    [string]$BuildType
 )
-# --- Activate Virtual Environment ---
-# Check if PyInstaller is already available and from the correct venv
-$PyInstallerCommand = Get-Command pyinstaller -ErrorAction SilentlyContinue
-$ExpectedVenvPath = Join-Path $PSScriptRoot ".venv\Scripts"
 
-if ($PyInstallerCommand -and $PyInstallerCommand.Source.StartsWith($ExpectedVenvPath)) {
-    Write-Host "PyInstaller is already available in the active virtual environment." -ForegroundColor Green
-} else {
-    $ActivateScriptPath = Join-Path $PSScriptRoot ".venv\Scripts\Activate.ps1"
-    if (Test-Path $ActivateScriptPath) {
-        Write-Host "Activating virtual environment: $ActivateScriptPath" -ForegroundColor Yellow
-        . $ActivateScriptPath
-        
-        # Verify activation by checking for PyInstaller
-        $PyInstallerCommandCheck = Get-Command pyinstaller -ErrorAction SilentlyContinue
-        if (-not $PyInstallerCommandCheck -or -not $PyInstallerCommandCheck.Source.StartsWith($ExpectedVenvPath)) {
-            Write-Error "Failed to activate the virtual environment correctly or PyInstaller not found within it."
-            exit 1
-        }
-        Write-Host "Virtual environment activated successfully." -ForegroundColor Green
+if (-not $BuildType) {
+    Write-Host "Please select the build type:"
+    $choices = @(
+        [System.Management.Automation.Host.ChoiceDescription]::new("&Windowed", "Build a standard GUI application with no console.")
+        [System.Management.Automation.Host.ChoiceDescription]::new("&Console", "Build a console application for debugging.")
+    )
+    $choice = $Host.UI.PromptForChoice("Build Type", "Select the build type:", $choices, 0)
+    
+    if ($choice -eq 0) {
+        $BuildType = "Windowed"
     } else {
-        Write-Error "Virtual environment activation script not found at: $ActivateScriptPath"
-        Write-Error "Please ensure the virtual environment exists in the '.venv' directory."
-        exit 1
+        $BuildType = "Console"
     }
 }
+# --- Define PyInstaller Path ---
+$PyInstallerPath = Join-Path $PSScriptRoot ".venv\Scripts\pyinstaller.exe"
+
+if (-not (Test-Path $PyInstallerPath)) {
+    Write-Error "PyInstaller not found at $PyInstallerPath."
+    Write-Error "Please ensure the virtual environment is set up and dependencies are installed by running:"
+    Write-Error "pip install -r Tidal-Media-Downloader\TIDALDL-PY\requirements.txt"
+    exit 1
+}
+
+# --- Check and Install AIGPY ---
+Write-Host "Checking if AIGPY is installed..." -ForegroundColor Yellow
+try {
+    & ".venv\Scripts\python.exe" -c "import aigpy" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "AIGPY is already installed." -ForegroundColor Green
+    } else {
+        Write-Host "AIGPY not found. Installing AIGPY..." -ForegroundColor Yellow
+        & ".venv\Scripts\pip.exe" install -e "AIGPY"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to install AIGPY."
+            exit 1
+        }
+        Write-Host "AIGPY installed successfully." -ForegroundColor Green
+    }
+} catch {
+    Write-Error "Error checking/installing AIGPY: $($_.Exception.Message)"
+    exit 1
+}
+
+# --- Check and Install Requirements ---
+Write-Host "Checking if requirements are installed..." -ForegroundColor Yellow
+$RequirementsPath = Join-Path $PSScriptRoot "Tidal-Media-Downloader\TIDALDL-PY\requirements.txt"
+if (Test-Path $RequirementsPath) {
+    try {
+        & ".venv\Scripts\pip.exe" install -r $RequirementsPath
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to install requirements from $RequirementsPath."
+            exit 1
+        }
+        Write-Host "Requirements installed successfully." -ForegroundColor Green
+    } catch {
+        Write-Error "Error installing requirements: $($_.Exception.Message)"
+        exit 1
+    }
+} else {
+    Write-Error "Requirements file not found at $RequirementsPath."
+    exit 1
+}
+
+Write-Host "Using PyInstaller from: $PyInstallerPath" -ForegroundColor Green
 
 # --- Configuration ---
 $ScriptDir = $PSScriptRoot # Directory where this script is located
@@ -69,6 +109,7 @@ $PackageDir = Join-Path $ProjectSourceDir "TIDALDL-PY" # Path to the main Python
 $AppName = "tidal-dl-gui"
 $MainScript = "main.py" # Relative to $ProjectSourceDir
 $IconFile = Join-Path $PackageDir "tidal_dl\assets\icons\icon-tidal-dl-gui.ico" # Relative to $PackageDir, use backslash for Windows path
+$SplashImage = Join-Path $PackageDir "tidal_dl\assets\images\splash.png" # Path to the splash screen image
 
 # --- Start ---
 Write-Host "-------------------------------------" -ForegroundColor Cyan
@@ -119,9 +160,9 @@ catch {
 # --- Construct PyInstaller Command ---
 # Base arguments
 $pyinstallerArgs = @(
-    "--debug", "all", # Keep debug output for now
+    # "--debug", "all", # Debug output PyiFrozenfinder logs ( Uncomment for debugging )
     "--noconfirm",    # Overwrite output directory without asking
-    "-F",             # One-file executable
+    "-D",             # One-directory bundle
     $MainScript,
     "-n", $AppName,
     "-p", "TIDALDL-PY", # Add package directory to PyInstaller's path search
@@ -137,10 +178,12 @@ $pyinstallerArgs = @(
     # --- End Excludes ---
     "--hidden-import", "aigpy", # Explicitly include missing module
     "--icon=$IconFile",
+    "--splash", $SplashImage, # Add the splash screen
     # Add data files (Syntax: SRC;DEST where SRC is relative to CWD, DEST is relative to bundle root)
     "--add-data", "TIDALDL-PY/tidal_dl/assets/icons;tidal_dl/assets/icons",
     "--add-data", "TIDALDL-PY/tidal_dl/assets/fonts;tidal_dl/assets/fonts",
-    "--add-data", "TIDALDL-PY/tidal_dl/assets/images;tidal_dl/assets/images" # Added images folder
+    "--add-data", "TIDALDL-PY/tidal_dl/assets/images;tidal_dl/assets/images",
+    "--add-data", "TIDALDL-PY/tidal_dl/metadata;tidal_dl/metadata" # <-- ADDED THIS LINE
 )
 # Add build type specific flag
 if ($BuildType -eq "Windowed") {
@@ -154,11 +197,11 @@ if ($BuildType -eq "Windowed") {
 
 # --- Execute PyInstaller ---
 Write-Host "Running PyInstaller..." -ForegroundColor Yellow
-Write-Host "Command: pyinstaller $($pyinstallerArgs -join ' ')" # Show the command being run
+Write-Host "Command: $PyInstallerPath $($pyinstallerArgs -join ' ')" # Show the command being run
 
 try {
-    # Use the call operator '&' with splatting '@' for the argument array
-    & pyinstaller @pyinstallerArgs
+    # Use the call operator '&' with the full path and splatting '@' for the argument array
+    & $PyInstallerPath @pyinstallerArgs
     # Check the exit code of the last command
     if ($LASTEXITCODE -ne 0) {
         Write-Error "PyInstaller failed with exit code $LASTEXITCODE."
@@ -174,8 +217,8 @@ catch {
 }
 
 # --- Restore Original Location (Optional) ---
-# Set-Location $ScriptDir
-# Write-Host "Restored working directory to: $ScriptDir"
+Set-Location $ScriptDir
+Write-Host "Restored working directory to: $ScriptDir"
 
 Write-Host "-------------------------------------" -ForegroundColor Cyan
 Write-Host "Build Script Finished." -ForegroundColor Cyan

@@ -15,14 +15,13 @@ import time
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QDateTime, QThread
 
 # Import project components
-from .. import getLoginUrl, pollForToken  # Import refactored login functions
+from ..login import initialize_and_login, getLoginUrl, pollForToken, saveToken
 from ..settings import SETTINGS
-
-# tidal and spotify api are not directly used here anymore, but keeping for potential future use
-# from ..tidal import TIDAL_API
+from ..tidal import TIDAL_API
 from ..spotify import SpotifyAPI
 from ..printf import Printf
-from .gui_utils import show_info_message  # Import utility
+from .gui_utils import show_info_message
+from .. import paths  # --- MODIFICATION: Import paths here ---
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
@@ -42,7 +41,9 @@ class TidalWebLoginWorker(QObject):
         """Perform the web login task to get the URL."""
         try:
             # Use the new non-blocking function
+            logger.debug("[AuthHandler] TidalWebLoginWorker: Calling getLoginUrl()...")
             login_url = getLoginUrl()
+            logger.debug(f"[AuthHandler] TidalWebLoginWorker: Got URL: {login_url}")
             self.finished.emit(login_url)
         except Exception as e:
             error_msg = f"Error getting TIDAL login URL: {e}"
@@ -61,11 +62,44 @@ class TidalTokenPollingWorker(QObject):
     def run(self):
         """Perform the token polling task."""
         try:
-            success = pollForToken()
-            self.finished.emit(success)
+            # Get timeout and interval from the API object, which was configured by getLoginUrl
+            timeout = TIDAL_API.key.authCheckTimeout
+            interval = TIDAL_API.key.authCheckInterval
+            start_time = time.time()
+
+            # Defensive checks for timeout/interval values
+            if timeout is None: timeout = 0
+            if interval is None: interval = 5
+
+            logger.debug(f"[AuthHandler] Starting polling loop. Timeout: {timeout}s, Interval: {interval}s")
+
+            while time.time() - start_time < timeout:
+                # pollForToken() returns a string status: "SUCCESS", "PENDING", etc.
+                status = pollForToken()
+
+                if status == "SUCCESS":
+                    logger.debug("[AuthHandler] Polling returned SUCCESS.")
+                    self.finished.emit(True)  # Emit boolean True on success
+                    return  # Success, exit the worker
+
+                elif status in ("PENDING", "SLOW_DOWN"):
+                    time.sleep(interval)
+                    if status == "SLOW_DOWN":
+                        interval += 5  # Increase interval as requested by API
+                        logger.debug(f"[AuthHandler] Polling slowed down. New interval: {interval}s")
+
+                else:  # Any other status string is an unexpected failure
+                    logger.error(f"TIDAL token polling failed with unexpected status: {status}")
+                    self.finished.emit(False) # Emit boolean False on failure
+                    return
+
+            # If the while loop finishes, it means we timed out
+            logger.error("TIDAL token polling timed out.")
+            self.finished.emit(False) # Emit boolean False on timeout
+
         except Exception as e:
-            logger.error(f"Error during TIDAL token polling: {e}", exc_info=True)
-            self.finished.emit(False)
+            logger.error(f"Exception during TIDAL token polling: {e}", exc_info=True)
+            self.finished.emit(False) # Emit boolean False on exception
 
 
 # --- Worker for Spotify Authentication ---
@@ -123,7 +157,11 @@ class AuthHandler(QObject):
 
     def check_initial_logins(self):
         """Checks initial login status for Tidal and Spotify."""
-        from .. import loginByConfig
+        logger.debug("[AuthHandler] Calling initialize_and_login() to set up API key...")
+        initialize_and_login()
+        logger.debug("[AuthHandler] initialize_and_login() finished.")
+
+        from ..login import loginByConfig
 
         logger.info("Checking initial login status...")
 
@@ -179,23 +217,31 @@ class AuthHandler(QObject):
 
     def _on_tidal_url_received(self, login_url: str):
         """Handle the successful retrieval of the TIDAL login URL."""
+        icon_path = paths.resource_path("assets/icons/info_icon.png")
+        # --- MODIFICATION START ---
+        # Ensure the href attribute contains the full, valid URL with the protocol.
+        full_url = f"https://{login_url}"
         show_info_message(
             self._parent_widget,
             "TIDAL Login Required",
             "Please visit the following URL in your browser to log in.",
-            f"URL: <a href='{login_url}'>{login_url}</a>\n\n"
+            f"URL: <a href='{full_url}'>{login_url}</a>\n\n"
             f"You have 5 minutes to complete the login.",
+            icon_path=icon_path,
         )
+        # --- MODIFICATION END ---
         # Start the dedicated polling worker in the background.
         self.start_tidal_token_polling()
 
     def _on_tidal_login_error(self, error_msg: str):
         """Handle errors during TIDAL login initiation."""
+        icon_path = paths.resource_path("assets/icons/info_icon.png")
         show_info_message(
             self._parent_widget,
             "TIDAL Login Error",
             "An error occurred while trying to start the web login process.",
             f"Details: {error_msg}",
+            icon_path=icon_path,
         )
         self.tidalLoginFailure.emit(f"Error starting login: {error_msg}")
 
@@ -223,13 +269,18 @@ class AuthHandler(QObject):
 
     def _on_tidal_polling_finished(self, success: bool):
         """Handle the result of the token polling worker."""
+        icon_path = paths.resource_path("assets/icons/info_icon.png")
         if success:
             logger.info("TIDAL token polling successful!")
+            # Save the token to file
+            saveToken()
+
             show_info_message(
                 self._parent_widget,
                 "TIDAL Login Successful",
                 "You have successfully logged into TIDAL.",
                 "Ready to use the application.",
+                icon_path=icon_path,
             )
             self.tidalLoginSuccess.emit()
         else:
@@ -239,6 +290,7 @@ class AuthHandler(QObject):
                 "TIDAL Login Failed",
                 "The web login process failed or timed out after 5 minutes.",
                 "Please try logging in again.",
+                icon_path=icon_path,
             )
             self.tidalLoginFailure.emit("Login failed or timed out.")
 

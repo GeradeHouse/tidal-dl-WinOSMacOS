@@ -55,6 +55,7 @@ from ..printf import Printf
 from .gui_utils import safeSetText
 from ..cover_cache import PlaylistCoverCache
 from .gui_cover_cache import CoverArtWorker, CoverCache
+from ..settings import SETTINGS
 
 from .gui_playlist_tree import PlaylistTreeWidget  # Import the new widget
 from .gui_linking_handler import LinkingGuiHandler
@@ -68,7 +69,6 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)  # Set specific level for this module
 
 # --- Font Size Configuration for Playlist Items ---
-PLAYLIST_ITEM_FONT_SIZE = 10.5  # Explicit font size in points (can be float)
 
 
 # --- Custom Delegate for Playlist Tree Items ---
@@ -86,7 +86,8 @@ class PlaylistDelegate(QtWidgets.QStyledItemDelegate):
     def __init__(self, tree_handler: "PlaylistTreeHandler", parent_widget: QWidget):
         super().__init__(parent_widget)
         self.tree_handler = tree_handler
-        self.hover_background_color = QColor("#2d2d31")  # Grey hover from QSS
+        self.hover_background_color = QColor("#3e3e43")  # Grey hover from QSS
+        self.folder_child_background_color = QColor("#101011EE") # Subtle darker background for items in folders
 
     def paint(
         self,
@@ -108,23 +109,15 @@ class PlaylistDelegate(QtWidgets.QStyledItemDelegate):
         # Save painter state
         painter.save()
 
-        # --- Force Font Size for Playlist Items in Delegate ---
-        # Apply to non-root items
-        # Cast self.parent() to QTreeWidget for Pylance
-        item_from_index = cast(QTreeWidget, self.parent()).itemFromIndex(index)
-        is_child_playlist_item = item_from_index and item_from_index not in [
-            self.tree_handler.tidal_root_item,
-            self.tree_handler.spotify_root_item,
-        ]
-
-        if is_child_playlist_item and hasattr(option.font, "setPointSizeF"):
-            option.font.setPointSizeF(PLAYLIST_ITEM_FONT_SIZE)
-            # --- Log AFTER modification ---
-            assert item_from_index is not None  # Add assertion for Pylance
-            logger.debug(
-                f"[Delegate Paint POST-MOD] Item: '{item_from_index.text(0)}', Option Font Size (NOW): {option.font.pointSizeF():.1f}"
-            )
-        # --- End Force Font Size ---
+        # +++ START: CUSTOM BACKGROUND FOR FOLDER CHILDREN +++
+        tree_widget = cast(QTreeWidget, self.parent())
+        if isinstance(tree_widget, QTreeWidget):
+            item = tree_widget.itemFromIndex(index)
+            if item:
+                item_data = item.data(0, Qt.ItemDataRole.UserRole)
+                if isinstance(item_data, dict) and item_data.get("is_folder_child"):
+                    painter.fillRect(option.rect, self.folder_child_background_color)
+        # +++ END: CUSTOM BACKGROUND +++
 
         # Prepare style option (important for default drawing)
         # self.initStyleOption(option, index) # Let Qt do this or do it if needed
@@ -284,7 +277,7 @@ class PlaylistTreeHandler(QObject):
     def __init__(
         self,
         playlist_tree_widget: PlaylistTreeWidget,
-        cache_manager: PlaylistCoverCache,
+        cover_cache: CoverCache,  # Use the new singleton cache
         parent: "MainView",
     ) -> None:
         super().__init__(parent)
@@ -296,13 +289,12 @@ class PlaylistTreeHandler(QObject):
         self.spotify_connect_button: QPushButton = (
             playlist_tree_widget.spotify_connect_button
         )  # Reference the button
-        self.cache_manager = cache_manager
+        self.cover_cache = cover_cache # Use the passed-in singleton instance
         self.filter_input_widget: QLineEdit = (
             playlist_tree_widget.get_filter_input_widget()
         )  # Store reference to filter input
         self.download_handler: Optional["DownloadHandler"] = None
         self.linking_handler: Optional[LinkingGuiHandler] = None
-        self.in_memory_cover_cache = CoverCache()
 
         # --- Load Default Playlist Icon ---
         self.default_playlist_icon = QIcon(QPixmap())
@@ -328,6 +320,35 @@ class PlaylistTreeHandler(QObject):
                 )
         except Exception as e:
             logger.error(f"Error loading default playlist icon: {e}", exc_info=True)
+        
+        # +++ Load Folder Icon (with manual scaling) +++
+        self.folder_icon = QIcon()
+        try:
+            folder_icon_path = os.path.abspath(
+                os.path.join(
+                    os.path.dirname(__file__), "..", "assets", "icons", "folder-white.png"
+                )
+            )
+            if os.path.exists(folder_icon_path):
+                # Load raw pixmap
+                base_pixmap = QPixmap(folder_icon_path)
+
+                # Choose how big the folder should *look* inside the tree row
+                # Change (20, 20) to whatever visual size you want
+                scaled_pixmap = base_pixmap.scaled(
+                    14, 14,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+
+                # Store the scaled icon
+                self.folder_icon = QIcon(scaled_pixmap)
+            else:
+                logger.warning(f"Folder icon file not found at: {folder_icon_path}")
+        except Exception as e:
+            logger.error(f"Error loading folder icon: {e}", exc_info=True)
+
+
 
         self._setup_tree_widget()
         self._connect_tree_signals()
@@ -341,14 +362,15 @@ class PlaylistTreeHandler(QObject):
         self.tree_widget.setColumnCount(1)
         self.tree_widget.setHeaderHidden(True)
         self.tree_widget.setAnimated(True)
-        # Set default icon size for child items (playlists) - 5px smaller
-        self.tree_widget.setIconSize(QSize(35, 35))
+        
+        # +++ Set initial icon size from settings +++
+        icon_size = SETTINGS.playlistIconSize if SETTINGS.showPlaylistIcons else 0
+        self.tree_widget.setIconSize(QSize(icon_size, icon_size))
+
         self.tree_widget.setRootIsDecorated(True)
         self.tree_widget.setSortingEnabled(False)
         self.tree_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tree_widget.setIndentation(
-            5
-        )  # Further reduced indentation for less spacing
+        self.tree_widget.setIndentation(15) # +++ INCREASED INDENTATION +++
         # self.tree_widget.setStyleSheet("QTreeView::item { margin-top: 0px; margin-bottom: -10px; }") # REMOVED Negative Margin
 
         # Apply custom delegate for drawing root item buttons
@@ -419,6 +441,7 @@ class PlaylistTreeHandler(QObject):
         self.tree_widget.itemClicked.connect(self.onPlaylistItemClicked)
         self.tree_widget.customContextMenuRequested.connect(self._handleTreeContextMenu)
         self.tree_widget.itemExpanded.connect(self._loadVisibleSpotifyIcons)
+        self.tree_widget.itemCollapsed.connect(self._loadVisibleSpotifyIcons) # Also check on collapse
         scrollbar = self.tree_widget.verticalScrollBar()
         if scrollbar:
             scrollbar.valueChanged.connect(self._onSpotifyScroll)
@@ -444,7 +467,7 @@ class PlaylistTreeHandler(QObject):
         while self.tidal_root_item.childCount() > 0:
             self.tidal_root_item.removeChild(self.tidal_root_item.child(0))
         self.tidal_root_item.setText(0, "Tidal Playlists (Loading...)")
-        self.tidal_root_item.setExpanded(True)
+        self.tidal_root_item.setExpanded(not SETTINGS.tidalStartCollapsed)
         QApplication.processEvents()
 
         thread = threading.Thread(
@@ -495,9 +518,6 @@ class PlaylistTreeHandler(QObject):
                 font_child = item.font(0)
                 font_child.setFamily("Nationale")
                 font_child.setWeight(QFont.Weight.Medium)  # Revert to Medium for Tidal
-                font_child.setPointSizeF(
-                    PLAYLIST_ITEM_FONT_SIZE
-                )  # Use setPointSizeF for float values
                 item.setFont(0, font_child)
 
                 created_date_str = getattr(playlist_summary, "created", None)
@@ -530,22 +550,26 @@ class PlaylistTreeHandler(QObject):
                         logger.warning(
                             f"Could not parse updated_date string '{updated_date_str}': {e}"
                         )
-
+                
+                playlist_uuid = getattr(playlist_summary, "uuid", None)
+                
                 playlist_data: Dict[str, Any] = {
                     "type": "tidal",
                     "data": playlist_summary,
                     "full_data_fetched": False,
-                    "created_date": created_dt,  # Store datetime object or None
-                    "updated_date": updated_dt,  # Store datetime object or None
+                    "created_date": created_dt,
+                    "updated_date": updated_dt,
+                    "image_url": None,
                 }
                 item.setData(0, Qt.ItemDataRole.UserRole, playlist_data)
-
-                self._start_icon_fetch(
-                    item,
-                    "tidal",
-                    getattr(playlist_summary, "uuid", None),  # type: ignore
-                    None,
-                )
+ 
+                if SETTINGS.showPlaylistIcons:
+                    self._start_icon_fetch(
+                        item,
+                        "tidal",
+                        item_id=playlist_uuid,
+                        image_url=None,
+                    )
 
         Printf.success("TIDAL playlists refreshed.")
         self._apply_playlist_filter()  # Apply filter after populating
@@ -565,108 +589,96 @@ class PlaylistTreeHandler(QObject):
             self.spotify_root_item.setText(0, f"Spotify Playlists ({playlist_count})")
             self.spotify_root_item.setHidden(False)
 
+            # Dictionary to keep track of created folder items to avoid duplicates
+            folder_items: Dict[str, QTreeWidgetItem] = {}
+
             for p_data in playlists:
-                if isinstance(p_data, dict) and "name" in p_data and "id" in p_data:
-                    item = QTreeWidgetItem(self.spotify_root_item)
-                    item_text = f"{p_data.get('name', 'Unknown Name')} ({p_data.get('tracks_total', '?')})"
-                    item.setText(0, item_text)
+                if not (isinstance(p_data, dict) and "name" in p_data and "id" in p_data):
+                    continue
 
-                    font_child_spotify = item.font(0)
-                    font_child_spotify.setFamily("Nationale")
-                    font_child_spotify.setWeight(QFont.Weight.Normal)
-                    font_child_spotify.setPointSizeF(
-                        PLAYLIST_ITEM_FONT_SIZE
-                    )  # Use setPointSizeF for float values
-                    item.setFont(0, font_child_spotify)
+                playlist_name = p_data.get('name', 'Unknown Name')
+                parent_item = self.spotify_root_item  # Default parent is the root
+                is_folder_child = False
 
-                    image_url = None
-                    images = p_data.get("images", [])
-                    if images:
-                        image_url = images[-1].get("url")
+                # If the setting is enabled and the name contains our separator...
+                if SETTINGS.spotifyUsePlaylistFolders and ' - ' in playlist_name:
+                    # Split only on the first occurrence to get the folder name
+                    folder_name = playlist_name.split(' - ', 1)[0].strip()
+                    
+                    if folder_name: # Proceed only if the folder name is not empty
+                        is_folder_child = True
+                        # Check if we've already created a folder item for this name
+                        if folder_name not in folder_items:
+                            # If not, create a new folder item
+                            new_folder_item = QTreeWidgetItem(self.spotify_root_item)
+                            new_folder_item.setText(0, folder_name)
+                            
+                            # Style the folder to make it look distinct (e.g., bold)
+                            font = new_folder_item.font(0)
+                            font.setWeight(QFont.Weight.Bold)
+                            new_folder_item.setFont(0, font)
+                            
+                            # Set the folder icon
+                            if SETTINGS.showPlaylistIcons and not self.folder_icon.isNull():
+                                new_folder_item.setIcon(0, self.folder_icon)
 
-                    item_data_dict: Dict[str, Any] = {
-                        "type": "spotify",
-                        "data": p_data,
-                        "image_url": image_url,
-                        "icon_displayed_from_cache": False,  # New flag
-                        "icon_needs_refresh": True,  # New flag, default to True
-                        "icon_update_pending": False,  # New flag
-                    }
-                    # item.setData(0, QtCore.Qt.ItemDataRole.UserRole, item_data_dict) # Set later after cache check
+                            # Store data to identify this as a folder item
+                            new_folder_item.setData(0, Qt.ItemDataRole.UserRole, {"is_folder": True})
+                            
+                            # Store it in our dictionary
+                            folder_items[folder_name] = new_folder_item
+                        
+                        # Set the parent for the actual playlist item to be this folder
+                        parent_item = folder_items[folder_name]
 
-                    playlist_id = p_data.get("id")
-                    if playlist_id:
-                        # New get_icon_data returns (data, timestamp)
-                        cached_icon_data, timestamp = self.cache_manager.get_icon_data(
-                            "spotify", playlist_id
-                        )
-                        if cached_icon_data:
-                            try:
-                                pixmap = QPixmap()
-                                if pixmap.loadFromData(cached_icon_data):
-                                    icon = QIcon(pixmap)
-                                    if not icon.isNull():
-                                        item.setIcon(
-                                            0, icon
-                                        )  # Display cached icon immediately
-                                        item_data_dict["icon_displayed_from_cache"] = (
-                                            True
-                                        )
-                                        if timestamp:
-                                            age = time.time() - timestamp
-                                            if age <= self.cache_manager.ttl_seconds:
-                                                item_data_dict["icon_needs_refresh"] = (
-                                                    False  # Fresh enough
-                                                )
-                                            else:
-                                                item_data_dict["icon_needs_refresh"] = (
-                                                    True  # Stale
-                                                )
-                                        else:  # No timestamp, assume needs refresh
-                                            item_data_dict["icon_needs_refresh"] = True
-                                    else:
-                                        logger.warning(
-                                            f"Loaded cached icon for spotify-{playlist_id}, but it is null."
-                                        )
-                                        item_data_dict["icon_displayed_from_cache"] = (
-                                            False
-                                        )
-                                        item_data_dict["icon_needs_refresh"] = True
-                                else:
-                                    logger.warning(
-                                        f"Failed to load QPixmap from cached data for spotify-{playlist_id}. Will lazy load."
-                                    )
-                                    item_data_dict["icon_displayed_from_cache"] = False
-                                    item_data_dict["icon_needs_refresh"] = True
-                            except Exception as e:
-                                logger.error(
-                                    f"Error processing cached icon during playlist population for spotify-{playlist_id}: {e}",
-                                    exc_info=True,
-                                )
-                                item_data_dict["icon_displayed_from_cache"] = False
-                                item_data_dict["icon_needs_refresh"] = True
-                        else:  # No cached data
-                            item_data_dict["icon_displayed_from_cache"] = False
-                            item_data_dict["icon_needs_refresh"] = True
+                # Create the playlist item with the correct parent (either root or a folder)
+                item = QTreeWidgetItem(parent_item)
+                
+                # The item text is the FULL playlist name, as requested
+                item_text = f"{playlist_name} ({p_data.get('tracks_total', '?')})"
+                item.setText(0, item_text)
+
+                font_child_spotify = item.font(0)
+                font_child_spotify.setFamily("Nationale")
+                font_child_spotify.setWeight(QFont.Weight.Normal)
+                item.setFont(0, font_child_spotify)
+
+                image_url = None
+                images = p_data.get("images", [])
+                if images:
+                    image_url = images[-1].get("url")
+
+                item_data_dict: Dict[str, Any] = {
+                    "type": "spotify",
+                    "data": p_data,
+                    "image_url": image_url,
+                    "icon_update_pending": False,
+                    "is_folder_child": is_folder_child, # Mark if it's in a folder for styling
+                }
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, item_data_dict)
+
+                if SETTINGS.showPlaylistIcons:
+                    if image_url:
+                        cached_pixmap = self.cover_cache.get(image_url)
+                        if cached_pixmap:
+                            item.setIcon(0, QIcon(cached_pixmap))
+                        else:
+                            item.setIcon(0, self.default_playlist_icon)
+                            self._start_icon_fetch(item, "spotify", p_data.get("id"), image_url)
                     else:
-                        logger.warning(
-                            f"Missing playlist ID in p_data during cache check: {p_data.get('name')}. Cannot check cache."
-                        )
-                        item_data_dict["icon_displayed_from_cache"] = False
-                        item_data_dict["icon_needs_refresh"] = True
+                        item.setIcon(0, self.default_playlist_icon)
 
-                    # Ensure the updated item_data_dict is set on the item
-                    item.setData(0, QtCore.Qt.ItemDataRole.UserRole, item_data_dict)
-
-            self._loadVisibleSpotifyIcons()  # This will now trigger fetches for stale or missing icons
-            if playlists:  # Only expand if there are playlists
-
+            self._loadVisibleSpotifyIcons()
+            if playlists:
                 def _expand_spotify_root():
-                    if self.spotify_root_item:  # Check if item still exists
+                    if self.spotify_root_item:
                         logger.debug(
                             f"Spotify root item expanded state BEFORE deferred setExpanded: {self.spotify_root_item.isExpanded()}"
                         )
                         self.spotify_root_item.setExpanded(True)
+                        # Also expand all folder items
+                        for folder_item in folder_items.values():
+                            folder_item.setExpanded(True)
                         logger.debug(
                             f"Spotify root item expanded state AFTER deferred setExpanded: {self.spotify_root_item.isExpanded()}"
                         )
@@ -674,9 +686,8 @@ class PlaylistTreeHandler(QObject):
                         logger.warning(
                             "Attempted deferred expansion, but spotify_root_item is None."
                         )
-
                 QTimer.singleShot(0, _expand_spotify_root)
-            self._apply_playlist_filter()  # Apply filter after populating
+            self._apply_playlist_filter()
 
         except Exception as e:
             logger.error(f"Error updating Spotify playlist tree: {e}", exc_info=True)
@@ -757,12 +768,23 @@ class PlaylistTreeHandler(QObject):
     @pyqtSlot(QTreeWidgetItem, int)
     def onPlaylistItemClicked(self, item: QTreeWidgetItem, column: int) -> None:
         """Handles clicks on items within the playlist tree widget."""
-        if not item or item in (self.tidal_root_item, self.spotify_root_item):
-            if item:
-                item.setExpanded(not item.isExpanded())
+        if not item:
             return
 
         item_data = item.data(0, Qt.ItemDataRole.UserRole)
+
+        # +++ START: FOLDER EXPANSION LOGIC +++
+        # Check if the clicked item is a folder
+        if isinstance(item_data, dict) and item_data.get("is_folder"):
+            item.setExpanded(not item.isExpanded())
+            return
+        # +++ END: FOLDER EXPANSION LOGIC +++
+
+        # Handle root item expansion
+        if item in (self.tidal_root_item, self.spotify_root_item):
+            item.setExpanded(not item.isExpanded())
+            return
+
         logger.debug(
             f"Playlist item clicked: '{item.text(0)}'. Data type: {type(item_data)}"
         )
@@ -1045,6 +1067,7 @@ class PlaylistTreeHandler(QObject):
                     dlQualities = [
                         ("M4a (Low - 96k)", AudioQuality.LOW),
                         ("M4a (High - 320k)", AudioQuality.HIGH),
+                        ("MP3 (High - 320k)", AudioQuality.MP3),
                         ("FLAC (Lossless CD)", AudioQuality.LOSSLESS),
                         ("FLAC (Hi-Res)", AudioQuality.HI_RES_LOSSLESS),
                         ("Highest Available Quality", AudioQuality.HIGHEST),
@@ -1169,14 +1192,18 @@ class PlaylistTreeHandler(QObject):
         image_url: Optional[str],
     ) -> None:
         """Starts the background worker to fetch/load an icon."""
-        if service == "tidal" and not item_id:
+        logger.debug(f"[_start_icon_fetch] Called for item: '{item.text(0)}', service: {service}, item_id: '{item_id}', image_url: '{image_url}'")
+        if not item_id:
             logger.warning(
                 f"Cannot fetch icon for {service} item '{item.text(0)}': Missing ID."
             )
             return
-        if service == "spotify" and not image_url:
+        
+        # For services other than Tidal, if there's no image_url, we can't proceed.
+        # For TIDAL, we allow a missing image_url so the worker can build a collage.
+        if service != "tidal" and not image_url:
             logger.warning(
-                f"Cannot fetch icon for {service} item '{item.text(0)}': Missing Image URL."
+                f"Cannot fetch icon for {service} item '{item.text(0)}': Missing image_url."
             )
             if not self.default_playlist_icon.isNull():
                 item.setIcon(0, self.default_playlist_icon)
@@ -1184,13 +1211,15 @@ class PlaylistTreeHandler(QObject):
 
         try:
             worker = CoverArtWorker(
-                url=image_url or "",
-                cache=self.in_memory_cover_cache,
+                url=image_url,
+                cache=self.cover_cache,
                 type=service,
-                item_id=item_id or "unknown",
+                item_id=item_id,
             )
+            # Connect worker signals to handler slots
             worker.signals.cover_ready.connect(self._set_playlist_icon_from_worker)
             worker.signals.error.connect(self._handle_icon_error_from_worker)
+
             thread_pool = QThreadPool.globalInstance()
             if thread_pool:
                 thread_pool.start(worker)
@@ -1198,7 +1227,6 @@ class PlaylistTreeHandler(QObject):
                 logger.error(
                     "Could not get QThreadPool global instance to start icon worker."
                 )
-                # Optionally set default icon here as fallback
                 if not self.default_playlist_icon.isNull():
                     item.setIcon(0, self.default_playlist_icon)
         except Exception as e:
@@ -1212,39 +1240,45 @@ class PlaylistTreeHandler(QObject):
     @pyqtSlot(str, QPixmap)
     def _set_playlist_icon_from_worker(self, url: str, pixmap: QPixmap) -> None:
         """Slot to set the fetched icon on the corresponding tree item."""
-        root_items = [self.tidal_root_item, self.spotify_root_item]
-        item_to_update = None
-        for root in root_items:
+        if not url:
+            return
+
+        # Iterate through both Tidal and Spotify root items to find the matching item
+        for root in [self.tidal_root_item, self.spotify_root_item]:
             for i in range(root.childCount()):
                 child = root.child(i)
                 if not child:
                     continue
-                item_data = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
-                if isinstance(item_data, dict):
-                    if (
-                        item_data.get("type") == "spotify"
-                        and item_data.get("image_url") == url
-                    ):
-                        item_to_update = child
-                        break
-            if item_to_update:
-                break
 
-        if item_to_update:
-            try:
-                icon = QIcon(pixmap)
-                if not icon.isNull():
-                    item_to_update.setIcon(0, icon)
-                    logger.info(
-                        f"Successfully set icon for item '{item_to_update.text(0)}' from worker."
-                    )
-                else:
-                    logger.warning(f"Pixmap for url '{url}' converted to a null QIcon.")
-            except Exception as e:
-                logger.error(
-                    f"Error setting icon from pixmap for item '{item_to_update.text(0)}': {e}",
-                    exc_info=True,
-                )
+                item_data = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if not isinstance(item_data, dict):
+                    continue
+
+                service = item_data.get("type")
+                match = False
+
+                if service == 'tidal':
+                    playlist_obj = item_data.get("data")
+                    if isinstance(playlist_obj, Playlist):
+                        # Collage case: worker emits "tidal_playlist_<uuid>"
+                        collage_key = f"tidal_playlist_{getattr(playlist_obj, 'uuid', '')}"
+                        if url == collage_key:
+                            match = True
+                        # Normal case: direct cover URL
+                        elif item_data.get("image_url") == url:
+                            match = True
+                elif service == 'spotify':
+                    # For Spotify, the URL is direct.
+                    if item_data.get("image_url") == url:
+                        match = True
+
+                if match:
+                    icon = QIcon(pixmap)
+                    if not icon.isNull():
+                        child.setIcon(0, icon)
+                        logger.debug(f"Set icon for '{child.text(0)}' from URL: {url}")
+                    # No need to continue searching once found
+                    return
 
     @pyqtSlot(str, str)
     def _handle_icon_error_from_worker(self, url: str, error_message: str) -> None:
@@ -1258,15 +1292,39 @@ class PlaylistTreeHandler(QObject):
                 if not child:
                     continue
                 item_data = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
-                if isinstance(item_data, dict) and item_data.get("image_url") == url:
+                if not isinstance(item_data, dict):
+                    continue
+                
+                # Direct match (works for Spotify)
+                if item_data.get("image_url") == url:
                     item_to_update = child
                     item_text = child.text(0)
                     break
+                
+                # Fallback for TIDAL
+                if item_data.get("type") == "tidal":
+                    playlist_obj = item_data.get("data")
+                    if playlist_obj is not None:
+                        # Check for collage key match
+                        collage_key = f"tidal_playlist_{getattr(playlist_obj, 'uuid', '')}"
+                        if url == collage_key:
+                            item_to_update = child
+                            item_text = child.text(0)
+                            break
+                        # Check for direct URL match
+                        if item_data.get("image_url") == url:
+                            item_to_update = child
+                            item_text = child.text(0)
+                            break
+
             if item_to_update:
                 break
         logger.warning(
             f"Failed to fetch icon for item '{item_text}' (URL: {url}): {error_message}"
         )
+        # Show a sane default icon so the UI doesn’t look broken
+        if item_to_update and not self.default_playlist_icon.isNull():
+            item_to_update.setIcon(0, self.default_playlist_icon)
 
     @pyqtSlot()
     def _loadVisibleSpotifyIcons(self) -> None:
@@ -1357,6 +1415,20 @@ class PlaylistTreeHandler(QObject):
                     not filter_text or filter_text in item_text
                 )  # Show if no filter or if text matches
                 child.setHidden(not is_visible)
+
+    @pyqtSlot()
+    def onPlaylistDisplaySettingsChanged(self):
+        """Updates the playlist tree view when display settings are changed."""
+        logger.info("Playlist display settings changed. Refreshing view.")
+        
+        # Update the icon size on the tree widget itself
+        new_size = SETTINGS.playlistIconSize if SETTINGS.showPlaylistIcons else 0
+        self.tree_widget.setIconSize(QSize(new_size, new_size))
+        
+        # Trigger a full refresh of both playlist sources to apply the new settings
+        self.refreshTidalPlaylists()
+        if hasattr(self.main_view, "spotify_gui_handler"):
+            self.main_view.spotify_gui_handler.refreshSpotifyPlaylists()
 
 
 # --- END OF FILE gui_playlist_tree_handler.py ---

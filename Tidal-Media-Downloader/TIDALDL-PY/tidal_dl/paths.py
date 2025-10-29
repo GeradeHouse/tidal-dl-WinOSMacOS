@@ -59,6 +59,8 @@ def _create_directory_if_not_exists(path: str) -> bool:
                 exc_info=True,
             )
             return False
+    else:
+        logger.debug(f"Directory '{path}' already exists.")
     return True
 
 
@@ -121,42 +123,330 @@ def __getBaseDirectory__():
 
 def getLogPath():
     """Returns the full path for the log file."""
-    return os.path.join(__getBaseDirectory__(), ".tidal-dl.log")
+    path = os.path.join(__getBaseDirectory__(), ".tidal-dl.log")
+    logger.debug(f"getLogPath() -> '{path}'")
+    return path
 
 
 def getTokenPath():
     """Returns the full path for the token file."""
-    return os.path.join(__getBaseDirectory__(), ".tidal-dl.token.json")
+    path = os.path.join(__getBaseDirectory__(), ".tidal-dl.token.json")
+    logger.debug(f"getTokenPath() -> '{path}'")
+    return path
 
 
 def getProfilePath():
     """Returns the base directory used for profile files (settings, token, logs)."""
     # This is now consistent with __getBaseDirectory__
-    return __getBaseDirectory__()
+    path = __getBaseDirectory__()
+    logger.debug(f"getProfilePath() -> '{path}'")
+    return path
 
 
 def getSettingsFilePath():
     """Returns the full path to the settings file."""
-    return os.path.join(__getBaseDirectory__(), ".tidal-dl.json")
+    path = os.path.join(__getBaseDirectory__(), ".tidal-dl.json")
+    logger.debug(f"getSettingsFilePath() -> '{path}'")
+    return path
 
 
 # --- Resource Path Function (for bundled assets) ---
 
 
 def resource_path(relative_path: str) -> str:
-    """Get absolute path to resource, works for dev and for PyInstaller"""
-    # Normalize the relative path to use the OS-specific separator
-    normalized_relative_path = os.path.normpath(relative_path)
-    
-    try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
-        base_path: str = getattr(sys, "_MEIPASS")
-        # Based on the .spec file, assets are placed in a 'tidal_dl' subdirectory
-        # inside the bundle root.
-        final_path = os.path.join(base_path, "tidal_dl", normalized_relative_path)
-        return final_path
-    except AttributeError:
-        # Not running in a PyInstaller bundle (e.g., in development)
-        # The assets are located relative to this file's directory.
-        base_path = os.path.abspath(os.path.join(os.path.dirname(__file__)))
-        return os.path.join(base_path, normalized_relative_path)
+    """
+    Resolve a bundled asset path for dev and PyInstaller (macOS/Win/Linux).
+
+    On macOS, this now prefers the actual .app bundle contents first, with priority on
+    the Resources dir where PyInstaller places the Python packages and our `tidal_dl`
+    package at runtime in the final, zipped/distributed .app:
+
+        <App>.app/Contents/Resources/tidal_dl/<relative_path>
+        <App>.app/Contents/Resources/<relative_path>
+
+    We then consider other bundle dirs (MacOS, Frameworks, Contents) which PyInstaller
+    may use depending on mode:
+
+        <App>.app/Contents/MacOS/tidal_dl/<relative_path>
+        <App>.app/Contents/Frameworks/tidal_dl/<relative_path>
+        <App>.app/Contents/_internal/tidal_dl/<relative_path>        [legacy]
+        <App>.app/Contents/<relative_path>
+
+    Finally (for backwards compatibility with your dev/test "portable" onedir layout),
+    we *optionally* look for a sibling folder that used to sit next to the .app during
+    development:
+
+        dist/<app_stem>/_internal/tidal_dl/<relative_path>
+
+    That portable root is only added if it actually exists at runtime. If the user
+    drags the .app somewhere else (e.g. ~/Documents), that sibling folder will not be
+    present, and we will not depend on it.
+
+    Also supports historical call sites that pass 'assets/fonts' or 'assets/images'
+    by aliasing them to 'fonts' and 'images' respectively.
+    """
+    normalized = os.path.normpath(relative_path).lstrip("/\\")
+    logger.debug(
+        f"resource_path: Received relative_path: '{relative_path}' (normalized: '{normalized}')"
+    )
+
+    # Environment snapshot for diagnostics
+    frozen = getattr(sys, "frozen", False)
+    meipass = getattr(sys, "_MEIPASS", None)
+    cwd = os.getcwd()
+    exe = getattr(sys, "executable", None)
+    logger.debug(
+        "resource_path: Environment => "
+        f"platform='{sys.platform}', frozen={frozen}, "
+        f"_MEIPASS='{meipass}', executable='{exe}', cwd='{cwd}', __file__='{__file__}'"
+    )
+
+    # NOTE: Use abspath-based uniq ONLY for *roots*; not for relative variants.
+    def _uniq_abspath(seq):
+        seen = set()
+        out = []
+        for x in seq:
+            ax = os.path.abspath(x)
+            if ax not in seen:
+                seen.add(ax)
+                out.append(ax)
+        return out
+
+    def _uniq_rel(seq):
+        # Preserve relative strings as-is (no abspath!), keep order
+        seen = set()
+        out = []
+        for x in seq:
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
+
+    def _alias_variants(path_rel: str):
+        # Back-compat: map 'assets/fonts' -> 'fonts', 'assets/images' -> 'images'
+        variants = [path_rel]
+        assets_fonts = os.path.join("assets", "fonts")
+        assets_images = os.path.join("assets", "images")
+        if path_rel.startswith(assets_fonts + os.sep) or path_rel == assets_fonts:
+            mapped = path_rel.replace(assets_fonts, "fonts", 1)
+            logger.debug(
+                f"resource_path: Alias applied for fonts: '{path_rel}' -> '{mapped}'"
+            )
+            variants.append(mapped)
+        if path_rel.startswith(assets_images + os.sep) or path_rel == assets_images:
+            mapped = path_rel.replace(assets_images, "images", 1)
+            logger.debug(
+                f"resource_path: Alias applied for images: '{path_rel}' -> '{mapped}'"
+            )
+            variants.append(mapped)
+        # Critically: DO NOT abspath here — keep these relative so os.path.join(root, rel) works.
+        return _uniq_rel(variants)
+
+    candidates = []
+    expected_primary_path = None
+    expected_relative_from_dist = None
+
+    # --- Platform-specific root discovery ---
+    if sys.platform == "darwin" and frozen:
+        # Figure out bundle anchors:
+        # meipass can end up pointing at .../Contents/Frameworks OR .../Contents/MacOS
+        # depending on how PyInstaller decided to stage the runtime.
+        # We reconstruct the .app structure around it so we can reliably find:
+        #   <App>.app/Contents/Resources/tidal_dl/...
+        # even if _MEIPASS changes across builds.
+
+        contents_dir = None
+        app_dir = None
+        dist_dir = None
+        app_stem = None
+
+        if meipass:
+            # If _MEIPASS is defined, it will be below <app>.app/Contents/<Something>
+            # e.g. .../Contents/Frameworks  (observed in logs)
+            # or   .../Contents/MacOS       (classic PyInstaller)
+            contents_dir = os.path.abspath(os.path.join(meipass, ".."))          # .../Contents
+            app_dir = os.path.dirname(contents_dir)                              # .../tidal_dl_gui.app
+            dist_dir = os.path.dirname(app_dir)                                  # parent folder of .app
+        else:
+            # Fallback: derive from sys.executable
+            # sys.executable should be .../<App>.app/Contents/MacOS/<binary>
+            if exe:
+                # macos_dir_guess = .../Contents/MacOS
+                macos_dir_guess = os.path.abspath(os.path.dirname(exe))
+                # contents_dir    = .../Contents
+                contents_dir = os.path.abspath(os.path.join(macos_dir_guess, ".."))
+                # app_dir         = .../<App>.app
+                app_dir = os.path.dirname(contents_dir)
+                # dist_dir        = parent folder that currently contains the .app
+                dist_dir = os.path.dirname(app_dir)
+
+            # And also behave *as if* meipass == <bundle>/Contents/MacOS
+            meipass = os.path.join(contents_dir, "MacOS") if contents_dir else None
+
+        if app_dir:
+            # Remove .app suffix to get stem. e.g. tidal_dl_gui.app -> tidal_dl_gui
+            app_stem = os.path.splitext(os.path.basename(app_dir))[0]
+
+        logger.debug(
+            "resource_path[macOS]: anchors => "
+            f"contents_dir='{contents_dir}', app_dir='{app_dir}', dist_dir='{dist_dir}', "
+            f"app_stem='{app_stem}', effective_meipass='{meipass}'"
+        )
+
+        # Build roots in correct priority order:
+
+        roots = []
+
+        # 0) Contents/Resources — this is where PyInstaller actually drops the
+        #    'tidal_dl' package (including assets/icons/*.png etc.) in the final
+        #    distributable .app you ship/zip. This MUST come first so that
+        #    dragging the .app anywhere (~/Documents, ~/Desktop, /Applications)
+        #    still finds icons/backgrounds at:
+        #        <App>.app/Contents/Resources/tidal_dl/assets/...png
+        if contents_dir:
+            resources_dir = os.path.join(contents_dir, "Resources")
+            if os.path.isdir(resources_dir):
+                roots.append(resources_dir)
+
+        # 1) Contents/MacOS — classic PyInstaller layout for many apps.
+        #    Some builds keep the Python package tree here.
+        if contents_dir:
+            macos_dir_candidate = os.path.join(contents_dir, "MacOS")
+            if os.path.isdir(macos_dir_candidate):
+                roots.append(macos_dir_candidate)
+
+        # 2) Contents/Frameworks — newer PyInstaller for windowed apps on macOS
+        #    has been observed to park the runtime and Python libs here and even
+        #    sets _MEIPASS to this path.
+        if contents_dir:
+            frameworks_dir_candidate = os.path.join(contents_dir, "Frameworks")
+            if os.path.isdir(frameworks_dir_candidate):
+                roots.append(frameworks_dir_candidate)
+
+        # 3) Contents itself (rare fallback).
+        if contents_dir and os.path.isdir(contents_dir):
+            roots.append(contents_dir)
+
+        # 4) Legacy "portable" sibling folder that used to sit next to the .app
+        #    during dev/test, e.g.:
+        #        dist/tidal_dl_gui/_internal/tidal_dl/assets/...
+        #    We only add this if it *actually exists* at runtime, so production
+        #    builds (copied .app with no sibling dir) won't fall back here.
+        if dist_dir and app_stem:
+            portable_root = os.path.join(dist_dir, app_stem)
+            if os.path.isdir(portable_root):
+                roots.append(portable_root)
+
+                # For debug logging: show what we *expect* for the portable layout
+                expected_primary_path = os.path.join(
+                    portable_root, "_internal", "tidal_dl", normalized
+                )
+                expected_relative_from_dist = os.path.join(
+                    app_stem, "_internal", "tidal_dl", normalized
+                )
+
+    else:
+        # --- non-macOS or not frozen ---
+        roots = []
+        if frozen:
+            # Frozen on Windows/Linux: prefer _MEIPASS first.
+            if meipass:
+                roots.append(meipass)
+                expected_primary_path = os.path.join(meipass, "tidal_dl", normalized)
+            else:
+                # Fallback to the executable directory
+                exe_dir = os.path.abspath(os.path.dirname(exe)) if exe else None
+                if exe_dir:
+                    roots.append(exe_dir)
+                expected_primary_path = os.path.join(
+                    exe_dir or "", "tidal_dl", normalized
+                )
+        else:
+            # Dev mode: project dir relative to this file.
+            dev_root = os.path.abspath(os.path.dirname(__file__))
+            roots.append(dev_root)
+            expected_primary_path = os.path.join(dev_root, normalized)
+
+    # De-duplicate root list (order-preserving for first occurrence of each abs path)
+    roots = _uniq_abspath([r for r in roots if r])
+    logger.debug(f"resource_path: Candidate roots (ordered, unique): {roots}")
+
+    if expected_primary_path:
+        logger.debug(
+            f"resource_path: EXPECTED PRIMARY ASSET PATH (portable) => '{expected_primary_path}'"
+        )
+        if sys.platform == "darwin" and expected_relative_from_dist:
+            logger.debug(
+                f"resource_path: EXPECTED RELATIVE (from dist folder) => '{expected_relative_from_dist}'"
+            )
+
+    # Build candidate paths under each root
+    for root in roots:
+        for rel in _alias_variants(normalized):
+            if sys.platform == "darwin" and frozen:
+                # For macOS frozen builds we try three forms under each root:
+                #
+                #   1) <root>/tidal_dl/<rel>
+                #      This covers the real final .app layout where assets live at:
+                #          <App>.app/Contents/Resources/tidal_dl/assets/icons/menu.png
+                #      while callers ask for "assets/icons/menu.png".
+                #      Joining root + "tidal_dl" + rel produces that exact path.
+                #
+                #   2) <root>/<rel>
+                #      This covers direct lookups when rel already starts with
+                #      'tidal_dl/...', or if PyInstaller happens to flatten the
+                #      package so assets land directly under <root>/assets/... .
+                #
+                #   3) <root>/_internal/tidal_dl/<rel>
+                #      This is the legacy portable onedir layout:
+                #          dist/tidal_dl_gui/_internal/tidal_dl/assets/...
+                #      We keep it last for backwards compatibility during
+                #      development runs from an unpacked dist/.
+                candidates.append(os.path.join(root, "tidal_dl", rel))
+                candidates.append(os.path.join(root, rel))
+                candidates.append(os.path.join(root, "_internal", "tidal_dl", rel))
+            elif frozen:
+                # Windows/Linux frozen onedir/onefile
+                # NOTE: Per user request, do NOT change this ordering/logic
+                # from the working behavior. We keep both candidates so that:
+                #   root/tidal_dl/<rel>   (normal PyInstaller --add-data layout)
+                #   root/<rel>            (in case rel already starts with tidal_dl/)
+                candidates.append(os.path.join(root, "tidal_dl", rel))
+                candidates.append(os.path.join(root, rel))
+            else:
+                # Dev mode
+                candidates.append(os.path.join(root, rel))
+
+    # To avoid excessive spam, preview the first 10 candidates and total count
+    if candidates:
+        preview_count = min(10, len(candidates))
+        logger.debug(
+            f"resource_path: Prepared {len(candidates)} candidate paths. "
+            f"Preview (first {preview_count}): " + "; ".join(candidates[:preview_count])
+        )
+    else:
+        logger.debug("resource_path: No candidates were prepared (unexpected).")
+
+    # Return the first existing candidate
+    for path in candidates:
+        if os.path.exists(path):
+            logger.debug(
+                f"resource_path: Resolved '{relative_path}' -> '{path}' (exists=True)"
+            )
+            return path
+
+    # Nothing found — log the first tried path for easier triage and return it
+    first_tried = (
+        candidates[0]
+        if candidates
+        else os.path.join("_internal", "tidal_dl", normalized)
+    )
+    logger.warning(
+        "resource_path: None of the candidate paths exist for "
+        f"'{relative_path}'. First tried: '{first_tried}'. "
+        "This usually indicates the packaging layout does not match the expected portable structure."
+    )
+    logger.debug(
+        f"resource_path: FINAL (non-existent) return for '{relative_path}' -> '{first_tried}'"
+    )
+    return first_tried

@@ -80,7 +80,7 @@ class LangDutch(object):
     CHANGE_START_SETTINGS = "Start instellingen('0'-Terugkeren,'1'-Ja):"
     CHANGE_DOWNLOAD_PATH = "Downloadpad('0'-niet wijzigen):"
     CHANGE_AUDIO_QUALITY = (
-        "Audiokwaliteit('0'-Normaal,'1'-Hoog,'2'-HiFi,'3'-Master,'4'-Max):"
+        "Audiokwaliteit('0'-Normaal,'1'-Hoog,'2'-HiFi,'3'-Master,'4'-Max,'5'-MP3):"
     )
     CHANGE_VIDEO_QUALITY = "Videokwaliteit (1080, 720, 480, 360):"
     CHANGE_ONLYM4A = "Converteer mp4 naar m4a('0'-Nee,'1'-Ja):"

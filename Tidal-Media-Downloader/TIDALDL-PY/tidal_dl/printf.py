@@ -76,16 +76,16 @@ class Printf(object):
     def map_quality(item):
         """Handle both AudioQuality enum and Track object inputs"""
         if isinstance(item, AudioQuality):
-            return Printf._map_quality_enum(item)
-        return Printf._map_track_quality(item)
+            return Printf.map_quality_enum(item)
+        return Printf.map_track_quality(item)
 
     @staticmethod
-    def _map_track_quality(track):
+    def map_track_quality(track):
         """Handle track objects with metadata check, ensuring proper attribute values."""
         # Validate track type first
         if not isinstance(track, Track):
             logging.error(
-                f"Invalid track type passed to _map_track_quality: {type(track)}"
+                f"Invalid track type passed to map_track_quality: {type(track)}"
             )
             return "Unknown Quality"
 
@@ -146,7 +146,7 @@ class Printf(object):
             # logging.debug("track.audioQuality is callable; retrieving from __dict__")
             audio_quality_attr = track.__dict__.get("audioQuality", None)
         final_quality = (
-            Printf._map_quality_enum(audio_quality_attr)
+            Printf.map_quality_enum(audio_quality_attr)
             if not hires_detected
             else "FLAC – High Resolution (24-bit, 96 kHz)"
         )
@@ -158,7 +158,7 @@ class Printf(object):
         return final_quality
 
     @staticmethod
-    def _map_quality_enum(q):
+    def map_quality_enum(q):
         """Map AudioQuality enum to string"""
         quality_map = {
             AudioQuality.LOW: "M4a - AAC – High Efficiency (96 kbps, 44.1 kHz)",
@@ -166,6 +166,7 @@ class Printf(object):
             AudioQuality.LOSSLESS: "FLAC – CD Standard (16-bit, 44.1 kHz)",
             AudioQuality.HI_RES_LOSSLESS: "FLAC – High Resolution (24-bit, 96 kHz)",
             AudioQuality.HIGHEST: "Highest available",
+            AudioQuality.MP3: "MP3 - Constant Bitrate (320 kbps, 44.1 kHz)",
         }
         if isinstance(q, str):
             try:
@@ -426,17 +427,17 @@ class Printf(object):
                 [settings.LANG.MODEL_ALBUM, data.album.title],
                 [settings.LANG.MODEL_VERSION, data.version],
                 [settings.LANG.MODEL_EXPLICIT, data.explicit],
-                # Use _map_quality_enum for the attribute, _map_track_quality for the object analysis
-                ["Max-Q", Printf._map_track_quality(data)],
+                # Use map_quality_enum for the attribute, map_track_quality for the object analysis
+                ["Max-Q", Printf.map_track_quality(data)],
             ],
         )
         if stream is not None and stream.soundQuality is not None:
-            # Use _map_quality_enum for the stream quality attribute
-            retrieved_quality_str = Printf._map_quality_enum(stream.soundQuality)
+            # Use map_quality_enum for the stream quality attribute
+            retrieved_quality_str = Printf.map_quality_enum(stream.soundQuality)
             tb.add_row(["Get-Q", retrieved_quality_str])
             # Compare the *retrieved* quality string to determine codec display
             if retrieved_quality_str == "FLAC – High Resolution (24-bit, 96 kHz)":
-                tb.add_row(["Get-Codec", "flac"])  # Assuming HI_RES is always FLAC
+                tb.add_row(["Get-Codec", "flac"])  # Assuming HI_RES_LOSELESS is always FLAC
             else:
                 tb.add_row(["Get-Codec", str(stream.codec)])
         print(tb)

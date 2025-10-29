@@ -25,15 +25,24 @@ class Settings(aigpy.model.ModelBase):
     saveCovers = True
     language = "english"
     lyricFile = True
-    apiKeyIndex = 4
+    # Default API key to use on *first run only* (when settings.json doesn't exist yet).
+    # We point this to a *non* "Master-only" key that supports Normal/High/HiFi/Master.
+    # NOTE: If a settings.json is present, its value takes precedence and this
+    #       does NOT overwrite the user's saved choice.
+    apiKeyIndex = 0
     showProgress = True
     showTrackInfo = True
     saveAlbumInfo = False
+    fontSize = 9
     multiThread = False
     downloadDelay = True
     autoSpotifyLogin = False
+    spotifyUsePlaylistFolders = True
+    tidalStartCollapsed = True
+    showPlaylistIcons = True
+    playlistIconSize = 25
 
-    downloadPath = "./download/"
+    downloadPath = "./Downloads/"
     audioQuality = enums.AudioQuality.LOSSLESS
     usePlaylistFolder = True
     albumFolderFormat = R"{ArtistName}/{Flag} {AlbumTitle} [{AlbumID}] [{AlbumYear}]"
@@ -101,6 +110,14 @@ class Settings(aigpy.model.ModelBase):
             self.spotifyRedirectUri = "http://127.0.0.1:8888/callback"
         if not hasattr(self, "autoSpotifyLogin"):
             self.autoSpotifyLogin = False
+        if not hasattr(self, "spotifyUsePlaylistFolders"):
+            self.spotifyUsePlaylistFolders = True
+        if not hasattr(self, "tidalStartCollapsed"):
+            self.tidalStartCollapsed = True
+        if not hasattr(self, "showPlaylistIcons"):
+            self.showPlaylistIcons = True
+        if not hasattr(self, "playlistIconSize"):
+            self.playlistIconSize = 25
         if not hasattr(self, "playlistCoverCachePath"):
             self.playlistCoverCachePath = None
         if (
@@ -109,6 +126,8 @@ class Settings(aigpy.model.ModelBase):
             or self.playlistCoverCacheTTL <= 0
         ):
             self.playlistCoverCacheTTL = 7
+        if not hasattr(self, "fontSize") or not isinstance(self.fontSize, int) or not (8 <= self.fontSize <= 16):
+            self.fontSize = 11
 
         from .lang.language import getLang
 
@@ -148,6 +167,11 @@ class Settings(aigpy.model.ModelBase):
             else "http://127.0.0.1:8888/callback"
         )
         data["autoSpotifyLogin"] = self.autoSpotifyLogin
+        data["spotifyUsePlaylistFolders"] = self.spotifyUsePlaylistFolders
+        data["tidalStartCollapsed"] = self.tidalStartCollapsed
+        data["showPlaylistIcons"] = self.showPlaylistIcons
+        data["playlistIconSize"] = self.playlistIconSize
+        data["fontSize"] = self.fontSize
         txt = json.dumps(data, indent=4)  # Add indent for readability
         aigpy.file.write(self._path_, txt, "w+")
 
@@ -158,6 +182,7 @@ class TokenSettings(aigpy.model.ModelBase):
     accessToken = None
     refreshToken = None
     expiresAfter = 0
+    apiKeyIndex: Optional[int] = None
 
     def __encode__(self, string):
         sw = bytes(string, "utf-8")
@@ -176,8 +201,24 @@ class TokenSettings(aigpy.model.ModelBase):
         self._path_ = path
         txt = aigpy.file.getContent(self._path_)
         if len(txt) > 0:
-            data = json.loads(self.__decode__(txt))
-            aigpy.model.dictToModel(data, self)
+            try:
+                data = json.loads(self.__decode__(txt))
+                aigpy.model.dictToModel(data, self)
+                # --- MODIFICATION START: Ensure expiresAfter is numeric ---
+                if self.expiresAfter is not None:
+                    try:
+                        self.expiresAfter = int(self.expiresAfter)
+                    except (ValueError, TypeError):
+                        self.expiresAfter = 0
+                else:
+                    self.expiresAfter = 0
+        
+            except (json.JSONDecodeError, TypeError):
+                # If decoding or parsing fails, treat as empty
+                self.userid = None
+                self.accessToken = None
+                self.expiresAfter = 0
+
 
     def save(self):
         data = aigpy.model.modelToDict(self)

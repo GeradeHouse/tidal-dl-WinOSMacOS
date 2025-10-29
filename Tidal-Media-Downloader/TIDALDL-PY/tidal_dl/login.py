@@ -23,6 +23,7 @@ __all__ = [
     "loginByAccessToken",
     "getLoginUrl",
     "pollForToken",
+    "saveToken",  # --- MODIFICATION: Expose the new save function ---
 ]
 
 logger = logging.getLogger(__name__)
@@ -31,11 +32,29 @@ logger = logging.getLogger(__name__)
 def initialize_and_login():
     """
     Initializes settings, logging, and attempts to log in using stored configuration.
+    This is the single source of truth for setting the API key.
     """
     setup_logging()
     SETTINGS.read(getSettingsFilePath())
     TOKEN.read(getTokenPath())
-    TIDAL_API.apiKey = apiKey.getItem(SETTINGS.apiKeyIndex)
+    
+    # Prioritize the API key index stored in the token file.
+    if TOKEN.apiKeyIndex is not None:
+        logger.debug(f"Found apiKeyIndex '{TOKEN.apiKeyIndex}' in token file. Prioritizing it.")
+        SETTINGS.apiKeyIndex = TOKEN.apiKeyIndex
+    else:
+        logger.debug("No apiKeyIndex in token file. Using index from settings.json.")
+
+    logger.debug(f"Initial SETTINGS.apiKeyIndex: {SETTINGS.apiKeyIndex}")
+    
+    # Set the initial API key based on settings. This might fail, but getLoginUrl will handle retries.
+    selected = apiKey.getItem(SETTINGS.apiKeyIndex)
+    TIDAL_API.apiKey = selected
+    
+    logger.debug(
+        f"Initially using API key: index={SETTINGS.apiKeyIndex}, platform={selected.get('platform')}, "
+        f"formats={selected.get('formats')}, clientId={selected.get('clientId')}"
+    )
 
     if not loginByConfig():
         Printf.info("Could not log in with stored credentials.")
@@ -49,15 +68,23 @@ def loginByConfig():
     if TOKEN.accessToken is None:
         return False
 
-    # Check if token is expired
-    if time.time() > TOKEN.expiresAfter:
+    # --- MODIFICATION START: Ensure expiresAfter is a number ---
+    expires_after = 0
+    if TOKEN.expiresAfter is not None:
+        try:
+            expires_after = int(TOKEN.expiresAfter)
+        except (ValueError, TypeError):
+            expires_after = 0
+
+    if time.time() > expires_after:
         if TOKEN.refreshToken:
             Printf.info("Access token has expired, attempting to refresh...")
             try:
+                # The TIDAL_API.apiKey should already be set by initialize_and_login
                 if TIDAL_API.refreshAccessToken(TOKEN.refreshToken):
-                    TOKEN.accessToken = TIDAL_API.key.accessToken
-                    TOKEN.expiresAfter = int(time.time()) + TIDAL_API.key.expiresIn
-                    TOKEN.save()
+                    # --- MODIFICATION START: Use the new save function ---
+                    saveToken()
+            
                     Printf.success("Token refreshed successfully.")
                     return True
                 else:
@@ -72,7 +99,6 @@ def loginByConfig():
             )
             return False
 
-    # Login with current access token
     try:
         TIDAL_API.loginByAccessToken(TOKEN.accessToken, TOKEN.userid)
         Printf.success("Login successful using stored credentials.")
@@ -85,20 +111,77 @@ def loginByConfig():
 def getLoginUrl():
     """
     Gets the login URL for web-based authentication.
+    It iterates through all valid API keys until one succeeds.
     """
-    return TIDAL_API.getDeviceCode()
+    all_keys = apiKey.getItems()
+    
+    # Start with the currently configured index to try it first.
+    start_index = SETTINGS.apiKeyIndex
+    
+    # Create a reordered list of indices to try, starting with the configured one, then wrapping around.
+    ordered_indices = list(range(start_index, len(all_keys))) + list(range(0, start_index))
+
+    for index in ordered_indices:
+        key = all_keys[index]
+        
+        if key.get('valid') != 'True':
+            continue
+
+        Printf.info(f"Attempting login with API key: {key.get('platform', 'Unknown')}...")
+        TIDAL_API.apiKey = key
+
+        try:
+            login_url = TIDAL_API.getDeviceCode()
+            
+            Printf.success(f"Successfully using API key: {key.get('platform', 'Unknown')}")
+            
+            if index != SETTINGS.apiKeyIndex:
+                Printf.info(f"Updating preferred API key to index {index}.")
+                SETTINGS.apiKeyIndex = index
+                SETTINGS.save()
+                
+            return login_url
+            
+        except Exception as e:
+            logger.warning(f"API key '{key.get('platform', 'Unknown')}' failed: {e}")
+            Printf.warning(f"API key '{key.get('platform', 'Unknown')}' failed. Trying next...")
+            continue
+
+    raise RuntimeError("None of the available API keys were able to successfully authenticate. Please check your API key definitions.")
 
 
 def pollForToken():
     """
     Polls for the authentication token after the user logs in via the web.
     """
-    return TIDAL_API.checkAuthStatus()
+    try:
+        return TIDAL_API.checkAuthStatus()
+    except Exception as e:
+        raise e
+
+
+# --- MODIFICATION START: Create a dedicated save function ---
+def saveToken():
+    """
+    Saves the current session data from TIDAL_API.key to the TOKEN object and file.
+    """
+    try:
+        TOKEN.userid = TIDAL_API.key.userId
+        TOKEN.countryCode = TIDAL_API.key.countryCode
+        TOKEN.accessToken = TIDAL_API.key.accessToken
+        TOKEN.refreshToken = TIDAL_API.key.refreshToken
+        TOKEN.expiresAfter = int(time.time()) + TIDAL_API.key.expiresIn
+        TOKEN.apiKeyIndex = SETTINGS.apiKeyIndex
+        TOKEN.save()
+        logger.info("TIDAL token data saved successfully.")
+    except Exception as e:
+        logger.error(f"Failed to save TIDAL token: {e}", exc_info=True)
+        Printf.err(f"Could not save login session: {e}")
 
 
 def loginByWeb():
     """
-    Initiates a web-based login flow.
+    Initiates a web-based login flow. (Primarily for CLI)
     """
     Printf.info("Starting web login...")
     try:
@@ -108,21 +191,36 @@ def loginByWeb():
 
         timeout = TIDAL_API.key.authCheckTimeout
         interval = TIDAL_API.key.authCheckInterval
+        try:
+            timeout = int(timeout) if timeout is not None else 0
+        except Exception:
+            timeout = 0
+        try:
+            interval = int(interval) if interval is not None else 5
+        except Exception:
+            interval = 5
+
+        if timeout <= 0:
+            Printf.err("Device authorization did not initialize. This may indicate a problem with all available API keys.")
+            return False
+
         start_time = time.time()
 
         while time.time() - start_time < timeout:
-            status = pollForToken()
+            try:
+                status = pollForToken()
+            except Exception as e:
+                Printf.err(f"TIDAL auth status error: {e}")
+                return False
+
             if status == "SUCCESS":
-                TOKEN.userid = TIDAL_API.key.userId
-                TOKEN.countryCode = TIDAL_API.key.countryCode
-                TOKEN.accessToken = TIDAL_API.key.accessToken
-                TOKEN.refreshToken = TIDAL_API.key.refreshToken
-                TOKEN.expiresAfter = int(time.time()) + TIDAL_API.key.expiresIn
-                TOKEN.save()
+                # --- MODIFICATION START: Use the new save function ---
+                saveToken()
+        
                 Printf.success("Login successful!")
                 return True
             elif status == "PENDING":
-                time.sleep(interval)
+                time.sleep(max(1, interval))
             elif status == "SLOW_DOWN":
                 interval += 5
                 Printf.warning(f"Polling too frequently. Slowing down to {interval}s.")
@@ -153,12 +251,12 @@ def loginByAccessToken():
 
     try:
         TIDAL_API.loginByAccessToken(token)
-        TOKEN.userid = TIDAL_API.key.userId
-        TOKEN.countryCode = TIDAL_API.key.countryCode
-        TOKEN.accessToken = TIDAL_API.key.accessToken
-        TOKEN.refreshToken = None  # No refresh token with this method
-        TOKEN.expiresAfter = 0
-        TOKEN.save()
+        # --- MODIFICATION START: Use the new save function ---
+        # Manually set expiresAfter and refreshToken as they are unknown here
+        TIDAL_API.key.refreshToken = None
+        TIDAL_API.key.expiresIn = 0
+        saveToken()
+
         Printf.success("Login successful!")
         return True
     except Exception as e:

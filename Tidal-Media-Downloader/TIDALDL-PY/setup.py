@@ -15,6 +15,14 @@ setup(
         "lyricsgenius==3.0.1",
         "pydub==0.25.1",
         "PyQt6",
+        "qt-material==2.12",
+        "spotipy",
+        "moviepy",
+        "ffpyplayer",
+        "aiofiles",
+        "aiohttp",
+        "beautifulsoup4",
+        "pathvalidate"
     ],
     entry_points={
         "console_scripts": [

@@ -7,6 +7,7 @@ class AudioQuality(Enum):
     LOSSLESS = "LOSSLESS"  # Maps to FLAC CD Standard
     HI_RES_LOSSLESS = "HI_RES_LOSSLESS"  # Maps to FLAC Hi-Res
     HIGHEST = "HIGHEST"  # Maps to Highest Available
+    MP3 = "MP3"
 
 
 class Type(Enum):

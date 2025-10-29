@@ -47,7 +47,7 @@ class LeftPanelWidget(QWidget):
     def paintEvent(self, a0: Optional[QPaintEvent]):
         """Fills the widget background with the desired semi-transparent color."""
         painter = QPainter(self)
-        color = QColor(36, 36, 41, 217)
+        color = QColor("#1A1A1BF5")
         painter.fillRect(self.rect(), color)
 
 

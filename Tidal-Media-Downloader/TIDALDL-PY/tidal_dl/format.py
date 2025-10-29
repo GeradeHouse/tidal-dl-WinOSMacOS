@@ -10,6 +10,7 @@
 import re
 import datetime
 import logging
+import platform
 from typing import Optional, Union, Dict, Any
 
 import aigpy
@@ -31,7 +32,11 @@ def __fixPath__(name: Any) -> str:
         name = str(name)
     if name == "None":
         return ""
-    return aigpy.path.replaceLimitChar(name, '-').strip()
+    original_name = name
+    fixed_name = aigpy.path.replaceLimitChar(name, '-').strip()
+    if original_name != fixed_name:
+        logger.debug(f"__fixPath__: '{original_name}' -> '{fixed_name}'")
+    return fixed_name
 
 
 def __getYear__(releaseDate: Optional[str]) -> str:
@@ -89,11 +94,11 @@ def getAlbumPath(album: Album, artistName: str, albumArtistName: str, flag: str)
 
     albumName = __fixPath__(album.title)
     year = __getYear__(getattr(album, 'releaseDate', ''))
-    
+
     retpath = SETTINGS.albumFolderFormat or SETTINGS.getDefaultPathFormat(Type.Album)
 
-    retpath = retpath.replace(R"{ArtistName}", artistName)
-    retpath = retpath.replace(R"{AlbumArtistName}", albumArtistName)
+    retpath = retpath.replace(R"{ArtistName}", __fixPath__(artistName))
+    retpath = retpath.replace(R"{AlbumArtistName}", __fixPath__(albumArtistName))
     retpath = retpath.replace(R"{Flag}", flag)
     retpath = retpath.replace(R"{AlbumID}", str(getattr(album, 'id', '')))
     retpath = retpath.replace(R"{AlbumYear}", year)
@@ -109,7 +114,15 @@ def getAlbumPath(album: Album, artistName: str, albumArtistName: str, flag: str)
     record_type_name = getattr(getattr(album, 'type', None), 'name', '')
     retpath = retpath.replace(R"{RecordType}", record_type_name)
     retpath = retpath.replace(R"{None}", "")
-    
+
+    # Post-process to avoid leading '/' if artist empty and trailing '[]' if year empty
+    if not artistName.strip():
+        retpath = retpath.lstrip('/')
+    if year == '' and '[{AlbumYear}]' in retpath:
+        retpath = retpath.replace(' [{AlbumYear}]', '')
+
+    logger.debug(f"getAlbumPath result: artist='{artistName}', year='{year}', path='{retpath.strip()}'")
+
     return retpath.strip()
 
 
@@ -132,12 +145,13 @@ def getPlaylistPath(playlist: Union[Playlist, Dict[str, Any]]) -> Optional[str]:
     retpath = SETTINGS.playlistFolderFormat or SETTINGS.getDefaultPathFormat(Type.Playlist)
     retpath = retpath.replace(R"{PlaylistUUID}", playlistUUID)
     retpath = retpath.replace(R"{PlaylistName}", playlistName)
-    
+
     return retpath.strip()
 
 
 def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists: str, album: Optional[Album] = None, playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None) -> str:
     """Generates the full file path for a track based on context and settings."""
+    logger.debug(f"getTrackPath: artist='{artist}', artists='{artists}', track.title='{track.title if track else 'None'}'")
     if not track or not hasattr(track, 'title') or not stream:
         logging.error("Invalid track or stream object passed to getTrackPath.")
         return "Invalid_Track.m4a"
@@ -167,15 +181,15 @@ def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists
     if album_obj_for_filename and isinstance(album_obj_for_filename, Album):
         albumName = __fixPath__(getattr(album_obj_for_filename, 'title', ''))
         year = __getYear__(getattr(album_obj_for_filename, 'releaseDate', ''))
-    
+
     extension = __getExtension__(stream)
-    
+
     retpath = SETTINGS.trackFileFormat or SETTINGS.getDefaultPathFormat(Type.Track)
 
     # Replace all placeholders
     retpath = retpath.replace(R"{TrackNumber}", number_for_format)
-    retpath = retpath.replace(R"{ArtistName}", artist)
-    retpath = retpath.replace(R"{ArtistsName}", artists)
+    retpath = retpath.replace(R"{ArtistName}", __fixPath__(artist))
+    retpath = retpath.replace(R"{ArtistsName}", __fixPath__(artists))
     retpath = retpath.replace(R"{TrackTitle}", title)
     retpath = retpath.replace(R"{ExplicitFlag}", explicit)
     retpath = retpath.replace(R"{AlbumYear}", year)
@@ -193,5 +207,36 @@ def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists
     retpath = re.sub(r"\s*[-._]\s*$", "", retpath)
     retpath = re.sub(r"\s*([-._])\s*(\1\s*)+", r" \1 ", retpath)
     retpath = re.sub(r"\s*([-._])\s*", r" \1 ", retpath)
+
+    # --- START OF CORRECTION ---
+    # The platform check has been removed to make this logic universal.
+    # This will now correctly create subfolders on macOS, Linux, and Windows.
+    folder = ""
+    if album:
+        folder = f"Albums/{__fixPath__(album.title)}/"
+    elif playlist_context:
+        if isinstance(playlist_context, dict):
+            if playlist_context.get('type') == 'single':
+                folder = "Tracks/"
+            elif playlist_context.get('type') == 'spotify':
+                playlist_name = __fixPath__(playlist_context['data'].get('name', 'Unknown'))
+                playlist_uuid = playlist_context['data'].get('id', 'Unknown')
+                logger.debug(f"Spotify playlist: name='{playlist_name}', id='{playlist_uuid}'")
+                folder = f"Playlists/{playlist_name} [{playlist_uuid}]/"
+            else:
+                folder = f"Artists/{__fixPath__(artist)}/"
+        else:
+            # Tidal playlist
+            playlist_name = __fixPath__(getattr(playlist_context, 'title', 'Unknown'))
+            playlist_uuid = getattr(playlist_context, 'uuid', 'Unknown')
+            folder = f"Playlists/{playlist_name} [{playlist_uuid}]/"
+    else:
+        folder = f"Artists/{__fixPath__(artist)}/"
     
-    return f"{retpath.strip()}{extension}"
+    # Prepend the folder path to the filename path
+    retpath = folder + retpath
+    # --- END OF CORRECTION ---
+
+    final_path = f"{retpath.strip()}{extension}"
+    logger.debug(f"getTrackPath final path: '{final_path}'")
+    return final_path

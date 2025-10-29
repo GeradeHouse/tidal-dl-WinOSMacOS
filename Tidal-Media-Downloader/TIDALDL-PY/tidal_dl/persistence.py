@@ -1,3 +1,5 @@
+# --- START OF FILE persistence.py ---
+
 # -*- coding: utf-8 -*-
 """
 Manages the persistence of links between Spotify and Tidal tracks within playlists.
@@ -241,7 +243,7 @@ class LinkPersistenceManager:
         playlist_id: str,
         spotify_track_id: str,
         spotify_track_details: Dict[str, Any],
-        tidal_track_object: Track,
+        tidal_track_object: Optional[Track],
         candidates: Optional[List[Dict[str, Any]]] = None,
     ):
         """
@@ -256,7 +258,7 @@ class LinkPersistenceManager:
             playlist_id (str): The ID of the playlist.
             spotify_track_id (str): The Spotify track ID (used as key).
             spotify_track_details (Dict[str, Any]): Full dictionary of Spotify track details.
-            tidal_track_object (Track): The corresponding Tidal Track object.
+            tidal_track_object (Optional[Track]): The corresponding Tidal Track object, or None if no match.
             candidates (Optional[List[Dict[str, Any]]]): A list of candidate match dictionaries,
                                                each containing 'tidal_track' (Track object),
                                                'score', and 'mismatch_reasons'. Defaults to None.
@@ -283,18 +285,38 @@ class LinkPersistenceManager:
         tracks: Dict[str, Any] = links_data_dict["playlists"][playlist_id]["tracks"]
 
         # Serialize Tidal track object
-        serialized_tidal_track: Optional[Dict[str, Any]] = {}
-        try:
-            serialized_tidal_track = aigpy.model.modelToDict(tidal_track_object)
-        except Exception as e:
-            logger.error(
-                f"[Persistence] Failed to serialize main Tidal Track object {tidal_track_object.id}: {e}",
-                exc_info=True,
+        serialized_tidal_track: Optional[Dict[str, Any]] = None
+        if isinstance(tidal_track_object, Track):
+            try:
+                # Attempt to serialize the object to a dictionary
+                temp_serialized_track = aigpy.model.modelToDict(tidal_track_object)
+                
+                # Ensure the result is a dictionary before proceeding
+                if isinstance(temp_serialized_track, dict):
+                    serialized_tidal_track = temp_serialized_track
+                    # Add the __CLASS__ key for successful deserialization with dictToModel
+                    serialized_tidal_track["__CLASS__"] = "Track"
+                else:
+                    logger.error(
+                        f"Serialization of Track object {tidal_track_object.id} did not return a dictionary. Type: {type(temp_serialized_track)}"
+                    )
+                    serialized_tidal_track = None  # Ensure it remains None if serialization fails to produce a dict
+                    
+            except Exception as e:
+                logger.error(
+                    f"[Persistence] Failed to serialize main Tidal Track object {tidal_track_object.id}: {e}",
+                    exc_info=True,
+                )
+                # Fallback to None if serialization fails to prevent storing corrupt data
+                serialized_tidal_track = None
+        elif tidal_track_object is None:
+            # This is the case for "None of these match"
+            serialized_tidal_track = None
+        else:
+            logger.warning(
+                f"tidal_track_object passed to add_or_update_link is not a Track object, but {type(tidal_track_object)}. Cannot serialize."
             )
-            # Decide if we should proceed without tidal details or raise error
-            # For now, we'll store an empty dict for tidal_track_details if serialization fails
-            # to prevent complete loss of the link attempt.
-            # A more robust solution might involve a placeholder or specific error state.
+
 
         # Prepare link data with all details
         link_data: Dict[str, Any] = {
@@ -303,15 +325,12 @@ class LinkPersistenceManager:
             "timestamp": self._get_current_timestamp(),
         }
 
-        # +++ START MODIFICATION +++
         # Store the Tidal track ID directly for easier access and fallback
         if tidal_track_object and tidal_track_object.id is not None:
             link_data["tidal_track_id"] = str(tidal_track_object.id)
         else:
             # Ensure the key exists even if the ID is None, to maintain structure
             link_data["tidal_track_id"] = None
-        # +++ END MODIFICATION +++
-
         # Add candidates if provided and not empty
         if candidates:
             serializable_candidates = []
@@ -319,17 +338,28 @@ class LinkPersistenceManager:
                 track_obj = cand_dict.get("tidal_track")
                 if isinstance(track_obj, Track):
                     try:
-                        track_dict = aigpy.model.modelToDict(track_obj)
-                        serializable_candidates.append(
-                            {
-                                "tidal_track": track_dict,
-                                "score": cand_dict.get("score"),
-                                "mismatch_reasons": cand_dict.get("mismatch_reasons"),
-                            }
-                        )
+                        # Attempt to serialize the candidate track object
+                        cand_track_dict = aigpy.model.modelToDict(track_obj)
+                        # Ensure it's a dictionary before proceeding
+                        if isinstance(cand_track_dict, dict):
+                            # Add the __CLASS__ key for proper deserialization
+                            cand_track_dict["__CLASS__"] = "Track"
+                            serializable_candidates.append(
+                                {
+                                    "tidal_track": cand_track_dict,
+                                    "score": cand_dict.get("score"),
+                                    "mismatch_reasons": cand_dict.get(
+                                        "mismatch_reasons"
+                                    ),
+                                }
+                            )
+                        else:
+                            logger.error(
+                                f"Serialization of candidate Track object {track_obj.id} did not return a dictionary."
+                            )
                     except Exception as e:
                         logger.error(
-                            f"[Persistence] Failed to serialize Track object for candidate: {e}",
+                            f"[Persistence] Failed to serialize Track object for candidate {track_obj.id}: {e}",
                             exc_info=True,
                         )
                 else:
@@ -346,7 +376,7 @@ class LinkPersistenceManager:
                 )
 
         tracks[spotify_track_id] = link_data
-        tidal_id_for_log = tidal_track_object.id if tidal_track_object else "N/A"
+        tidal_id_for_log = tidal_track_object.id if tidal_track_object else "None"
         logger.info(
             f"[Persistence] Added/Updated detailed link{' with candidates' if 'candidates' in link_data else ''}: "
             f"{playlist_id} | {spotify_track_id} -> Tidal ID {tidal_id_for_log}"
@@ -449,3 +479,5 @@ class LinkPersistenceManager:
         else:
             # Log if the playlist to be removed was not found.
             logger.warning(f"Playlist {playlist_id} not found for removal.")
+
+# --- END OF FILE persistence.py ---

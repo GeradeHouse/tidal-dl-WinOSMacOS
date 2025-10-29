@@ -1,6 +1,6 @@
 import logging
-import sys  # Add sys import if not already present at the top of gui.py
-import threading  # Add threading import if not already present
+import sys
+import threading
 from typing import Optional, List, Any, Dict, Union, cast
 
 from PyQt6.QtWidgets import (
@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QSplitterHandle,
     QStackedLayout,
     QApplication,
-)  # Added QApplication
+)
 from PyQt6.QtCore import (
     Qt,
     QSize,
@@ -30,7 +30,7 @@ from PyQt6.QtCore import (
     pyqtSlot,
     QEvent,
     QRectF,
-)  # Added QRectF
+)
 from PyQt6.QtGui import (
     QPixmap,
     QPainter,
@@ -40,29 +40,24 @@ from PyQt6.QtGui import (
     QPaintEvent,
     QResizeEvent,
     QIcon,
-    QPainterPath,
 )
-from PyQt6 import QtWidgets, QtGui  # Added QtGui
+from PyQt6 import QtWidgets, QtGui
 
 from .gui_play_bar import PlayBarWidget
 from .gui_player_logic import PlayerLogic
-from ..model import Track, Playlist  # For type checking
+from ..tidal import Track, Playlist, AudioQuality, Type, TIDAL_API
 from ..printf import Printf
 from .. import paths
-from ..settings import SETTINGS  # Assuming SETTINGS is imported for quality combobox
-from ..tidal import AudioQuality, Type, TIDAL_API  # For quality and type enums
+from ..settings import SETTINGS
 from ..linking import LinkingWorker
 from ..persistence import LinkPersistenceManager
-from ..cover_cache import PlaylistCoverCache
+from .gui_cover_cache import CoverCache
 from ..spotify import SpotifyAPI
 
-
-# Import other necessary GUI components and handlers
 from .gui_settings import SettingsPage
 from .gui_table import SplitterTable
 from .gui_title_bar import CustomTitleBar
 from .gui_auth_handler import AuthHandler
-from .gui_playlist_tree_handler import PlaylistTreeHandler
 from .gui_search_handler import SearchHandler
 from .gui_table_handler import TableHandler
 from .gui_download import DownloadHandler
@@ -75,11 +70,8 @@ from .gui_utils import show_info_message, enableGui
 from .gui_resize_handler import ResizeHandler
 from .gui_event_handlers import MainViewEventHandlers
 
-# This import was added in a previous step and is necessary
-import logging  # Ensure logging is imported
-
-logger_gui = logging.getLogger(__name__)  # Use a distinct logger name if needed
-logger_gui.setLevel(logging.WARNING)  # Set specific level for this module
+logger_gui = logging.getLogger(__name__)
+logger_gui.setLevel(logging.WARNING)
 
 
 class MainView(QWidget):
@@ -89,23 +81,24 @@ class MainView(QWidget):
     s_spotifyLoginFinished = pyqtSignal(object)
     s_spotifyPlaylistsFetched = pyqtSignal(list)
     s_spotifyTracksFetched = pyqtSignal(str, list)
-    s_downloadEnd = pyqtSignal(str, bool, str, object)
     signal_actually_paused = pyqtSignal()
+    
 
-    download_active: bool = False
     auth_handler: AuthHandler
+
+    # Download state used by core functions; the handler orchestrates UI/state transitions.
+    download_active: bool = False
     download_paused: bool = False
     stop_requested: bool = False
     cancel_requested: bool = False
-    download_thread: Optional[threading.Thread] = None
     pause_event: threading.Event = threading.Event()
     stop_event: threading.Event = threading.Event()
+
     linking_active: bool = False
     linking_stop_event: threading.Event = threading.Event()
     linking_worker: Optional[LinkingWorker] = None
     linking_thread: Optional[QThread] = None
-    _original_s_array_before_ctx_dl: Optional[List[Any]] = None
-    _original_s_type_before_ctx_dl: Optional[Type] = None
+
     s_array: List[Any] = []
     s_type: Optional[Type] = None
     s_playlist: bool = False
@@ -126,33 +119,21 @@ class MainView(QWidget):
             self.background_pixmap = QPixmap()
 
         self.link_persistence_manager = LinkPersistenceManager()
-        self.playlist_cache_manager = PlaylistCoverCache()
+        self.cover_cache = CoverCache()
         self.spotify_api = SpotifyAPI()
+        self.player_logic = PlayerLogic(TIDAL_API, self)
 
-        # Pass the main TIDAL_API instance to PlayerLogic
-        self.player_logic = PlayerLogic(TIDAL_API, self)  # MODIFIED HERE
-
-        # --- Crucial Main Window Setup ---
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAutoFillBackground(
-            False
-        )  # Important for custom painting / transparent background
+        self.setAutoFillBackground(False)
 
-        # +++ Add Debug Logs for MainView +++
-        logger_gui.debug(f"MainView windowFlags: {self.windowFlags()}")
-        logger_gui.debug(
-            f"MainView WA_TranslucentBackground: {self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)}"
-        )
-        logger_gui.debug(f"MainView autoFillBackground: {self.autoFillBackground()}")
-        # +++ End Debug Logs +++
+        self.initView()
 
-        self.initView()  # UI setup (this will set the stylesheet further down)
-
+        from .gui_playlist_tree_handler import PlaylistTreeHandler
         self.auth_handler = AuthHandler(self.spotify_api, parent=self)
         self.settingsPage = SettingsPage(auth_handler=self.auth_handler, parent=self)
         self.tree_handler = PlaylistTreeHandler(
-            self.playlist_tree_widget, self.playlist_cache_manager, parent=self
+            self.playlist_tree_widget, self.cover_cache, parent=self
         )
         self.table_handler = TableHandler(
             self.tableWidget, self.link_persistence_manager, None, parent=self
@@ -186,7 +167,7 @@ class MainView(QWidget):
         self.stackedLayout.addWidget(self.settingsPage)
 
         self.setMinimumSize(1000, 600)
-        self.resize(1500, 800)  # Initial size
+        self.resize(1500, 800)
         self.setWindowTitle("TIDAL-DL")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
@@ -204,12 +185,18 @@ class MainView(QWidget):
             logger_gui.error(f"Error setting initial quality combobox values: {e}")
 
         self._connect_handler_signals()
+
+        # --- Start initial login checks after the UI is fully set up ---
+        self.auth_handler.check_initial_logins()
+
+        app = QApplication.instance()
+        if app:
+            app.aboutToQuit.connect(self.cover_cache._save_cache)
+            logger_gui.debug(
+                "Connected app aboutToQuit signal to cover_cache._save_cache."
+            )
+
         logger_gui.debug("MainView initialization complete.")
-        # +++ Add Debug Log for MainView Stylesheet AFTER it's set in initView +++
-        logger_gui.debug(
-            f"MainView effective stylesheet (after initView): {self.styleSheet()}"
-        )
-        # +++ End Debug Log +++
 
     def initView(self):
         self.title_bar = CustomTitleBar(self)
@@ -234,7 +221,13 @@ class MainView(QWidget):
         self.c_btnDownload = QPushButton("Download Selected")
         self.c_btnPauseResume = QPushButton("Pause")
         self.c_btnStop = QPushButton("Stop")
-        transparent_action_button_style = """QPushButton { background-color: transparent; color: white; padding: 5px 10px; border: 0px solid #555; border-radius: 3px; min-height: 20px; } QPushButton:hover { background-color: rgba(255, 255, 255, 0.1); } QPushButton:pressed { background-color: rgba(255, 255, 255, 0.15); } QPushButton:disabled { background-color: transparent; color: #777; border: 1px solid #444; }"""
+        transparent_action_button_style = (
+            "QPushButton { background-color: transparent; color: white; padding: 5px 10px; "
+            "border: 0px solid #555; border-radius: 3px; min-height: 20px; } "
+            "QPushButton:hover { background-color: rgba(255, 255, 255, 0.1); } "
+            "QPushButton:pressed { background-color: rgba(255, 255, 255, 0.15); } "
+            "QPushButton:disabled { background-color: transparent; color: #777; border: 1px solid #444; }"
+        )
         self.c_btnDownload.setStyleSheet(transparent_action_button_style)
         self.c_btnPauseResume.setStyleSheet(transparent_action_button_style)
         self.c_btnStop.setStyleSheet(transparent_action_button_style)
@@ -266,7 +259,10 @@ class MainView(QWidget):
 
         self.toggleLogButton = QPushButton("Show Log")
         self.toggleLogButton.setStyleSheet(
-            """QPushButton { background-color: transparent; color: white; padding: 4px 8px; border: 0px solid #555; border-radius: 3px; min-height: 20px; } QPushButton:hover { background-color: rgba(255, 255, 255, 0.1); } QPushButton:pressed { background-color: rgba(255, 255, 255, 0.15); }"""
+            "QPushButton { background-color: transparent; color: white; padding: 4px 8px; "
+            "border: 0px solid #555; border-radius: 3px; min-height: 20px; } "
+            "QPushButton:hover { background-color: rgba(255, 255, 255, 0.1); } "
+            "QPushButton:pressed { background-color: rgba(255, 255, 255, 0.15); }"
         )
 
         self.line2Grid = QHBoxLayout()
@@ -310,12 +306,10 @@ class MainView(QWidget):
                     dot_offset = 4
                     num_dots = 3
                     start_x = r.center().x() - ((num_dots - 1) * dot_offset) / 2
-                    [
+                    for i in range(num_dots):
                         p.drawEllipse(
                             QPoint(int(start_x + i * dot_offset), int(y)), 1, 1
                         )
-                        for i in range(num_dots)
-                    ]
                 else:
                     super().paintEvent(a0)
 
@@ -357,7 +351,8 @@ class MainView(QWidget):
         mainSplitter.setHandleWidth(7)
         mainSplitter.setSizes([325, 1500])
         mainSplitter.setStyleSheet(
-            "QSplitter { background-color: transparent; } QSplitter::handle { background-color: transparent; border: none; }"
+            "QSplitter { background-color: transparent; } "
+            "QSplitter::handle { background-color: transparent; border: none; }"
         )
 
         self.mainPage = QWidget()
@@ -379,21 +374,14 @@ class MainView(QWidget):
         main_v_layout.addWidget(self.title_bar)
         main_v_layout.addLayout(self.stackedLayout)
 
-        # --- Play Bar Integration ---
         self.play_bar_widget = PlayBarWidget(self)
-        self.play_bar_widget.setFixedHeight(100)  # Increased height
+        self.play_bar_widget.setFixedHeight(100)
         main_v_layout.addWidget(self.play_bar_widget)
-        # --- End Play Bar Integration ---
 
         top_level_layout = QVBoxLayout(self)
         top_level_layout.setContentsMargins(0, 0, 0, 0)
         top_level_layout.addWidget(main_container_widget)
 
-        # Corrected indentation for the following lines:
-        # Stylesheet for MainView
-        # The background-color here might be ignored by paintEvent when WA_TranslucentBackground is True.
-        # We will explicitly paint the background in paintEvent.
-        # The border-radius is still important for QPainterPath clipping.
         self.setStyleSheet(
             """
             MainView {
@@ -401,18 +389,12 @@ class MainView(QWidget):
                 border-top-right-radius: 10px;
                 border-bottom-left-radius: 10px;
                 border-bottom-right-radius: 10px;
-                
-                /* Set to transparent; paintEvent will handle the actual fill */
                 background-color: transparent;
             }
         """
         )
-        logger_gui.debug(
-            "initView UI setup complete. MainView stylesheet set (bg transparent, paintEvent will draw red)."
-        )
 
     def _connect_handler_signals(self):
-        logger_gui.debug("Connecting handler signals...")
         self.auth_handler.tidalLoginSuccess.connect(
             self.tree_handler.refreshTidalPlaylists
         )
@@ -426,8 +408,6 @@ class MainView(QWidget):
         self.search_bar.liveSearchRequested.connect(
             self.search_handler.perform_live_search
         )
-        # OLD, WRONG connection: self.search_bar.resultSelected.connect(self.table_handler.populate_search_results)
-        # NEW, CORRECT connection: Route the signal to the SearchHandler to initiate the fetch thread
         self.search_bar.resultSelected.connect(
             self.search_handler._on_result_item_clicked
         )
@@ -459,10 +439,10 @@ class MainView(QWidget):
             self.spotify_gui_handler.onSpotifyLoginFinished
         )
         self.s_spotifyPlaylistsFetched.connect(
-            self.spotify_gui_handler.onSpotifyPlaylistsFetched
+            self.tree_handler.populate_spotify_playlists
         )
         self.s_spotifyTracksFetched.connect(
-            self.spotify_gui_handler.onSpotifyTracksFetched
+            self.table_handler.populate_spotify_tracks
         )
         self.settingsPage.spotifyCredentialsUpdated.connect(
             lambda: self.auth_handler.trigger_spotify_login(check_cache_only=False)
@@ -487,19 +467,20 @@ class MainView(QWidget):
         )
         self.tableWidget.itemDoubleClicked.connect(
             self._on_table_item_double_clicked
-        )  # Connect table double click
+        )
         self.settingsPage.settingsClosedWithoutSaving.connect(
             self.navigation_handler.show_main_menu
         )
         self.settingsPage.settingsSavedAndClosed.connect(
             self.navigation_handler.show_main_menu
         )
-        self.s_downloadEnd.connect(self.download_handler.downloadEnd)  # type: ignore
-        self.signal_actually_paused.connect(self.download_handler.onActuallyPaused)
+        self.settingsPage.playlistDisplaySettingsChanged.connect(self.tree_handler.onPlaylistDisplaySettingsChanged)
         self.toggleLogButton.clicked.connect(self.toggle_log_console)
         self.title_bar.s_showSettings.connect(self.navigation_handler.show_settings)
 
-        # --- Connect PlayerLogic signals to PlayBarWidget slots ---
+        # Connect the fontSizeChanged signal from settings page to reapply stylesheet
+        self.settingsPage.fontSizeChanged.connect(self.on_font_size_changed)
+
         self.player_logic.trackChanged.connect(self._on_player_track_changed)
         self.player_logic.stateChanged.connect(
             self.play_bar_widget.update_play_pause_button
@@ -512,7 +493,6 @@ class MainView(QWidget):
             self.play_bar_widget.update_shuffle_repeat_state
         )
 
-        # --- Connect PlayBarWidget signals to PlayerLogic slots ---
         self.play_bar_widget.playPauseClicked.connect(
             self.player_logic.toggle_play_pause
         )
@@ -526,13 +506,8 @@ class MainView(QWidget):
         self.play_bar_widget.volumeChanged.connect(self.player_logic.set_volume)
         self.play_bar_widget.muteClicked.connect(self.player_logic.toggle_mute)
 
-        logger_gui.debug("Signal connections established.")
-
-    # --- New methods for Play Bar interaction ---
-    @pyqtSlot(QtWidgets.QTableWidgetItem)  # Use QtWidgets.QTableWidgetItem
-    def _on_table_item_double_clicked(
-        self, item: QtWidgets.QTableWidgetItem
-    ):  # Use QtWidgets.QTableWidgetItem
+    @pyqtSlot(QtWidgets.QTableWidgetItem)
+    def _on_table_item_double_clicked(self, item: QtWidgets.QTableWidgetItem):
         if not item:
             return
         row = item.row()
@@ -547,9 +522,6 @@ class MainView(QWidget):
             track_to_play = item_data
         elif isinstance(item_data, dict) and item_data.get("type") == "spotify_track":
             spotify_info = item_data.get("data")
-            # --- START MODIFICATION ---
-            # Add 'cached_linked_full' and 'cached_linked_id_fetched' to the list of valid statuses
-            # Also, ensure 'tidal_track' key exists before checking its type.
             valid_link_statuses = [
                 "cached_linked",
                 "found",
@@ -564,31 +536,18 @@ class MainView(QWidget):
                 and item_data.get("link_status") in valid_link_statuses
                 and "tidal_track" in item_data
                 and isinstance(item_data.get("tidal_track"), Track)
-            ):  # Check 'tidal_track' exists and is Track
+            ):
                 track_to_play = item_data.get("tidal_track")
-            # --- END MODIFICATION ---
-            elif spotify_info:  # Check spotify_info is not None
-                logger_gui.info(
-                    f"Spotify track '{spotify_info.get('name', 'Unknown')}' is not linked or Tidal track object missing. Cannot play. Link Status: {item_data.get('link_status')}, Tidal Track Type: {type(item_data.get('tidal_track'))}"
-                )
-                return
-            else:  # spotify_info was None
-                logger_gui.info("Spotify track data is missing. Cannot play.")
+            else:
                 return
 
         if track_to_play:
-            logger_gui.info(
-                f"Double-clicked on Tidal track: {track_to_play.title}. Requesting playback."
-            )
-            # Ensure track_to_play.artists is a list and not None before iterating
             artist_names = "Unknown Artist"
             if track_to_play.artists and isinstance(track_to_play.artists, list):
                 artist_names = ", ".join(
                     [a.name for a in track_to_play.artists if hasattr(a, "name")]
                 )
-            elif hasattr(
-                track_to_play.artists, "name"
-            ):  # Handle single artist object case
+            elif hasattr(track_to_play.artists, "name"):
                 artist_names = track_to_play.artists.name
 
             player_track_info = {
@@ -596,9 +555,7 @@ class MainView(QWidget):
                 "title": track_to_play.title,
                 "artist": artist_names,
                 "album_title": (
-                    track_to_play.album.title
-                    if track_to_play.album
-                    else "Unknown Album"
+                    track_to_play.album.title if track_to_play.album else "Unknown Album"
                 ),
                 "duration_ms": (
                     track_to_play.duration * 1000 if track_to_play.duration else 0
@@ -608,12 +565,7 @@ class MainView(QWidget):
                 ),
             }
             self.player_logic.play_track(player_track_info)
-        elif (
-            spotify_info
-        ):  # spotify_info is guaranteed to be non-None here due to earlier checks
-            logger_gui.info(
-                f"Double-clicked on unlinked Spotify track: {spotify_info.get('name', 'Unknown')}"
-            )
+        elif spotify_info:
             self.play_bar_widget.set_track_info(
                 f"[Spotify] {spotify_info.get('name', 'Unknown')}",
                 ", ".join(spotify_info.get("artists", ["Unknown Artist"])),
@@ -628,9 +580,7 @@ class MainView(QWidget):
         pixmap = None
         if album_art_id:
             try:
-                cover_bytes = TIDAL_API.getCoverData(
-                    album_art_id, "80", "80"
-                )  # Request 80x80
+                cover_bytes = TIDAL_API.getCoverData(album_art_id, "80", "80")
                 if cover_bytes:
                     temp_pixmap = QPixmap()
                     if temp_pixmap.loadFromData(cover_bytes):
@@ -641,29 +591,25 @@ class MainView(QWidget):
                 )
         self.play_bar_widget.set_track_info(title, artist, pixmap)
 
-    def paintEvent(self, a0: Optional[QPaintEvent]):  # Corrected parameter name to a0
+    @pyqtSlot(int)
+    def on_font_size_changed(self, size: int):
+        """Reapplies the global stylesheet with the new font size."""
+        from . import gui_app_setup
+        app = QApplication.instance()
+        if app and isinstance(app, QApplication):
+            logger_gui.info(f"Applying new font size from settings: {size}pt")
+            gui_app_setup.apply_global_stylesheet(app, size)
+        else:
+            logger_gui.warning("Could not get QApplication instance to apply new font size.")
+
+    def paintEvent(self, a0: Optional[QPaintEvent]):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # Define the path for the rounded rectangle of MainView
-        # This path will be used for clipping.
+        # Rounded clipping
         path = QtGui.QPainterPath()
-        # The radius should match what you want for the overall window shape.
-        # If CustomTitleBar has 10px top radius, MainView should also have 10px top radius.
-        path.addRoundedRect(QRectF(self.rect()), 10, 10)  # 10px radius for all corners
-
-        # Clip the painter to this rounded path.
-        # All subsequent drawing operations will be confined to this shape.
+        path.addRoundedRect(QRectF(self.rect()), 10, 10)
         painter.setClipPath(path)
-
-        # 1. Explicitly paint the base background color (#1E1E1E)
         painter.fillRect(self.rect(), QColor("#1E1E1E"))
-        logger_gui.debug(
-            "MainView paintEvent: Filled with #1E1E1E, clipped to rounded rect."
-        )
-
-        # 2. Re-enable pixmap drawing. It will be drawn on top of the #1E1E1E fill
-        #    and will also be clipped by the same path.
         if hasattr(self, "background_pixmap") and not self.background_pixmap.isNull():
             target_rect = self.rect()
             scaled_pixmap = self.background_pixmap.scaled(
@@ -671,20 +617,9 @@ class MainView(QWidget):
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation,
             )
-
             x = (target_rect.width() - scaled_pixmap.width()) / 2
             y = (target_rect.height() - scaled_pixmap.height()) / 2
-
             painter.drawPixmap(QPoint(int(x), int(y)), scaled_pixmap)
-            logger_gui.debug(
-                "MainView paintEvent: Drew background_pixmap, clipped to rounded rect."
-            )
-        else:
-            logger_gui.debug(
-                "MainView paintEvent: background_pixmap not available or is null."
-            )
-
-        # No super().paintEvent(a0) call is needed here.
 
     def resizeEvent(self, a0: Optional[QResizeEvent]):
         self.update()
@@ -699,15 +634,15 @@ class MainView(QWidget):
         if not self.event_handler.handle_keyPressEvent(a0):
             super(MainView, self).keyPressEvent(a0)
 
-    def mousePressEvent(self, a0: Optional[QMouseEvent]):  # Corrected type hint
+    def mousePressEvent(self, a0: Optional[QMouseEvent]):
         if not self.event_handler.handle_mousePressEvent(a0):
             super(MainView, self).mousePressEvent(a0)
 
-    def mouseMoveEvent(self, a0: Optional[QMouseEvent]):  # Corrected type hint
+    def mouseMoveEvent(self, a0: Optional[QMouseEvent]):
         if not self.event_handler.handle_mouseMoveEvent(a0):
             super(MainView, self).mouseMoveEvent(a0)
 
-    def mouseReleaseEvent(self, a0: Optional[QMouseEvent]):  # Corrected type hint
+    def mouseReleaseEvent(self, a0: Optional[QMouseEvent]):
         if not self.event_handler.handle_mouseReleaseEvent(a0):
             super(MainView, self).mouseReleaseEvent(a0)
 
@@ -717,7 +652,6 @@ class MainView(QWidget):
             self.c_printTextEdit.setVisible(False)
             self.toggleLogButton.setText("Show Log")
             if hasattr(self, "verticalSplitter"):
-                self.last_splitter_sizes = self.verticalSplitter.sizes()
                 current_sizes = self.verticalSplitter.sizes()
                 if len(current_sizes) == 2:
                     self.verticalSplitter.setSizes(
@@ -727,34 +661,13 @@ class MainView(QWidget):
             self.c_printTextEdit.setVisible(True)
             self.toggleLogButton.setText("Hide Log")
             if hasattr(self, "verticalSplitter"):
-                if (
-                    hasattr(self, "last_splitter_sizes")
-                    and isinstance(self.last_splitter_sizes, list)
-                    and len(self.last_splitter_sizes) == 2
-                    and self.last_splitter_sizes[1] > 0
-                ):
-                    self.verticalSplitter.setSizes(self.last_splitter_sizes)
+                total_height = self.verticalSplitter.height()
+                if total_height > 0:
+                    self.verticalSplitter.setSizes(
+                        [int(total_height * 0.75), int(total_height * 0.25)]
+                    )
                 else:
-                    total_height = self.verticalSplitter.height()
-                    if total_height > 0:
-                        self.verticalSplitter.setSizes(
-                            [int(total_height * 0.75), int(total_height * 0.25)]
-                        )
-                    else:
-                        self.verticalSplitter.setSizes([500, 150])
-            if hasattr(self, "verticalSplitter"):
-                widget_0 = self.verticalSplitter.widget(0)
-                widget_1 = self.verticalSplitter.widget(1)
-                if widget_0:
-                    widget_0.updateGeometry()
-                if widget_1:
-                    widget_1.updateGeometry()
-                self.verticalSplitter.updateGeometry()
-                parent_widget = self.verticalSplitter.parentWidget()
-                if parent_widget:
-                    parent_layout = parent_widget.layout()
-                    if parent_layout:
-                        parent_layout.activate()
+                    self.verticalSplitter.setSizes([500, 150])
 
     @pyqtSlot(str)
     def _trigger_search(self, query: str):
@@ -803,24 +716,49 @@ class MainView(QWidget):
             self.linking_gui_handler._handle_link_button_click
         )
         self.linking_gui_handler.update_link_button_state()
+        
+    def closeEvent(self, a0: Optional[QtGui.QCloseEvent]):
+        """
+        Handles the window close event to ensure graceful shutdown of background threads.
+        """
+        logger_gui.info("Close event triggered. Shutting down background threads...")
+
+        # 1. Signal all workers to stop using their existing stop mechanisms.
+        # It's safe to call these even if no download/linking is active.
+        self.download_handler.onStopClicked()
+        self.linking_gui_handler.onStopLinkingClicked()
+
+        # 2. Specifically wait for the linking QThread to finish.
+        # The download handler uses a ThreadPoolExecutor which is harder to wait for
+        # from here, but its worker threads check the stop_event frequently.
+        if self.linking_thread and self.linking_thread.isRunning():
+            logger_gui.info("Waiting for linking thread to finish...")
+            self.linking_thread.quit()  # Asks the thread's event loop to exit
+            
+            # Wait for the thread to actually terminate, with a timeout (e.g., 3 seconds)
+            # This is the most critical step to prevent the error message.
+            if not self.linking_thread.wait(3000):
+                logger_gui.warning("Linking thread did not terminate in time. Forcing termination.")
+                self.linking_thread.terminate() # Use as a last resort
+
+        logger_gui.info("All background tasks signaled to stop. Proceeding with shutdown.")
+        
+        # 3. Accept the event to allow the window to close.
+        if a0:
+            a0.accept()
 
 
 def main():
     """The main entry point for the GUI application."""
-    from .gui_app_setup import (
-        load_initial_settings_and_token,
-        register_global_exception_handler,
-        start_gui_application,
-    )
+    from . import gui_app_setup
 
-    load_initial_settings_and_token()
-    register_global_exception_handler()
+    gui_app_setup.initialize_settings_and_token()
+    gui_app_setup.setup_global_exception_handler()
     if enableGui():
-        return start_gui_application(MainView)
+        return gui_app_setup.start_gui()
     else:
         message = "GUI dependencies (PyQt6) are not installed or found. Cannot start graphical interface."
         logger_gui.error(message)
-        # Use a print statement that works in bundled apps without a console
         try:
             from PyQt6.QtWidgets import QMessageBox
 
@@ -833,7 +771,6 @@ def main():
             msg_box.setWindowTitle("Error")
             msg_box.exec()
         except ImportError:
-            # Fallback to console if PyQt6 itself is missing
             print(message, file=sys.stderr)
             print(
                 "\nTo use the GUI, please install the required packages:",
@@ -844,6 +781,5 @@ def main():
         return 1
 
 
-# This block allows the script to be run directly for testing/development
 if __name__ == "__main__":
     sys.exit(main())

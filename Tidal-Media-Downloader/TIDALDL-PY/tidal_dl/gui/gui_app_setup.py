@@ -1,5 +1,3 @@
-# --- START OF FILE gui_app_setup.py ---
-
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 """
@@ -7,829 +5,414 @@
 @Time    :   2025/04/15
 @Author  :   GeradeHouse
 @Version :   1.0
-@Desc    :   Handles application-level setup for the Tidal Media Downloader GUI.
+@Contact :   gerade.house@gmail.com
+@Desc    :   Handles the setup, initialization, and global exception handling for the GUI application.
 """
-
 import sys
-
-print("DEBUG_TRACE: gui_app_setup.py - Top level execution start", file=sys.stderr)
-
 import os
-import time
 import logging
 import traceback
-import importlib.util
-import types
-from types import TracebackType
-from typing import cast, Type, Set, Optional  # Added Optional
+import time
+from typing import Optional, Any, cast, TYPE_CHECKING
 
-
-# --- Logging Setup (Call ASAP) ---
-from ..logging_config import setup_logging
-
-setup_logging()
-print("DEBUG_TRACE: gui_app_setup.py - About to call setup_logging()", file=sys.stderr)
-logging.info("Application starting...")  # Log *after* setup
-print("DEBUG_TRACE: gui_app_setup.py - setup_logging() finished", file=sys.stderr)
-# --- End Logging Setup ---
-
-
-# Import necessary Qt components
-from PyQt6.QtWidgets import QApplication, QMessageBox, QTextEdit
-from PyQt6.QtGui import QFont, QFontDatabase
-from PyQt6 import QtWidgets
+from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, pyqtSlot, Qt
+from PyQt6.QtGui import QIcon
 
 # Import project components
-import aigpy  # type: ignore
-from ..settings import SETTINGS, TOKEN
-from .gui import MainView
+from ..paths import getProfilePath, getSettingsFilePath, getTokenPath, resource_path
+from ..settings import SETTINGS
+from ..login import TOKEN, initialize_and_login
+from ..logging_config import setup_logging as setup_logging_file
 
-# Import paths module to get resource_path function
-from .. import paths  # Import the paths module itself
-from ..paths import (
-    getSettingsFilePath,
-    getTokenPath,
-)  # Keep specific imports if needed elsewhere
-from .gui_utils import EmittingStream, append_text_to_output  # Import utility
-from .gui import MainView  # Moved from start_gui_application
+if TYPE_CHECKING:
+    from .gui import MainView
 
+# Initialize logger at the module level to prevent "possibly unbound" errors
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)  # Set specific level for this module
 
-# ########## GLOBAL EXCEPTION HANDLING ##########
+# --- Global Exception Handling ---
 
-
-def handle_exception(
-    exc_type: Type[BaseException],
-    exc_value: BaseException,
-    exc_traceback: Optional[TracebackType],  # Allow None for traceback
+def show_critical_error_dialog(
+    title: str, text: str, informative_text: str, detailed_text: str
 ) -> None:
-    """
-    Global exception handler to catch unhandled errors, log them,
-    and attempt to show a message to the user before potentially exiting.
-    """
-    # Ignore KeyboardInterrupt to allow normal Ctrl+C termination in console.
-    if issubclass(exc_type, KeyboardInterrupt):
-        sys.__excepthook__(exc_type, exc_value, exc_traceback)  # Call default handler
-        return
+    """Displays a critical error message box."""
+    msg_box = QMessageBox()
+    msg_box.setIcon(QMessageBox.Icon.Critical)
+    msg_box.setText(f"<b>{title}</b>")
+    msg_box.setInformativeText(text)
+    msg_box.setDetailedText(detailed_text)
+    msg_box.setWindowTitle("Critical Error")
+    msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+    msg_box.exec()
 
-    # Format the traceback into a string.
-    error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
 
-    # Log the critical error using the logger module.
-    logger.critical(
-        f"Unhandled exception caught by global handler:\n"
-        f"Type: {exc_type.__name__}\n"
-        f"Value: {exc_value}\n"
-        f"Traceback:\n{error_msg}"
+def global_exception_handler(exctype: Any, value: Any, tb: Any) -> None:
+    """
+    Custom global exception handler to catch and log all unhandled exceptions.
+    """
+    # Format the traceback
+    traceback_details = "".join(traceback.format_exception(exctype, value, tb))
+
+    # Log the critical error
+    log_message = f"Unhandled exception caught by global handler:\nType: {exctype.__name__}\nValue: {value}\nTraceback:\n{traceback_details}"
+    logger.critical(log_message)
+
+    # Prepare user-friendly messages
+    error_title = "A critical error occurred:"
+    error_text = f"<b>{exctype.__name__}:</b> {value}"
+    informative_text = "The application might need to close. Please check the console output or 'gui_error.log' for details."
+
+    # Show the dialog
+    show_critical_error_dialog(
+        error_title, error_text, informative_text, traceback_details
     )
 
-    # Also attempt to print directly to stderr in case logger is broken.
-    print(
-        f"CRITICAL ERROR (GLOBAL HANDLER):\n"
-        f"Type: {exc_type.__name__}\n"
-        f"Value: {exc_value}\n"
-        f"Traceback:\n{error_msg}",
-        file=sys.__stderr__,
-    )
-
-    # Try to write the error to a dedicated log file.
+    # Also log to a dedicated file for easier debugging
     try:
-        # Use profile path for error log for better portability/permissions
-        error_log_path = os.path.join(paths.getProfilePath(), "gui_error.log")
-        with open(error_log_path, "a", encoding="utf-8") as f:
-            f.write(
-                f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} (Unhandled Exception) ---\n"
-            )
-            f.write(error_msg + "\n")
+        log_path = os.path.join(getProfilePath(), "gui_error.log")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"--- Log Entry: {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+            f.write(log_message)
+            f.write("\n\n")
     except Exception as log_e:
-        # If logger to file fails, print another message to stderr.
-        print(f"ERROR: Could not write to gui_error.log: {log_e}", file=sys.__stderr__)
+        logger.error(f"Failed to write to emergency log file: {log_e}")
 
-    # Attempt to show a critical error message box to the user.
-    try:
-        app = QApplication.instance()  # Get the current application instance
-        if app:
-            # Create and show a message box.
-            error_dialog = QMessageBox()
-            error_dialog.setIcon(QMessageBox.Icon.Critical)
-            error_dialog.setWindowTitle("Unhandled Application Error")
-            error_dialog.setText(f"A critical error occurred:\n\n{exc_value}")
-            error_dialog.setInformativeText(
-                "The application might need to close. Please check the console output or 'gui_error.log' for details."
-            )
-            error_dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
-            error_dialog.exec()
-            # Optionally, attempt a graceful shutdown after user acknowledges.
-            # app.quit()
-    except Exception as msg_e:
-        print(
-            f"ERROR: Could not display error message box: {msg_e}", file=sys.__stderr__
-        )
+    # Cleanly exit the application
+    app = QApplication.instance()
+    if app:
+        app.quit()
 
 
-print(
-    "DEBUG_TRACE: gui_app_setup.py - About to call load_initial_settings_and_token()",
-    file=sys.stderr,
-)
+def setup_global_exception_handler() -> None:
+    """Sets the custom global exception handler."""
+    sys.excepthook = global_exception_handler
+    logger.info("Global exception handler set.")
 
 
-def register_global_exception_handler() -> None:
-    """Assigns the custom global exception handler."""
-    sys.excepthook = handle_exception
-    logger.info("Global exception handler registered.")
+# --- Application Initialization ---
 
-
-# ########## APPLICATION SETUP FUNCTIONS ##########
-
-
-def load_initial_settings_and_token() -> None:
-    """Loads application settings and token information from files."""
-    try:
-        SETTINGS.read(getSettingsFilePath())
-        logger.info(f"Settings loaded from: {getSettingsFilePath()}")
-    except Exception as e:
-        logger.error(f"Failed to load settings: {e}")
-    print(
-        "DEBUG_TRACE: gui_app_setup.py - load_initial_settings_and_token() finished",
-        file=sys.stderr,
-    )
-    # Continue with default settings if loading fails
-
-    try:
-        TOKEN.read(getTokenPath())
-        logger.info(f"Token loaded from: {getTokenPath()}")
-    except Exception as e:
-        logger.error(f"Failed to load token: {e}")
-        # Application might still function if web login is used.
-
-
-def create_application() -> QApplication:
-    """Creates the QApplication instance."""
-    # Disable color codes in console output when GUI is active (handled by Printf).
-    aigpy.cmd.enableColor(False)  # type: ignore
-    # The QApplication instance manages the GUI application's control flow and settings.
-    app = QApplication(sys.argv)  # Pass command line arguments to Qt
-    return app
-
-
-def make_progress_bar_style(
-    font_size: int = 12,
-    bar_height: int = 20,
-    # chunk_alpha parameter is no longer needed
-) -> str:
+def initialize_settings_and_token() -> None:
     """
-    Returns a QSS string for a QProgressBar with:
-    • text at `font_size`px
-    • fixed height `bar_height`px
-    • solid chunk fill color.
+    Initializes global SETTINGS and TOKEN objects by reading from their files.
+    This must be called before any other part of the application uses them.
     """
-    # Define the solid color for the chunk
-    chunk_solid_color = "#20867a"  # Your desired darker color
+    logger.debug("Initializing SETTINGS and TOKEN...")
+    settings_path = getSettingsFilePath()
+    token_path = getTokenPath()
+    logger.debug(f"Settings path: {settings_path}")
+    logger.debug(f"Token path: {token_path}")
+    SETTINGS.read(settings_path)
+    TOKEN.read(token_path)
+    logger.debug("SETTINGS and TOKEN initialized.")
 
-    return f"""
-    QProgressBar {{
-        /* force fixed height */
-        min-height: {bar_height}px;
-        max-height: {bar_height}px;
 
-        border: 1px solid #444444; /* Keep a subtle border for the bar itself */
-        border-radius: 3px;
-
-        /* center & show the percentage text */
-        text-align: center;
-        qproperty-textVisible: true;
-
-        /* font size for the % text */
-        font-size: {font_size}px;
-
-        /* bar background (trough) and text color */
-        background-color: #242429; /* Dark background for the trough */
-        color: #ffffff;            /* White text for percentage */
-    }}
-    QProgressBar::chunk {{
-        /* chunk matches bar height */
-        min-height: {bar_height}px;
-        max-height: {bar_height}px;
-
-        /* solid fill color for the chunk */
-        background-color: {chunk_solid_color};
-        border-radius: 2px; /* Slightly smaller radius than the bar for a nice inset look */
-        margin: 1px; /* Optional: small margin to make the chunk appear inset within the bar's border */
-    }}
+def get_qapp_instance() -> Optional[QApplication]:
     """
-
-
-def apply_styling(app: QApplication) -> None:
-    """Applies stylesheets to the application."""
-    # --- Custom Scrollbar Styling ---
-    # (Keeping scrollbar styles as they were)
-    scrollbar_stylesheet = """
-        QScrollBar:vertical {
-            border: none;
-            background: #121212; /* Dark surface color */
-            width: 8px;          /* Width of the vertical scroll bar */
-            margin: 0px 0px 0px 0px; /* Remove margins, handled by add/sub-line */
-        }
-        QScrollBar::handle:vertical {
-            background: #2d2d2d; /* Thumb color */
-            min-height: 20px;     /* Minimum height of the handle */
-            border-radius: 4px;   /* Slightly less rounded corners */
-            margin: 12px 0px 12px 0px; /* Add margin to keep handle away from buttons */
-        }
-        QScrollBar::handle:vertical:hover {
-            background: #404040; /* Handle hover color */
-        }
-        QScrollBar::add-line:vertical {
-            border: none;
-            background: #1e1e1e; /* Button background */
-            height: 12px;         /* Height of the arrow buttons */
-            subcontrol-position: bottom;
-            subcontrol-origin: margin;
-        }
-        QScrollBar::sub-line:vertical {
-            border: none;
-            background: #1e1e1e; /* Button background */
-            height: 12px;         /* Height of the arrow buttons */
-            subcontrol-position: top;
-            subcontrol-origin: margin;
-        }
-        QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical {
-             background: none; /* Hide default arrows */
-             width: 0px; height: 0px;
-        }
-        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-            background: none; /* Make the track area use scrollbar background */
-        }
-
-        /* Horizontal Scrollbar */
-        QScrollBar:horizontal {
-            border: none;
-            background: #121212; /* Dark surface color */
-            height: 8px;         /* Height of the horizontal scroll bar */
-            margin: 0px 0px 0px 0px; /* Remove margins, handled by add/sub-line */
-        }
-        QScrollBar::handle:horizontal {
-            background: #2d2d2d; /* Thumb color */
-            min-width: 20px;      /* Minimum width of the handle */
-            border-radius: 4px;   /* Slightly less rounded corners */
-            margin: 0px 12px 0px 12px; /* Add margin to keep handle away from buttons */
-        }
-         QScrollBar::handle:horizontal:hover {
-            background: #404040; /* Handle hover color */
-        }
-        QScrollBar::add-line:horizontal {
-             border: none;
-             background: #1e1e1e; /* Button background */
-             width: 12px;          /* Width of the arrow buttons */
-             subcontrol-position: right;
-             subcontrol-origin: margin;
-        }
-         QScrollBar::sub-line:horizontal {
-             border: none;
-             background: #1e1e1e; /* Button background */
-             width: 12px;          /* Width of the arrow buttons */
-             subcontrol-position: left;
-             subcontrol-origin: margin;
-         }
-         QScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal {
-             background: none; /* Hide default arrows */
-             width: 0px; height: 0px;
-         }
-        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-            background: none; /* Make the track area use scrollbar background */
-        }
+    Safely gets the QApplication instance.
+    Returns the existing instance or None if no instance exists.
     """
+    return cast(Optional[QApplication], QApplication.instance())
 
-    # --- Base Styling ---
-    # (Keeping base styles as they were)
-    base_style = """
-        QWidget {
-            background-color: #000000; /* Black background */
-            color: #ffffff; /* Default white text for widgets */
-        }
-        /* QMessageBox Styling - START MODERNIZATION */
-        QMessageBox {
-            background-color: #2B2B2B; /* Dark background, slightly different from #0f0f0f for a bit more depth */
-            color: #E0E0E0;            /* Default text color for the dialog (e.g., title if not overridden) */
-            border: 1px solid #3c3c3c; /* Subtle border */
-            border-radius: 8px;        /* Windows 11 style rounded corners for the dialog */
-            font-family: "Segoe UI Variable", "Segoe UI", sans-serif; /* Modern Windows font */
-            padding: 20px;             /* Increased padding for more breathing room */
-        }
 
-        /* Styles the main message text label (e.g., "Spotify Client ID and Secret are required.") */
-        QMessageBox QLabel#qt_msgbox_label {
-            color: #F0F0F0;             /* Bright text for the main message */
-            background-color: transparent;
-            font-size: 11pt;            /* Slightly larger font for the main message */
-            font-weight: bold;
-            padding-bottom: 10px;       /* Space between main message and informative text */
-            /* qproperty-alignment is not needed if text is naturally left-aligned */
-        }
-
-        /* Styles the informative text label (the longer explanation) */
-        /* The selector 'QMessageBox QLabel#qt_msgbox_info QLabel' might be too specific or incorrect.
-           QMessageBox usually uses 'qt_msgbox_informativelabel' for the informative text.
-           If the old selector worked, keep it. If not, try the one below. */
-        QMessageBox QLabel#qt_msgbox_informativelabel { /* Common object name for informative text */
-            color: #C0C0C0;             /* Slightly dimmer text for less critical details */
-            background-color: transparent;
-            font-size: 10pt;
-            /* qproperty-alignment is not needed if text is naturally left-aligned */
-        }
-        /* Fallback if the above doesn't target informative text, try a more generic QLabel within QMessageBox,
-           but this might affect other labels if present. Be cautious.
-        QMessageBox > QLabel {
-            color: #C0C0C0;
-            font-size: 10pt;
-        }
-        */
-
-        /* Styles the icon (e.g., the 'i' information icon) */
-        QMessageBox QLabel#qt_msgboxex_icon_label { /* Common object name for the icon label */
-            padding-right: 10px; /* Add some space between the icon and the text */
-        }
-
-        QMessageBox QPushButton {
-            background-color: #0078D4; /* Windows 11 accent blue for buttons */
-            color: white;
-            border: 1px solid #005A9E; /* Slightly darker border for definition */
-            border-radius: 6px;        /* Rounded corners for buttons */
-            padding: 8px 20px;         /* Generous padding for buttons */
-            min-width: 80px;           /* Ensure buttons have a decent minimum width */
-            font-size: 10pt;
-            font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
-            margin-top: 10px;          /* Add some margin above the button bar */
-        }
-
-        QMessageBox QPushButton:hover {
-            background-color: #005A9E; /* Darker shade on hover */
-            border: 1px solid #003C6A;
-        }
-
-        QMessageBox QPushButton:pressed {
-            background-color: #003C6A; /* Even darker when pressed */
-        }
-
-        QMessageBox QPushButton:focus { /* Optional: Custom focus indicator */
-            outline: none; /* Remove default dotted outline */
-            border: 2px solid #00BFFF; /* Example: Deep sky blue focus border */
-        }
-        /* QMessageBox Styling - END MODERNIZATION */
-        QTableWidget {
-            background-color: transparent;
-            /* color: #ffffff; */ /* Default text color for table items can be inherited or set in ::item */
-            border: none;
-            gridline-color: transparent;
-        }
-        QTableWidget::item {
-            background-color: transparent;
-            alternate-background-color: transparent;
-            border-bottom: 1px solid #2A2A2A;
-            padding: 1px 1px;
-            font-size: 9.0pt; /* MODIFIED: Was 10pt */
-            /* color: #ffffff; */ /* REMOVED: Default item text color will be handled by Qt.ForegroundRole or inherited */
-        }
-        QTableWidget::item:selected {
-            background-color: rgba(56, 56, 56, 0.8); /* Selection background ONLY */
-            /* CRITICAL: DO NOT set 'color' (text color) here.
-               This allows the programmatically set foreground color
-               (e.g., red for manual_review_needed) to persist
-               even when the item is selected. */
-        }
-        QTableWidget::item:hover {
-            background-color: rgba(255, 255, 255, 0.05);
-            /* For hover, you can choose:
-               1. Don't set 'color': Programmatic color (red/white) persists.
-               2. Set 'color: #ffffff;': Hovered items always have white text, overriding red.
-               Let's go with option 1 for consistency with the selection behavior. */
-        }
-
-        /* --- QSS RULES FOR CUSTOM ROLE REMOVED --- */
-        /* Styling for manualLinkRequired items will be handled programmatically */
-        /* by SplitterTable._update_row_appearance_for_row */
-        /* --- END REMOVED QSS RULE --- */
-
-        QHeaderView::section {
-             font-family: 'Nationale';
-             font-weight: 700;
-             font-size: 10pt;
-             color: #ffffff;
-             background-color: rgba(40, 40, 40, 0.85);
-             padding: 8px 5px 12px 5px;
-             border: none;
-             border-bottom: 1px solid #2A2A2A;
-             text-align: left;
-        }
-        QHeaderView::section:first {
-            padding-left: 2px;
-        }
-        QTextEdit {
-            background-color: #242429;
-            color: #ffffff;
-            border: none;
-            font-family: Consolas, monospace;
-            padding-left: 5px;
-        }
-        QComboBox::drop-down {
-            border: none;
-        }
-        QSplitter::handle {
-            background-color: #121212;
-            height: 1px;
-            width: 1px;
-        }
+def create_qapp_instance(args: Optional[list] = None) -> QApplication:
     """
-
-    # --- Widget-Specific Styling (including dropdown arrow fix) ---
-    # Get the correct path for the dropdown icon using resource_path
-    # Ensure forward slashes for QSS url() compatibility
-    try:
-        # Use the imported paths module to call resource_path
-        down_arrow_icon_path = paths.resource_path(
-            "assets/icons/icon-down-arrow.png"
-        ).replace("\\", "/")
-        logger.debug(f"Resolved dropdown icon path: {down_arrow_icon_path}")
-    except Exception as e:
-        logger.error(
-            f"Failed to resolve resource path for dropdown icon: {e}. Using fallback."
-        )
-        down_arrow_icon_path = ""  # Fallback to no icon if path fails
-
-    # Define widget-specific styles using an f-string for the icon path
-    widget_stylesheet_chunk_1 = f"""
-        /* Specific style for the playlist tree background */
-        #playlistTreeWidget {{
-            /* Make the tree widget itself transparent */
-            background-color: transparent;
-            border: none;
-        }}
-        /* Set the desired background on the viewport - REVERTING THIS LATER */
-        /* Let's make viewport transparent for now to test parent painting */
-        #playlistTreeWidget QAbstractItemView::viewport {{
-             /* background-color: rgba(36, 36, 41, 0.85); */
-             background-color: transparent; /* Make viewport transparent */
-             border: none;
-        }}
-        QTreeWidget {{
-            /* background-color: #242429; */ /* Base background for the tree widget area - REMOVED, set in gui.py */
-            border: none; /* Remove default border */
-            outline: none; /* Add this line */
-        }}
-        QTreeWidget::item {{ /* Default Tree Item Style */
-             border: none;
-             padding: 0px 4px 0px 12px; /* Top, Right, Bottom, Left padding */
-             margin-bottom: 2px; /* Add vertical space between items */
-             color: #ffffff;
-             /* Explicitly set a default background for items if needed, e.g., transparent or a base color */
-             /* background-color: transparent; */ /* Example */
-        }}
-QTreeWidget::item[isRootItem="true"] {{
-            margin-bottom: 10px; /* Add space below root items */
-        }}
+    Creates a new QApplication instance if one doesn't already exist.
     """
-    # widget_stylesheet_chunk_2_hover_only is no longer needed as hover is handled by QSS :hover
-
-    widget_stylesheet_chunk_2 = f"""
-        QTreeWidget::item:hover {{
-            /* background-color: #2d2d31 !important; */  /* REMOVED: Delegate will handle hover background */
-            color: white !important;           /* QSS HOVER TEXT IS WHITE and important */
-            /* border-radius: 10px; */ /* Remove the general border-radius */
-            border-top-left-radius: 0px;
-            border-bottom-left-radius: 0px;
-            border-top-right-radius: 10px;
-            border-bottom-right-radius: 10px;
-        }}
-
-        /* Tree selection style (Cyan text for active or inactive) */
-        QTreeWidget::item:selected {{ /* Combined rule for selected items */
-            /* background-color: transparent !important; */ /* Allow hover to override selected background */
-            color: #33ffe9 !important;
-            border-left: 3px solid #00E4E3; /* Added left border for selection */
-            border-radius: 6px; margin: 1px 8px 1px 1px; padding: 1px; /* Adjusted left margin */
-            outline: none; /* Remove dotted focus border */
-        }}
-        /* If you want selected items to also show yellow hover: */
-        /*
-        QTreeWidget::item:selected:hover {{
-            background-color: yellow;
-            color: black;
-        }}
-        */
-
-        QTreeWidget::item:focus {{ /* Explicitly remove focus outline/border/background */
-            outline: none;
-            border: none;
-            background-color: transparent; /* Ensure focus doesn't add a background */
-        }}
-        /* Add or modify this rule for the combined state */
-        QTreeWidget::item:selected:focus {{
-            outline: none; /* Remove outline */
-            border: none;  /* Remove border */
-            /* The background/color should be inherited from the :selected rule */
-        }}
-    """
-
-    # This full widget_stylesheet is now mostly for other widgets, QTreeWidget::item specific parts are in chunks
-    widget_stylesheet = f"""
-         QPushButton {{
-            font-family: 'Nationale';
-            font-weight: 600;
-            background-color: #323237; /* Set button background color */
-            border: none; /* Optional: Remove default button border */
-            padding: 5px 10px; /* Optional: Add some padding */
-            border-radius: 3px; /* Optional: Slightly rounded corners */
-         }}
-         QPushButton:hover {{
-            background-color: #404045; /* Darker gray on hover */
-         }}
-         QLineEdit, QComboBox {{ /* Style search bar and dropdown */
-            background-color: #242429;
-            border: 1px solid #444444;
-            padding: 3px;
-            border-radius: 3px;
-         }}
-         /* QComboBox::down-arrow styling removed for testing */
-        #mainContainerWidget {{
-            background-color: transparent;
-        }}
-        #mainPageWidget {{
-            background-color: transparent;
-        }}
-        /* Also ensure splitters are transparent if needed */
-        QSplitter {{
-             /* background-color: transparent; */ /* REMOVED - Let splitter have default background */
-        }}
-    """
-
-    # --- Progress Bar Styling ---
-    # Call without the alpha parameter
-    progress_bar_style = make_progress_bar_style(font_size=12, bar_height=18)
-
-    # --- Header Sort Indicator Styling ---
-    try:
-        up_arrow_icon_path = paths.resource_path(
-            "assets/icons/icon-up-arrow.png"
-        ).replace("\\", "/")
-        down_arrow_icon_path = paths.resource_path(
-            "assets/icons/icon-down-arrow.png"
-        ).replace("\\", "/")
-        logger.debug(
-            f"Resolved header indicator icon paths: UP={up_arrow_icon_path}, DOWN={down_arrow_icon_path}"
-        )
-        header_indicator_style = f"""
-            QHeaderView::down-arrow {{
-                image: url("{down_arrow_icon_path}");
-                width: 12px;
-                height: 12px;
-                subcontrol-position: center right;
-                padding-right: 5px;
-            }}
-            QHeaderView::up-arrow {{
-                image: url("{up_arrow_icon_path}");
-                width: 12px;
-                height: 12px;
-                subcontrol-position: center right;
-                padding-right: 5px;
-            }}
-        """
-    except Exception as e:
-        logger.error(
-            f"Failed to resolve resource paths for header indicator icons: {e}. Indicators may not appear."
-        )
-        header_indicator_style = ""  # Fallback to no style if paths fail
-
-    # Combine all stylesheets
-    # The main `widget_stylesheet` now contains general widget styles.
-    # `widget_stylesheet_chunk_1` and `widget_stylesheet_chunk_2` contain QTreeWidget specific styles.
-    combined_stylesheet = (
-        base_style
-        + scrollbar_stylesheet
-        + widget_stylesheet_chunk_1  # Basic QTreeWidget and item styles
-        + widget_stylesheet_chunk_2  # QTreeWidget item hover, selected, focus
-        + widget_stylesheet  # Other general widget styles (QPushButton, QLineEdit, etc.)
-        + header_indicator_style
-        + progress_bar_style
-    )
-
-    # logger.debug(f"--- Combined Stylesheet START ---\n{combined_stylesheet}\n--- Combined Stylesheet END ---") # Too verbose for regular logs
-    logger.debug(f"--- FINAL QSS BEING APPLIED TO APP ---")
-    logger.debug(
-        f"Combined Stylesheet Snippet for Table Items:\n"
-        f"QTableWidget::item {{\n"
-        f"    background-color: transparent; \n"
-        f"    alternate-background-color: transparent; \n"
-        f"    border-bottom: 1px solid #2A2A2A; \n"
-        f"    padding: 1px 1px; \n"
-        f"    font-size: 9.5pt; \n"  # MODIFIED
-        f"    color: #ffffff; \n"
-        f"}}\n"
-        f"QTableWidget::item:selected {{\n"
-        f"    background-color: rgba(56, 56, 56, 0.8);\n"
-        f"}}\n"
-        f"QTableWidget::item:hover {{\n"
-        f"    background-color: rgba(255, 255, 255, 0.05);\n"
-        f"}}\n"
-        f"/* QTableWidget::item[manualLinkRequired] rules removed from QSS */\n"
-        f"}}"
-    )
-    logger.debug(f"--- END OF SNIPPET ---")
-    try:
-        app.setStyleSheet(combined_stylesheet)
-        logger.debug("Successfully applied combined stylesheets to app.")
-    except Exception as e:
-        logger.error(f"Error applying stylesheet to app: {e}", exc_info=True)
-        raise
-
-
-def load_custom_fonts(app: QApplication) -> None:
-    """Loads custom fonts and sets the default application font."""
-    # Use resource_path to get the correct font directory relative to the bundle/script
-    try:
-        font_dir = paths.resource_path("assets/fonts")
-        logger.debug(f"Attempting to load fonts from directory: {font_dir}")
-    except Exception as e:
-        logger.error(
-            f"Failed to resolve resource path for fonts directory: {e}. Cannot load custom fonts."
-        )
-        return  # Exit if font directory path cannot be determined
-
-    font_files = [
-        "nationale-regular.otf",
-        "nationale-medium.otf",
-        "nationale-demibold.otf",
-        "nationale-bold.otf",
-        "nationale-light.otf",
-        "nationale-black.otf",
-    ]
-    loaded_font_families: Set[str] = set()
-
-    for font_file in font_files:
-        font_path = os.path.join(font_dir, font_file)
-        if os.path.exists(font_path):
-            font_id = QFontDatabase.addApplicationFont(font_path)
-            if font_id != -1:
-                # Get all families associated with the font ID (usually one)
-                families = QFontDatabase.applicationFontFamilies(font_id)
-                if families:
-                    family = families[0]  # Use the first family name
-                    loaded_font_families.add(family)
-                    logger.debug(
-                        f"Successfully loaded font: {font_file} (Family: {family})"
-                    )
-                else:
-                    logger.error(f"Loaded font {font_file} but no family name found.")
-            else:
-                logger.error(
-                    f"Failed to load font: {font_file} from path: {font_path} (QFontDatabase returned -1)"
-                )
-        else:
-            logger.error(f"Font file not found: {font_path}")
-
-    # --- Set Default Application Font ---
-    if "Nationale" in loaded_font_families:
-        default_font = QFont("Nationale", 11)  # Increased default size to 11pt
-        default_font.setWeight(
-            QFont.Weight.Normal
-        )  # Explicitly set Regular weight (400)
-        app.setFont(default_font)
-        logger.info("Set default application font to Nationale Regular.")
+    instance = get_qapp_instance()
+    if instance is None:
+        logger.debug("No QApplication instance found. Creating a new one.")
+        if args is None:
+            args = sys.argv
+        # Set application attributes for better high-DPI scaling and styling
+        QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+        instance = QApplication(args)
     else:
-        logger.error("Nationale font family failed to load. Using system default font.")
+        logger.debug("Returning existing QApplication instance.")
+    return instance
 
 
-def setup_stdout_stderr_redirection(output_widget: QTextEdit) -> None:
-    """Redirects stdout and stderr to the provided QTextEdit widget."""
+# --- Logging Setup ---
 
-    def write_to_output(text: str) -> None:
-        append_text_to_output(output_widget, text)
-
-    stdout_stream = EmittingStream()
-    stdout_stream.textWritten.connect(write_to_output)
-    sys.stdout = stdout_stream  # type: ignore # Ignore potential type mismatch
-
-    stderr_stream = EmittingStream()
-    stderr_stream.textWritten.connect(write_to_output)
-    sys.stderr = stderr_stream  # type: ignore # Ignore potential type mismatch
-
-    logger.info("Redirected stdout and stderr to GUI output widget.")
-
-
-print(
-    "DEBUG_TRACE: gui_app_setup.py - About to call start_gui_application()",
-    file=sys.stderr,
-)
-
-
-def start_gui_application(main_view_class: Type[QtWidgets.QWidget]) -> int:
+def setup_logging(log_level: int = logging.INFO) -> None:
     """
-    Initializes and starts the PyQt6 GUI application.
-
-    Args:
-        main_view_class: The class of the main window (e.g., MainView).
+    Configures the logging for the GUI application.
     """
-    print(
-        "DEBUG_TRACE: gui_app_setup.py - Inside start_gui_application()",
-        file=sys.stderr,
-    )
-    logger.info("Starting GUI application setup...")
-    try:
-        # --- Create QApplication ---
-        app = create_application()
+    global logger
+    setup_logging_file()
+    logger = logging.getLogger(__name__)
+    logger.info("GUI logging configured.")
 
-        # --- Apply Styling ---
-        apply_styling(app)
 
-        # --- Load Custom Fonts ---
-        load_custom_fonts(app)
+# --- Asynchronous Task Handling ---
 
-        # --- Create Main Window ---
-        # Import moved to top level
-        print(
-            "DEBUG_TRACE: gui_app_setup.py - BEFORE MainView instantiation",
-            file=sys.stderr,
-        )  # ADDED
-        window: QtWidgets.QWidget = main_view_class()
-        print(
-            "DEBUG_TRACE: gui_app_setup.py - AFTER MainView instantiation",
-            file=sys.stderr,
-        )  # ADDED
-        main_view_window = cast(MainView, window)  # Explicit cast for Pylance
+class WorkerSignals(QObject):
+    """
+    Defines signals available from a running worker thread.
+    """
+    finished = pyqtSignal()
+    error = pyqtSignal(tuple)
+    result = pyqtSignal(object)
+    progress = pyqtSignal(int)
 
-        # --- Setup Stdout/Stderr Redirection ---
-        # Requires the output widget to exist in the window instance
-        if hasattr(window, "c_printTextEdit"):
-            # Ensure the attribute is actually a QTextEdit
-            output_widget = getattr(window, "c_printTextEdit")
-            if isinstance(output_widget, QTextEdit):
-                setup_stdout_stderr_redirection(output_widget)
-            else:
-                logger.error(
-                    "Attribute 'c_printTextEdit' exists but is not a QTextEdit. Cannot redirect stdout/stderr."
-                )
+
+class Worker(QRunnable):
+    """
+    Worker thread for executing long-running tasks without blocking the GUI.
+    """
+    def __init__(self, fn, *args, **kwargs):
+        super(Worker, self).__init__()
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        self.signals = WorkerSignals()
+
+        # Add the callback to our kwargs if the target function supports it
+        if "progress_callback" in self.fn.__code__.co_varnames:
+            self.kwargs["progress_callback"] = self.signals.progress
+
+    @pyqtSlot()
+    def run(self):
+        """
+        Initialise the runner function with passed args, kwargs.
+        """
+        try:
+            result = self.fn(*self.args, **self.kwargs)
+        except:
+            traceback.print_exc()
+            exctype, value = sys.exc_info()[:2]
+            self.signals.error.emit((exctype, value, traceback.format_exc()))
         else:
-            logger.error(
-                "Main window instance does not have 'c_printTextEdit'. Cannot redirect stdout/stderr."
+            self.signals.result.emit(result)
+        finally:
+            self.signals.finished.emit()
+
+
+# --- Global Stylesheet ---
+def apply_global_stylesheet(app: QApplication, font_size: int = 11):
+    """Applies the global dark theme stylesheet to the application."""
+    stylesheet = """
+        /* General Window and Text */
+        QWidget {{
+            color: #ffffff; /* Default text color to white */
+            font-family: "Nationale";
+            font-size: {font_size}pt;
+        }}
+
+        /* ScrollBar Styling */
+        QScrollBar:vertical {{
+            border: none;
+            background: #242429;
+            width: 10px;
+            margin: 0px 0px 0px 0px;
+        }}
+        QScrollBar::handle:vertical {{
+            background: #555;
+            min-height: 20px;
+            border-radius: 5px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: #666;
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            border: none;
+            background: none;
+            height: 0px;
+        }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+            background: none;
+        }}
+
+        QScrollBar:horizontal {{
+            border: none;
+            background: #242429;
+            height: 10px;
+            margin: 0px 0px 0px 0px;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: #555;
+            min-width: 20px;
+            border-radius: 5px;
+        }}
+        QScrollBar::handle:horizontal:hover {{
+            background: #666;
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+            border: none;
+            background: none;
+            width: 0px;
+        }}
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+            background: none;
+        }}
+
+        /* Tree Widget Styling */
+        QTreeWidget {{
+            background-color: transparent;
+            border: none;
+            color: #ffffff; /* Ensure text is white */
+            show-decoration-selected: 1;
+        }}
+        QTreeWidget::item {{
+            padding: 4px 0px;
+            color: #ffffff; /* Explicitly set item text color */
+        }}
+        QTreeWidget::item:hover {{
+            background-color: #2d2d31;
+            color: #ffffff !important; /* Ensure text stays white on hover */
+        }}
+        QTreeWidget::item:selected {{
+            background-color: #3a3a3f;
+        }}
+        QTreeView::branch {{
+            background: transparent;
+        }}
+
+        /* Table Widget Styling */
+        QTableWidget {{
+            background-color: transparent;
+            gridline-color: #444;
+            color: #ccc;
+            border: none;
+        }}
+        QHeaderView::section {{
+            background-color: #242429;
+            color: #aaa;
+            padding: 4px;
+            border: 1px solid #333;
+            font-weight: bold;
+        }}
+        QTableWidget::item {{
+            padding-left: 5px;
+        }}
+        QTableWidget::item:selected {{
+            background-color: #3a3a3f;
+            color: #fff;
+        }}
+
+        /* Other Widgets */
+        QLineEdit {{
+            background-color: #242429;
+            border: 1px solid #444;
+            border-radius: 3px;
+            padding: 3px;
+        }}
+        QComboBox {{
+            background-color: #2d2d31;
+            border: 1px solid #444;
+            border-radius: 3px;
+            padding: 1px 18px 1px 3px;
+        }}
+        QComboBox::drop-down {{
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 15px;
+            border-left-width: 1px;
+            border-left-color: #444;
+            border-left-style: solid;
+            border-top-right-radius: 3px;
+            border-bottom-right-radius: 3px;
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: #2d2d31;
+            border: 1px solid #444;
+            selection-background-color: #3a3a3f;
+        }}
+        QMenu {{
+            background-color: #2d2d31;
+            border: 1px solid #444;
+            color: white;
+        }}
+        QMenu::item:selected {{
+            background-color: #3a3a3f;
+        }}
+    """
+    app.setStyleSheet(stylesheet.format(font_size=font_size))
+    logger.info(f"Global dark stylesheet applied with font size {font_size}pt.")
+
+
+# --- Main Application Runner ---
+
+class AppRunner:
+    """
+    Main class to set up and run the GUI application.
+    """
+    def __init__(self, log_level: int = logging.INFO):
+        self.log_level = log_level
+        self.app: Optional[QApplication] = None
+        self.main_view: Optional["MainView"] = None
+        self.thread_pool = QThreadPool()
+        logger.info(
+            f"Multithreading with maximum {self.thread_pool.maxThreadCount()} threads."
+        )
+
+    def setup(self) -> None:
+        """
+        Complete setup of the application environment.
+        """
+        # Correct order: Set up logging first, then initialize everything else.
+        setup_logging(self.log_level)
+        setup_global_exception_handler()
+        
+        # This function now handles settings, tokens, AND login attempts.
+        initialize_and_login()
+        
+        self.app = create_qapp_instance()
+
+        if self.app:
+            apply_global_stylesheet(self.app, SETTINGS.fontSize)
+            try:
+                icon_path = resource_path("assets/icons/icon-tidal-dl-gui.png")
+                if os.path.exists(icon_path):
+                    self.app.setWindowIcon(QIcon(icon_path))
+                else:
+                    logger.warning(f"Application icon not found at: {icon_path}")
+            except Exception as e:
+                logger.error(f"Failed to set application icon: {e}")
+
+    def run(self) -> int:
+        """
+        Creates the main window and starts the application event loop.
+        """
+        if not self.app:
+            raise RuntimeError(
+                "Application has not been set up. Call setup() before run()."
             )
 
-        # --- Show Main Window ---
-        logger.info("Showing main window...")
-        window.show()
-        logger.info("Main window created and shown.")
+        from .gui import MainView
 
-        # --- Initial Checks (Moved to AuthHandler, triggered after window setup) ---
-        if isinstance(window, MainView):
-            main_view_window.auth_handler.check_initial_logins()
-        else:
-            logger.error(
-                "Main window instance is not MainView."
-            )  # Adjusted error message slightly
+        self.main_view = MainView()
+        self.main_view.show()
 
-        # --- Start Event Loop ---
-        logger.info(
-            "Starting Qt application event loop (calling app.exec())..."
-        )  # Log BEFORE
-        exit_code = app.exec()  # Store the exit code
-        # This log will only appear if the event loop exits *gracefully*
-        logger.info(
-            f"Qt application event loop finished normally with exit code {exit_code}."
-        )  # Log AFTER
-        return exit_code  # Return the actual exit code
+        exit_code = self.app.exec()
+        logger.info(f"Application exiting with code {exit_code}.")
+        return exit_code
 
-    except Exception as e:
-        # --- Critical Startup Error Handling ---
-        error_str = traceback.format_exc()
-        logger.critical(f"Critical error during GUI startup: {e}\n{error_str}")
-        print(f"CRITICAL STARTUP ERROR: {e}\n{error_str}", file=sys.__stderr__)
-        try:
-            # Use profile path for error log
-            error_log_path = os.path.join(paths.getProfilePath(), "gui_error.log")
-            with open(error_log_path, "a", encoding="utf-8") as f:
-                f.write(
-                    f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} (GUI Startup Error) ---\n"
-                )
-                f.write(error_str + "\n")
-        except Exception as log_e:
-            print(
-                f"ERROR: Could not write startup error to gui_error.log: {log_e}",
-                file=sys.__stderr__,
-            )
+    def execute_task(
+        self,
+        fn: Any,
+        on_result: Any,
+        on_error: Optional[Any] = None,
+        on_finished: Optional[Any] = None,
+    ) -> None:
+        """
+        Executes a function in a background thread.
+        """
+        worker = Worker(fn)
+        worker.signals.result.connect(on_result)
+        if on_error:
+            worker.signals.error.connect(on_error)
+        if on_finished:
+            worker.signals.finished.connect(on_finished)
+        self.thread_pool.start(worker)
 
-        try:
-            # Ensure QApplication exists before showing message box
-            if QApplication.instance():
-                QMessageBox.critical(
-                    None,
-                    "Application Startup Failed",
-                    f"A critical error prevented the GUI from starting:\n\n{e}\n\nCheck console or gui_error.log for details.",
-                )
-            else:
-                # Fallback if QApplication itself failed
-                print(
-                    "ERROR: QApplication instance not available to show error message box.",
-                    file=sys.__stderr__,
-                )
-        except Exception:
-            pass  # Ignore errors showing the message box itself
-        return 1  # Error code
+
+# --- GUI Entry Point ---
+
+def start_gui(log_level: int = logging.INFO) -> int:
+    """
+    The main entry point for starting the GUI application.
+    """
+    runner = AppRunner(log_level)
+    runner.setup()
+    return runner.run()

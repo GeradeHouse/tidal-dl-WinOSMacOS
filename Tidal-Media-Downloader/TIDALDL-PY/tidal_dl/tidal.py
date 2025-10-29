@@ -28,9 +28,11 @@ from typing import (
     overload,
     Literal,
 )
-from xml.etree import ElementTree
+from xml.etree import ElementTree as ET
 
-# import os # Removed unused import
+import os  # Needed for env overrides
+from . import apiKey  # Use the central table
+
 import logging
 
 # Create a logger instance for this module
@@ -80,16 +82,34 @@ from .format import getAlbumPath, getTrackPath
 # SSL Warnings | retry number
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Constants from the new implementation
+BASE = "https://api.tidalhifi.com/v1"
+AUTH_URL = "https://auth.tidal.com/v1/oauth2"
+
 
 class TidalAPI(object):
     def __init__(self):
         # Treat LoginKey dynamically to avoid strict attribute-assignment complaints
         self.key: Any = LoginKey()  # type: ignore[assignment]
-        self.apiKey = {
-            # Android Auto
-            "clientId": "zU4XHVVkc2tDPo4t",
-            "clientSecret": "VJKhDFqJPqvsPVNBV6ukXTJmwlvbttP7wlMlrc72se4=",
-        }
+        
+        # Initialize apiKey as an empty dictionary.
+        # The key will be properly set by the logic in 'login.py' after settings are loaded.
+        # This prevents the class from incorrectly selecting the invalid key at index 0 on startup.
+        self.apiKey = {}
+
+        logger.debug(f"TIDAL_API.apiKey initialized empty.")
+        
+        # Runtime scope (same default as your code)
+        self._scope = os.getenv("TIDAL_SCOPE", "r_usr+w_usr+w_sub")
+
+        # --- START MODIFICATION ---
+        # Create a persistent session object for all requests
+        self.session = requests.Session()
+        # Set the "chameleon" User-Agent header for the entire session
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:83.0) Gecko/20100101 Firefox/83.0"
+        })
+        # --- END MODIFICATION ---
 
     # --------------------------------------------------------------------- #
     #                           Internal helpers                            #
@@ -118,31 +138,46 @@ class TidalAPI(object):
     def __get__(
         self,
         path: str,
-        params: Dict[str, Any] = {},
+        params: Optional[Dict[str, Any]] = None,
         urlpre: str = "https://api.tidalhifi.com/v1/",
         *,
         return_raw: bool = False,
     ) -> Union[Dict[str, Any], Tuple[Dict[str, Any], str]]:
+        if params is None:
+            params = {}
         """Internal method to perform GET requests. Optionally returns raw response text."""
-        header = {"authorization": f"Bearer {self.key.accessToken}"}
         params["countryCode"] = self.key.countryCode
         errmsg: str = "Get operation err!"
         raw: str = ""
         result: Dict[str, Any] = {}
         respond: Optional[requests.Response] = None
 
-        for index in range(0, 3):
+        for attempt in range(0, 3):
             try:
-                respond = requests.get(urlpre + path, headers=header, params=params)
+                # --- MODIFICATION: Use the session object ---
+                respond = self.session.get(urlpre + path, params=params, timeout=20)
+
+                # FIX: Handle 404 gracefully for optional data like lyrics
+                if respond.status_code == 404:
+                    logger.debug(f"TIDAL API returned 404 Not Found for path: {path}")
+                    if return_raw:
+                        return {}, ""
+                    else:
+                        return {}
+                
+                if respond.status_code == 401:
+                    raise Exception("TIDAL: Unauthorized - may be due to geo restrictions or quality not available with current subscription")
+                if respond.status_code == 429:
+                    retry_after = int(respond.headers.get('Retry-After', '2'))
+                    wait_time = min(retry_after, 60)
+                    logger.warning(f"Rate limited on GET {path}, waiting {wait_time}s")
+                    time.sleep(wait_time)
+                    continue
+                
+                # Raise other HTTP errors
+                respond.raise_for_status()
+
                 raw = respond.text
-
-                # Only log status and headers if status is NOT 404
-                if respond.status_code != 404:
-                    pass  # Added pass to prevent indentation error
-
-                # Uncomment to log raw responnse
-                # logging.debug(f"__get__ raw response: {raw[:500]}")
-
                 if not raw.strip():
                     continue  # Retry if empty
 
@@ -153,11 +188,11 @@ class TidalAPI(object):
                     continue  # Retry if not a dictionary
 
                 # If 'status' key exists, check for API errors
-                if "status" in result:
+                if "status" in result and result["status"] != 200:
                     if "userMessage" in result and result["userMessage"] is not None:
                         errmsg += str(result["userMessage"])
                         break
-
+                
                 if return_raw:
                     return result, raw
                 else:
@@ -170,17 +205,17 @@ class TidalAPI(object):
             except requests.exceptions.RequestException as e:
                 logger.error(f"__get__ request failed: {e}")
                 errmsg += f" | Request failed: {e}"
-                if index >= 2:
-                    raise Exception(errmsg)
+                if attempt >= 2:
+                    raise Exception(errmsg) from e
                 time.sleep(1)
                 continue
             except Exception as e:
                 logger.error(f"__get__ unexpected error: {e}", exc_info=True)
                 errmsg += f" | Unexpected error: {e}"
-                if index >= 2:
+                if attempt >= 2:
                     if respond is not None:
                         errmsg += f" | Last raw response: {respond.text[:100]}..."
-                    raise Exception(errmsg)
+                    raise Exception(errmsg) from e
                 time.sleep(1)
                 continue
 
@@ -192,10 +227,12 @@ class TidalAPI(object):
     def __getQuality__(
         self,
         path: str,
-        params: Dict[str, Any] = {},
+        params: Optional[Dict[str, Any]] = None,
         urlpre: str = "https://api.tidalhifi.com/v1/",
     ) -> Dict[str, Any]:
-        header = {"authorization": f"Bearer {self.key.accessToken}"}
+        if params is None:
+            params = {}
+        # header = {"authorization": f"Bearer {self.key.accessToken}"} # REMOVED
         params["countryCode"] = self.key.countryCode
         errmsg: str = "GetQuality operation err!"
         respond: Optional[requests.Response] = None
@@ -203,9 +240,10 @@ class TidalAPI(object):
 
         for index in range(0, 3):
             try:
-                respond = requests.get(urlpre + path, headers=header, params=params)
+                # --- MODIFICATION: Use the session object ---
+                respond = self.session.get(urlpre + path, params=params, timeout=15)
                 if (
-                    respond.url.find("playbackinfopostpaywall") != -1
+                    respond.url.find("playbackinfo") != -1
                     and SETTINGS.downloadDelay is not False
                 ):
                     sleep_time = random.randint(200, 2000) / 1000
@@ -250,32 +288,30 @@ class TidalAPI(object):
         else:
             raise Exception(errmsg)
 
-    def __getItems__(self, path: str, params: Dict[str, Any] = {}) -> List[Any]:
-        params["limit"] = 50
+    def __getItems__(self, path: str, params: Optional[Dict[str, Any]] = None) -> List[Any]:
+        if params is None:
+            params = {}
+        params["limit"] = 100 # Use a larger limit as per new code
         params["offset"] = 0
         total: int = 0
         ret: List[Any] = []
         while True:
             data: Dict[str, Any] = self.__get__(
                 path, params
-            )  # precise type now inferred
+            )
             if not data:
                 print("[WARN] __getItems__: No data received from API.")
                 return []
+            
+            # Handle two possible keys for total items
             if "totalNumberOfItems" in data:
                 total = data["totalNumberOfItems"]
-            else:
-                print(
-                    "[WARN] __getItems__: 'totalNumberOfItems' key missing in response."
-                )
-                return []
+            elif "numberOfTracks" in data:
+                total = data["numberOfTracks"]
+            
             items = data.get("items")
             if not items or not isinstance(items, list):
-                print(
-                    f"[WARN] __getItems__: 'items' key missing or empty/invalid in response for path: {path}"
-                )
-                return ret
-            if total > 0 and len(ret) >= total:
+                # If items are missing, it might be the only page, so return what we have
                 return ret
 
             ret.extend(items)
@@ -284,7 +320,7 @@ class TidalAPI(object):
             if total > 0 and len(ret) >= total:
                 return ret[:total]
 
-            if num < 50:
+            if num < params["limit"]:
                 break
             params["offset"] += num
         return ret
@@ -333,23 +369,29 @@ class TidalAPI(object):
         result: Dict[str, Any] = {}
         for index in range(3):
             try:
-                # The auth parameter handles Basic Auth automatically if it's a tuple.
-                response = requests.post(
-                    urlpre + path, data=data, auth=auth, verify=False
-                )
-                response.raise_for_status()  # Raises HTTPError for 4xx/5xx responses
+                # --- MODIFICATION: Use the session object ---
+                response = self.session.post(urlpre + path, data=data, auth=auth, timeout=15)
+                
+                # Don't raise for status immediately, as we need to inspect the body for polling errors
                 result = response.json()
+                
+                # If there's a non-200 status and it's not a known polling error, then raise
+                if response.status_code != 200:
+                    if result.get("error") == "authorization_pending":
+                        return result # Return pending error to be handled by caller
+                    if result.get("sub_status") == 1002: # Tidal-specific pending error
+                        return result
+                
+                response.raise_for_status()  # Raises HTTPError for other 4xx/5xx responses
                 return result
             except requests.exceptions.HTTPError as e:
                 logger.error(f"__post__ HTTP error for URL: {e.request.url}")
                 logger.error(f"Status Code: {e.response.status_code}")
-                # Log the server's response body, which often contains specific error details.
                 logger.error(f"Response Body: {e.response.text}")
                 if index == 2:
                     raise e
                 time.sleep(1)
             except requests.exceptions.RequestException as e:
-                # This will catch other request errors like connection issues.
                 logger.error(f"__post__ request failed: {e}")
                 if index == 2:
                     raise e
@@ -371,18 +413,22 @@ class TidalAPI(object):
     # --------------------------------------------------------------------- #
 
     def getDeviceCode(self) -> str:
+        if not self.apiKey or "clientId" not in self.apiKey:
+            raise RuntimeError("TIDAL API key not set yet. Load/select an apiKey before calling this method.")
+        logger.debug("Using client_id: %s", self.apiKey.get("clientId"))
         data: Dict[str, str] = {
             "client_id": self.apiKey["clientId"],
-            "scope": "r_usr+w_usr+w_sub",
+            "scope": self._scope,
         }
-        result = self.__post__("/device_authorization", data)
-        if result.get("status") and result["status"] != 200:
+        result = self.__post__("/device_authorization", data, urlpre=AUTH_URL)
+        if result.get("status", 200) != 200:
             raise Exception(
                 f"Device authorization failed. Status: {result.get('status')}, Message: {result.get('userMessage', 'N/A')}. Please choose another apikey."
             )
 
         device_code = result.get("deviceCode")
         user_code = result.get("userCode")
+        verification_uri_complete = result.get("verificationUriComplete")
         verification_uri = result.get("verificationUri")
         expires_in = result.get("expiresIn")
         interval = result.get("interval")
@@ -395,43 +441,38 @@ class TidalAPI(object):
         self.key.verificationUrl = verification_uri
         self.key.authCheckTimeout = expires_in
         self.key.authCheckInterval = interval
-        return "http://" + str(self.key.verificationUrl) + "/" + str(self.key.userCode)
+        return verification_uri_complete or f"https://{verification_uri}/{user_code}"
 
     def checkAuthStatus(self) -> str:
         """
         Checks the device authorization status.
-        Returns:
-            str: "SUCCESS", "PENDING", "SLOW_DOWN", or raises an exception on hard error.
+        Returns: "SUCCESS", "PENDING", or raises on hard error.
         """
+        if not self.apiKey or "clientId" not in self.apiKey or "clientSecret" not in self.apiKey:
+            raise RuntimeError("TIDAL API key not set yet. Load/select an apiKey before calling this method.")
+        
         data: Dict[str, Any] = {
             "client_id": self.apiKey["clientId"],
             "device_code": self.key.deviceCode,
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            "scope": "r_usr+w_usr+w_sub",
+            "scope": self._scope,
         }
         auth = (self.apiKey["clientId"], self.apiKey["clientSecret"])
 
-        try:
-            result = self.__post__("/token", data, auth=auth)
-        except requests.exceptions.HTTPError as e:
-            try:
-                # Attempt to parse the JSON error body from the server
-                error_data = e.response.json()
-                status = error_data.get("status")
-                error_type = error_data.get("error")
+        result = self.__post__("/token", data, auth=auth, urlpre=AUTH_URL)
 
-                # Handle specific, expected polling errors
-                if status == 400 and error_type == "authorization_pending":
-                    return "PENDING"
-                if status == 400 and error_type == "slow_down":
-                    return "SLOW_DOWN"
-            except (json.JSONDecodeError, AttributeError):
-                # If the error response isn't JSON or something is wrong, re-raise the original exception
-                raise e
-            # If it's another type of HTTP error, let it be raised
-            raise e
+        # Handle pending authorization based on new logic
+        if result.get("status", 200) != 200 and result.get("sub_status") == 1002:
+            return "PENDING"
+        if result.get("error") == "authorization_pending":
+            return "PENDING"
+        
+        # Handle other errors
+        if result.get("status", 200) != 200 or "error" in result:
+            error_message = result.get("userMessage") or result.get("error_description", "Unknown error")
+            raise Exception(f"Authentication failed: {error_message}")
 
-        # If __post__ was successful (status 200)
+        # Success - extract token data
         user_info = result.get("user")
         access_token = result.get("access_token")
         refresh_token = result.get("refresh_token")
@@ -453,15 +494,20 @@ class TidalAPI(object):
         self.key.accessToken = access_token
         self.key.refreshToken = refresh_token
         self.key.expiresIn = expires_in if expires_in is not None else 0
+
+        # Update the persistent session with the new Bearer token
+        self.session.headers.update({"authorization": f"Bearer {self.key.accessToken}"})
+
         return "SUCCESS"
 
     def verifyAccessToken(self, accessToken: str) -> bool:
         header = {"authorization": f"Bearer {accessToken}"}
         try:
-            response = requests.get("https://api.tidal.com/v1/sessions", headers=header)
+            # Use the main session object for consistency
+            response = self.session.get(f"{BASE}/sessions", headers=header)
             response.raise_for_status()
             result = response.json()
-            if "status" in result and result["status"] != 200:
+            if result.get("status", 200) != 200:
                 logger.warning(
                     f"verifyAccessToken failed with API status: {result.get('status')}, message: {result.get('userMessage')}"
                 )
@@ -481,76 +527,62 @@ class TidalAPI(object):
             return False
 
     def refreshAccessToken(self, refreshToken: str) -> bool:
+        if not self.apiKey or "clientId" not in self.apiKey or "clientSecret" not in self.apiKey:
+            raise RuntimeError("TIDAL API key not set yet. Load/select an apiKey before calling this method.")
+        
         data: Dict[str, str] = {
             "client_id": self.apiKey["clientId"],
             "refresh_token": refreshToken,
             "grant_type": "refresh_token",
-            "scope": "r_usr+w_usr+w_sub",
+            "scope": self._scope,
         }
         auth = (self.apiKey["clientId"], self.apiKey["clientSecret"])
         try:
-            result = self.__post__("/token", data, auth=auth)
+            result = self.__post__("/token", data, auth=auth, urlpre=AUTH_URL)
 
-            status = result.get("status")
-            if status and status != 200:
-                logger.error(
-                    f"refreshAccessToken failed. Status: {status}, Message: {result.get('userMessage', 'N/A')}"
-                )
-                return False
+            if result.get("status", 200) != 200:
+                raise Exception(f"Refresh failed: {result.get('userMessage', 'Unknown error')}")
 
-            user_info = result.get("user")
             access_token = result.get("access_token")
             expires_in = result.get("expires_in")
 
-            if not user_info or not access_token:
-                logger.error(
-                    "refreshAccessToken response missing required user info or access token."
-                )
+            if not access_token:
+                logger.error("refreshAccessToken response missing access token.")
                 return False
 
-            user_id = user_info.get("userId")
-            country_code = user_info.get("countryCode")
-
-            if user_id is None or country_code is None:
-                logger.error(
-                    "refreshAccessToken response missing userId or countryCode."
-                )
-                return False
-
-            self.key.userId = user_id
-            self.key.countryCode = country_code
             self.key.accessToken = access_token
-            self.key.expiresIn = expires_in if expires_in is not None else 0
+            self.key.expiresIn = (expires_in or 0) + int(time.time())
+
+            # Update the persistent session with the new Bearer token
+            self.session.headers.update({"authorization": f"Bearer {self.key.accessToken}"})
             return True
 
         except Exception as e:
-            logger.error(
-                f"refreshAccessToken encountered an exception: {e}", exc_info=True
-            )
+            logger.error(f"refreshAccessToken encountered an exception: {e}", exc_info=True)
             return False
 
     def loginByAccessToken(
         self, accessToken: str, userid: Union[str, int, None] = None
     ) -> None:
-        header = {"authorization": f"Bearer {accessToken}"}
+        # Temporarily set header for this one request
+        temp_headers = dict(self.session.headers)
+        temp_headers["authorization"] = f"Bearer {accessToken}"
+        
         try:
-            response = requests.get("https://api.tidal.com/v1/sessions", headers=header)
+            response = self.session.get(f"{BASE}/sessions", headers=temp_headers)
             response.raise_for_status()
             result = response.json()
 
-            status = result.get("status")
-            if status and status != 200:
+            if result.get("status", 200) != 200:
                 raise Exception(
-                    f"Login failed! Status: {status}, Message: {result.get('userMessage', 'N/A')}"
+                    f"Login failed! Status: {result.get('status')}, Message: {result.get('userMessage', 'N/A')}"
                 )
 
             session_user_id = result.get("userId")
             country_code = result.get("countryCode")
 
             if session_user_id is None or country_code is None:
-                raise Exception(
-                    "Login failed: Session response missing userId or countryCode."
-                )
+                raise Exception("Login failed: Session response missing userId or countryCode.")
 
             if userid is not None and str(session_user_id) != str(userid):
                 raise Exception(
@@ -560,8 +592,11 @@ class TidalAPI(object):
             self.key.userId = session_user_id
             self.key.countryCode = country_code
             self.key.accessToken = accessToken
-            self.key.refreshToken = None
+            self.key.refreshToken = None # Refresh token is not known here
             self.key.expiresIn = 0
+
+            # Update the persistent session with the new Bearer token
+            self.session.headers.update({"authorization": f"Bearer {self.key.accessToken}"})
 
         except requests.exceptions.RequestException as e:
             raise Exception(f"Login failed due to network error: {e}") from e
@@ -665,7 +700,7 @@ class TidalAPI(object):
         """Searches Tidal for content. Optionally returns raw API response."""
         typeStr = type.name.upper() + "S"
         if type == Type.Null:
-            typeStr = "ARTISTS,ALBUMS,TRACKS,PLAYLISTS"  # Removed VIDEOS
+            typeStr = "ARTISTS,ALBUMS,TRACKS,PLAYLISTS"
 
         params: Dict[str, Any] = {
             "query": text,
@@ -724,27 +759,27 @@ class TidalAPI(object):
         return cast(Lyrics, model)
 
     def getItems(self, id: str, type: Type) -> Tuple[List[Track], List[Any]]:
-        if type == Type.Playlist:
-            raw_data = self.__getItems__("playlists/" + str(id) + "/items")
-        elif type == Type.Album:
-            raw_data = self.__getItems__("albums/" + str(id) + "/items")
-        elif type == Type.Mix:
-            raw_data = self.__getItems__("mixes/" + str(id) + "/items")
-        else:
+        path_map = {
+            Type.Playlist: f"playlists/{id}/items",
+            Type.Album: f"albums/{id}/items",
+            Type.Mix: f"mixes/{id}/items",
+        }
+        path = path_map.get(type)
+        if not path:
             raise ValueError(f"invalid Type '{type}' for getItems!")
 
+        raw_data = self.__getItems__(path)
         data = [item for item in raw_data if isinstance(item, dict)]
 
         tracks: List[Track] = []
         videos: List[Any] = []
         for item_dict in data:
-            item_type = item_dict.get("type")
-            item_content = item_dict.get("item")
+            # Handle both { "item": {...}, "type": "track" } and direct track objects
+            item_content = item_dict.get("item", item_dict)
+            item_type = item_dict.get("type", "track") # Assume track if type is missing
 
-            if not item_content or not isinstance(item_content, dict):
-                logger.warning(
-                    f"Skipping item with missing or invalid 'item' field: {item_dict}"
-                )
+            if not isinstance(item_content, dict):
+                logger.warning(f"Skipping item with invalid content: {item_dict}")
                 continue
 
             if item_type == "track":
@@ -755,17 +790,11 @@ class TidalAPI(object):
                         track.mediaMetadata = item_content.get("mediaMetadata", {})
                         tracks.append(track)
                     else:
-                        logger.warning(
-                            f"Failed to convert track item to model: {item_content}"
-                        )
+                        logger.warning(f"Failed to convert track item to model: {item_content}")
                 else:
-                    logger.debug(
-                        f"Skipping track item not streamReady: {item_content.get('id')}"
-                    )
+                    logger.debug(f"Skipping track item not streamReady: {item_content.get('id')}")
             else:
-                logger.debug(
-                    f"Skipping item with unknown type '{item_type}': {item_content.get('id')}"
-                )
+                logger.debug(f"Skipping item with unknown type '{item_type}': {item_content.get('id')}")
 
         return tracks, videos
 
@@ -811,194 +840,102 @@ class TidalAPI(object):
                     tracks.append(cast(Track, track_model))
         return tracks
 
-    def parse_mpd(self, xml: Union[str, bytes]) -> List[List[str]]:
-        if isinstance(xml, bytes):
-            xml = xml.decode("utf-8")
-        xml = cast(str, xml)
-        xml = re.sub(r'xmlns="[^"]+"', "", xml, count=1)
+    def _parse_dash_manifest(self, manifest_b64: str) -> dict:
+        """Parse DASH XML manifest into a format compatible with getStreamUrl."""
         try:
-            root: ElementTree.Element = ElementTree.fromstring(xml)
-        except ElementTree.ParseError as e:
-            logger.error(f"Failed to parse MPD XML: {e}")
-            return []
+            manifest_xml = base64.b64decode(manifest_b64).decode("utf-8")
+            root = ET.fromstring(manifest_xml)
 
-        tracks: List[List[str]] = []
-        for period in root.findall("Period"):
-            for adaptation_set in period.findall("AdaptationSet"):
-                content_type = adaptation_set.get("contentType")
-                if content_type != "audio":
-                    logger.warning(
-                        f"Skipping non-audio AdaptationSet (contentType='{content_type}')"
-                    )
-                    continue
+            ns = {"mpd": "urn:mpeg:dash:schema:mpd:2011"}
 
-                for rep in adaptation_set.findall("Representation"):
-                    codec_attr = rep.get("codecs")
-                    codec = codec_attr.upper() if codec_attr else "UNKNOWN"
-                    if codec.startswith("MP4A"):
-                        codec = "AAC"
+            representation = root.find(".//mpd:Representation", ns)
+            if representation is None:
+                raise Exception("No Representation found in DASH manifest")
 
-                    seg_template: Optional[ElementTree.Element] = rep.find(
-                        "SegmentTemplate"
-                    )
-                    if seg_template is None:
-                        logger.warning(
-                            "Representation missing SegmentTemplate, skipping."
-                        )
-                        continue
+            codecs = representation.get("codecs", "flac")
 
-                    initialization_url = seg_template.get("initialization")
-                    if not initialization_url:
-                        logger.warning(
-                            "SegmentTemplate missing initialization URL, skipping representation."
-                        )
-                        continue
-                    track_urls: List[str] = [initialization_url]
+            segment_template = representation.find(".//mpd:SegmentTemplate", ns)
+            if segment_template is None:
+                raise Exception("No SegmentTemplate found in DASH manifest")
 
-                    start_number_str = seg_template.get("startNumber", "1")
-                    try:
-                        start_number = int(start_number_str)
-                    except (ValueError, TypeError):
-                        logger.warning(
-                            f"Invalid startNumber '{start_number_str}', defaulting to 1."
-                        )
-                        start_number = 1
+            media_template = segment_template.get("media")
+            if media_template is None:
+                raise Exception("No media template found in DASH manifest")
+            initialization = segment_template.get("initialization")
+            start_number = int(segment_template.get("startNumber", "0"))
 
-                    media_pattern = seg_template.get("media")
-                    if not media_pattern:
-                        logger.warning(
-                            "SegmentTemplate missing media URL pattern, skipping representation."
-                        )
-                        continue
+            timeline = segment_template.find("mpd:SegmentTimeline", ns)
+            if timeline is None:
+                raise Exception("No SegmentTimeline found in DASH manifest")
 
-                    seg_timeline: Optional[ElementTree.Element] = seg_template.find(
-                        "SegmentTimeline"
-                    )
-                    if seg_timeline is not None:
-                        seg_time_list: List[int] = []
-                        cur_time = 0
-                        segments = seg_timeline.findall("S")
-                        if not segments:
-                            logger.warning(
-                                "SegmentTimeline found but contains no S elements."
-                            )
-                            continue
+            segments = timeline.findall("mpd:S", ns)
+            segment_urls = [initialization] if initialization else []
+            segment_number = start_number
 
-                        for s in segments:
-                            t_attr = s.get("t")
-                            d_attr = s.get("d")
-                            r_attr = s.get("r", "0")
+            for seg in segments:
+                repeat = int(seg.get("r", "0"))
+                num_segments = repeat + 1
+                for _ in range(num_segments):
+                    url = media_template.replace("$Number$", str(segment_number))
+                    segment_urls.append(url)
+                    segment_number += 1
 
-                            try:
-                                if t_attr is not None:
-                                    cur_time = int(t_attr)
-                                seg_duration = int(d_attr) if d_attr is not None else 0
-                                repeat_count = int(r_attr)
-                            except (ValueError, TypeError):
-                                logger.warning(
-                                    f"Invalid attributes in SegmentTimeline S element: t='{t_attr}', d='{d_attr}', r='{r_attr}'. Skipping segment."
-                                )
-                                continue
-
-                            for _ in range(repeat_count + 1):
-                                seg_time_list.append(cur_time)
-                                cur_time += seg_duration
-
-                        seg_num_list: List[int] = list(
-                            range(start_number, len(seg_time_list) + start_number)
-                        )
-                        track_urls.extend(
-                            [
-                                media_pattern.replace("$Number$", str(n))
-                                for n in seg_num_list
-                            ]
-                        )
-                        tracks.append(track_urls)
-                    else:
-                        logger.warning(
-                            "SegmentTemplate missing SegmentTimeline, cannot determine segment URLs."
-                        )
-                        continue
-        return tracks
+            return {
+                "urls": segment_urls,
+                "codecs": codecs,
+                "encryptionType": "NONE",
+                "mimeType": f"audio/{codecs}",
+            }
+        except ET.ParseError as e:
+            raise Exception(f"Failed to parse DASH XML manifest: {e}")
+        except Exception as e:
+            raise Exception(f"Error parsing DASH manifest: {e}")
 
     def getStreamUrl(self, id: str, quality: AudioQuality) -> StreamUrl:
-        paras: Dict[str, str] = {
+        params: Dict[str, str] = {
             "audioquality": quality.value,
             "playbackmode": "STREAM",
             "assetpresentation": "FULL",
         }
-        data: Dict[str, Any] = self.__get__(
-            f"tracks/{str(id)}/playbackinfopostpaywall", paras
-        )
+        data: Dict[str, Any] = self.__get__(f"tracks/{str(id)}/playbackinfo", params)
 
         resp_model = aigpy.model.dictToModel(data, StreamRespond())
         if not resp_model:
-            raise Exception(
-                "Failed to convert playback info response to StreamRespond model."
-            )
+            raise Exception("Failed to convert playback info response to StreamRespond model.")
         resp = cast(StreamRespond, resp_model)
 
-        if resp.manifestMimeType and "vnd.tidal.bt" in resp.manifestMimeType:
-            if resp.manifest is None:
-                raise Exception("Manifest is None for vnd.tidal.bt type.")
-            try:
-                manifest_bytes = base64.b64decode(resp.manifest)
-                manifest_str = manifest_bytes.decode("utf-8")
-                manifest: Dict[str, Any] = json.loads(manifest_str)
-            except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as e:
-                raise Exception(f"Failed to decode or parse manifest: {e}") from e
+        ret = cast(Any, StreamUrl())
+        ret.trackid = resp.trackid
+        ret.soundQuality = resp.audioQuality
+        ret.manifestMimeType = resp.manifestMimeType
 
-            ret = cast(Any, StreamUrl())
-            ret.trackid = resp.trackid  # type: ignore[assignment]
-            ret.soundQuality = resp.audioQuality  # type: ignore[assignment]
-            ret.codec = manifest.get("codecs")  # type: ignore[assignment]
-            ret.encryptionKey = manifest.get("keyId", "")  # type: ignore[assignment]
-            urls = manifest.get("urls")
-            if not urls or not isinstance(urls, list) or not urls[0]:
-                raise Exception("Manifest missing or invalid 'urls' field.")
-            ret.url = urls[0]  # type: ignore[assignment]
-            ret.urls = urls  # type: ignore[assignment]
-            ret.manifestMimeType = resp.manifestMimeType  # type: ignore[assignment]
-            logger.debug(
-                f"[getStreamUrl] Propagating manifestMimeType: API='{resp.manifestMimeType}', Object='{ret.manifestMimeType}'"
-            )
-            return ret
+        if resp.manifest is None:
+            raise Exception(f"Manifest is missing for track {id}. User message: {data.get('userMessage', 'N/A')}")
 
-        elif resp.manifestMimeType and "dash+xml" in resp.manifestMimeType:
-            if resp.manifest is None:
-                raise Exception("Manifest is None for dash+xml type.")
-            try:
-                manifest_bytes = base64.b64decode(resp.manifest)
-                xmldata: str = manifest_bytes.decode("utf-8")
-            except (binascii.Error, UnicodeDecodeError) as e:
-                raise Exception(f"Failed to decode manifest: {e}") from e
+        manifest_b64 = resp.manifest
+        manifest_mime = resp.manifestMimeType or "application/vnd.tidal.bts"
 
-            ret = cast(Any, StreamUrl())
-            ret.trackid = resp.trackid  # type: ignore[assignment]
-            ret.soundQuality = resp.audioQuality  # type: ignore[assignment]
-            codec_match = aigpy.string.getSub(xmldata, 'codecs="', '"')
-            ret.codec = codec_match if codec_match else None  # type: ignore[assignment]
-            ret.encryptionKey = ""  # type: ignore[assignment]
+        manifest_data = {}
+        try:
+            if "dash+xml" in manifest_mime:
+                manifest_data = self._parse_dash_manifest(manifest_b64)
+            else:  # Default to bts
+                manifest_decoded = base64.b64decode(manifest_b64).decode("utf-8")
+                manifest_data = json.loads(manifest_decoded)
+        except (Exception, binascii.Error, json.JSONDecodeError) as e:
+            error_msg = data.get("userMessage", str(e))
+            raise Exception(f"Failed to decode or parse manifest for track {id}: {error_msg}") from e
 
-            parsed_tracks = self.parse_mpd(xmldata)
-            if not parsed_tracks:
-                raise Exception(
-                    "Failed to parse MPD or no suitable audio tracks found."
-                )
-            ret.urls = parsed_tracks[0]  # type: ignore[assignment]
-            if not ret.urls:
-                raise Exception("Parsed MPD track list is empty.")
-            ret.url = ret.urls[0]  # type: ignore[assignment]
-            ret.manifestMimeType = resp.manifestMimeType  # type: ignore[assignment]
-            logger.debug(
-                f"[getStreamUrl] Propagating manifestMimeType: API='{resp.manifestMimeType}', Object='{ret.manifestMimeType}'"
-            )
-            return ret
+        urls = manifest_data.get("urls", [])
+        if not isinstance(urls, list) or not urls:
+            raise Exception("Manifest does not contain any URLs.")
 
-        mime_type_str = resp.manifestMimeType if resp.manifestMimeType else "None"
-        raise Exception(
-            f"Can't get the streamUrl, unsupported or missing manifest type: {mime_type_str}"
-        )
+        ret.url = urls[0]
+        ret.urls = urls
+        ret.codec = manifest_data.get("codecs")
+        ret.encryptionKey = manifest_data.get("keyId") or manifest_data.get("encryptionKey", "")
+        
+        return ret
 
     def getQualityStreamUrl(self, id: str, quality: AudioQuality) -> StreamUrl:
         squality = AudioQuality.HI_RES_LOSSLESS.value
@@ -1008,7 +945,7 @@ class TidalAPI(object):
             "assetpresentation": "FULL",
         }
         data: Dict[str, Any] = self.__getQuality__(
-            f"tracks/{str(id)}/playbackinfopostpaywall", paras
+            f"tracks/{str(id)}/playbackinfo", paras
         )
 
         resp_model = aigpy.model.dictToModel(data, StreamRespond())
@@ -1061,43 +998,6 @@ class TidalAPI(object):
 
         return ret  # type: ignore[return-value]
 
-    #     resp_model = aigpy.model.dictToModel(data, StreamRespond())
-    #
-    #     if resp.manifestMimeType and "vnd.tidal.emu" in resp.manifestMimeType:
-    #             manifest_bytes = base64.b64decode(resp.manifest)
-    #             manifest_str = manifest_bytes.decode("utf-8")
-    #             manifest: Dict[str, Any] = json.loads(manifest_str)
-    #         urls = manifest.get("urls")
-    #         if not urls or not isinstance(urls, list) or not urls[0]:
-    #             raise Exception("Video manifest missing or invalid 'urls' field.")
-    #
-    #         m3u8_master_url = urls[0]
-    #         resolution_list: List[VideoStreamUrl] = self.__getResolutionList__(m3u8_master_url)
-    #
-    #         try:
-    #             target_height = int(quality.value)
-    #         except ValueError:
-    #             raise ValueError(f"Invalid VideoQuality value: {quality.value}")
-    #
-    #         best_match: Optional[VideoStreamUrl] = None
-    #         resolution_list.sort(
-    #             key=lambda s: int(s.resolutions[1]) if s.resolutions and len(s.resolutions) > 1 else 0,
-    #             reverse=True,
-    #         )
-    #
-    #         for stream in resolution_list:
-    #             try:
-    #                 stream_height = int(stream.resolutions[1]) if stream.resolutions and len(stream.resolutions) > 1 else 0
-    #                 if stream_height <= target_height:
-    #                     best_match = stream
-    #                     break
-    #
-    #         if not best_match and resolution_list:
-    #             best_match = resolution_list[-1]
-    #
-    #         if best_match:
-    #             return best_match
-
     def getTrackContributors(self, id: str) -> Dict[str, Any]:
         data: Dict[str, Any] = self.__get__(f"tracks/{str(id)}/contributors")
         return data
@@ -1105,25 +1005,35 @@ class TidalAPI(object):
     def getCoverUrl(
         self, sid: Optional[str], width: str = "320", height: str = "320"
     ) -> str:
-        if sid is None:
+        if not sid:
             return ""
-        # If 'sid' is already a full URL (like from Spotify), return it directly.
+        
+        # If 'sid' is already a full URL, return it directly.
         if sid.startswith("http"):
             return sid
-        # Check if 'sid' is a valid Tidal UUID.
+        
+        # The API can provide SIDs with slashes or hyphens. Normalize to hyphens for validation.
+        hyphenated_sid = sid.replace('/', '-')
+
+        # Check if 'hyphenated_sid' is a valid Tidal UUID.
         if not re.match(
             r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
-            sid,
+            hyphenated_sid,
         ):
             logger.warning(
                 f"Invalid cover SID format: '{sid}'. Not a valid UUID or a full URL."
             )
             return ""
+            
         if not width.isdigit() or not height.isdigit():
             logger.warning(f"Invalid width/height for cover URL: {width}x{height}")
             width, height = "320", "320"
-        return f"https://resources.tidal.com/images/{sid.replace('-', '/')}/{width}x{height}.jpg"
-
+        
+        # The final URL requires slashes and should be lowercase.
+        url_path_sid = hyphenated_sid.lower().replace('-', '/')
+        
+        return f"https://resources.tidal.com/images/{url_path_sid}/{width}x{height}.jpg"
+    
     def getCoverData(
         self, sid: Optional[str], width: str = "320", height: str = "320"
     ) -> bytes:
@@ -1131,23 +1041,12 @@ class TidalAPI(object):
         if not url:
             return b""
         try:
-            # More comprehensive headers to mimic a browser request
-            headers = {
-                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Authorization": f"Bearer {self.key.accessToken}",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-                "Referer": "https://listen.tidal.com/",
-                "Sec-Ch-Ua": '"Not/A)Brand";v="99", "Google Chrome";v="91", "Chromium";v="91"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Fetch-Dest": "image",
-                "Sec-Fetch-Mode": "no-cors",
-                "Sec-Fetch-Site": "cross-site",  # Changed from same-origin as resources.tidal.com is different
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-            }
-            response = requests.get(url, headers=headers, timeout=15, stream=True)
+            # --- START OF MODIFICATION ---
+            # Use the main, authenticated session to download the cover.
+            # This automatically includes the User-Agent and Authorization: Bearer token.
+            response = self.session.get(url, timeout=15)
+            # --- END MODIFICATION ---
+
             response.raise_for_status()
             content_type = response.headers.get("content-type", "").lower()
             if "image" not in content_type:

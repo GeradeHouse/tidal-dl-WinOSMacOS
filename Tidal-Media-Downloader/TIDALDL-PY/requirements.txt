@@ -1,7 +1,5 @@
 setuptools
--e ../../AIGPY/
 wheel
-requests
 requests==2.31.0
 colorama==0.4.4
 prettytable==3.1.1
@@ -15,3 +13,10 @@ qt-material==2.12
 spotipy
 moviepy
 pyinstaller
+pyinstaller-hooks-contrib
+imageio-ffmpeg
+ffpyplayer
+aiofiles
+aiohttp
+beautifulsoup4
+pathvalidate

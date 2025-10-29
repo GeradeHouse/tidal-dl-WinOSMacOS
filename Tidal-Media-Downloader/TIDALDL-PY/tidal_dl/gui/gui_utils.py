@@ -15,7 +15,7 @@ from typing import Optional
 import re
 
 from PyQt6.QtCore import QObject, pyqtSignal, Qt
-from PyQt6.QtWidgets import QMessageBox, QTreeWidgetItem, QTextEdit, QWidget
+from PyQt6.QtWidgets import QMessageBox, QTreeWidgetItem, QTextEdit, QWidget, QLabel
 from PyQt6.QtWidgets import QTreeWidgetItem
 from PyQt6.QtGui import QTextCursor
 from .gui_custom_dialog import ModernDarkDialog
@@ -120,12 +120,13 @@ def show_info_message(
     title: str,
     main_message: str,
     informative_text: str,
+    icon_path: str,
     show_folder_path: Optional[str] = None,
 ):
     """
     Displays a custom informational dialog.
+    Links in the informative text are automatically clickable.
     """
-    icon_path = paths.resource_path("assets/icons/info_icon.png")
     dialog = ModernDarkDialog(
         title=title,
         main_message=main_message,

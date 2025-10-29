@@ -1,3 +1,5 @@
+# --- START OF FILE gui_linking_handler.py ---
+
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 """
@@ -25,6 +27,7 @@ from ..tidal import TidalAPI  # Keep TidalAPI
 from ..printf import Printf
 from ..persistence import LinkPersistenceManager  # Keep persistence
 from .gui_utils import show_info_message  # Utility for showing messages
+from .. import paths
 
 if TYPE_CHECKING:
     from .gui import MainView  # Add MainView hint
@@ -100,13 +103,13 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         if row_index >= table.rowCount():
             return None, False
 
-        # Link status is stored in column 6 (Link Status)
-        status_item = table.item(row_index, 6)
-        status_data = (
-            status_item.data(QtCore.Qt.ItemDataRole.UserRole) if status_item else {}
+        # Link status is stored in the Title column's data (column 1)
+        title_item = table.item(row_index, 1)
+        title_data = (
+            title_item.data(QtCore.Qt.ItemDataRole.UserRole) if title_item else {}
         )
         link_status = (
-            status_data.get("link_status") if isinstance(status_data, dict) else None
+            title_data.get("link_status") if isinstance(title_data, dict) else None
         )
 
         # Candidate status is stored in column 0 (Indicator)
@@ -170,7 +173,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             for row_index in selected_indices:
                 link_status, _ = self._get_linking_status_from_row(row_index)
                 # Consider 'found', 'cached_linked', 'manual_linked' as linked
-                if link_status in ["found", "cached_linked", "manual_linked"]:
+                if link_status in ["found", "cached_linked", "manual_linked", "auto_linked", "found_uncertain"]:
                     any_selected_linked = True
                     break  # Found one linked, no need to check further
 
@@ -187,7 +190,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             if num_total > 0:  # Only check if table has rows
                 for row_index in range(num_total):
                     link_status, _ = self._get_linking_status_from_row(row_index)
-                    if link_status in ["found", "cached_linked", "manual_linked"]:
+                    if link_status in ["found", "cached_linked", "manual_linked", "auto_linked", "found_uncertain"]:
                         any_all_linked = True
                         break
 
@@ -283,11 +286,8 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 f"Unlink {num_selected} selected Spotify track(s)"
             )
             if unlinkAction:
-                unlinkAction.setEnabled(bool(selected_rows_indices))
-                # TODO: Implement unlink functionality
-                # unlinkAction.triggered.connect(lambda: self.unlinkSelectedTracks(selected_rows_indices))
-                unlinkAction.setEnabled(False)  # Disable until implemented
-                unlinkAction.setToolTip("Unlinking is not yet implemented.")
+                unlinkAction.setEnabled(True)
+                unlinkAction.triggered.connect(lambda: self.unlinkSelectedTracks(selected_rows_indices))
 
         # menu.exec(table.mapToGlobal(pos)) # Execution is handled by the caller (TableHandler)
 
@@ -339,6 +339,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 "Selection Error",
                 "No valid Spotify tracks were found in your selection.",
                 "Please ensure the selected tracks have complete metadata.",
+                icon_path=paths.resource_path("assets/icons/info_icon.png")
             )
             return
 
@@ -387,6 +388,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 "No Tracks to Link",
                 "No Spotify tracks were found in the current table.",
                 "Please load a Spotify playlist to begin linking.",
+                icon_path=paths.resource_path("assets/icons/info_icon.png")
             )
             return
 
@@ -438,7 +440,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 )
                 return
             # Use table_handler to update the row status
-            self.table_handler.update_linking_status(row_index, "linking")
+            self.table_handler.update_linking_status(row_index, "linking", "Linking...")
             Printf.info(f"Linking started for row {row_index + 1}...")
         except Exception as e:
             logger.error(
@@ -602,7 +604,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 return
             # Update table via TableHandler
             self.table_handler.update_linking_status(
-                row_index=row_index, status="error", error_message=error_message
+                row_index=row_index, status="error", status_text=f"Error: {error_message}", error_message=error_message
             )
             Printf.err(f"Linking error for row {row_index + 1}: {error_message}")
         except Exception as e:
@@ -645,6 +647,52 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         else:
             logger.warning("onStopLinkingClicked called but linking is not active.")
 
+    @pyqtSlot(int)
+    def on_no_match_selected(self, main_row_index: int):
+        """
+        Handles the action when the user declares that none of the candidates are a match.
+        """
+        logger.info(f"[LinkingGuiHandler] 'No Match' selected for row {main_row_index}.")
+
+        if not self.main_view or not self.table_handler or not self.table_handler.table_widget:
+            return
+
+        # Update the status to "Not Found"
+        self.table_handler.update_linking_status(
+            row_index=main_row_index,
+            status="not_found",
+            status_text="Not Found (Manual)",
+            tidal_track=None,
+            candidates=None, # Clear candidates as none matched
+            score=None
+        )
+
+        # Persist this "Not Found" state
+        playlist_id = None
+        playlist_obj = self.main_view.s_playlist_obj
+        if isinstance(playlist_obj, dict):
+            playlist_id = playlist_obj.get("data", {}).get("id")
+
+        title_item = self.table_handler.table_widget.item(main_row_index, 1)
+        title_item_data = title_item.data(QtCore.Qt.ItemDataRole.UserRole) if title_item else None
+        spotify_track_id = None
+        spotify_metadata = {}
+        if isinstance(title_item_data, dict):
+            spotify_metadata = title_item_data.get("data", {})
+            spotify_track_id = spotify_metadata.get("id")
+
+        if playlist_id and spotify_track_id:
+            self.persistence_manager.add_or_update_link(
+                playlist_id=playlist_id,
+                spotify_track_id=spotify_track_id,
+                spotify_track_details=spotify_metadata,
+                tidal_track_object=None, # Explicitly link to None
+            )
+            logger.debug(f"Persisted 'No Match' for Spotify track {spotify_track_id} in playlist {playlist_id}.")
+
+        # Finally, collapse the sub-row
+        self.manualLinkApplied.emit(main_row_index)
+
     @pyqtSlot(int, object)
     def onManualLinkSelected(self, main_row_index: int, selected_track: Track) -> None:
         """
@@ -674,24 +722,24 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             status="manual_linked",
             status_text=status_text,
             tidal_track=selected_track,
+            candidates=None # Clear candidates after manual selection
         )
 
         # Retrieve Spotify track ID from the main table row data (Title column)
         title_item = table_widget.item(main_row_index, 1)
-        title_item_data = (
-            title_item.data(QtCore.Qt.ItemDataRole.UserRole) if title_item else None
-        )
         spotify_track_id = None
-        if (
-            isinstance(title_item_data, dict)
-            and title_item_data.get("type") == "spotify_track"
-        ):
-            spotify_metadata = title_item_data.get(
-                "data", {}
-            )  # This should be the full Spotify track details
-            spotify_track_id = spotify_metadata.get("id")
-        else:
-            spotify_metadata = {}  # Ensure spotify_metadata is defined
+        spotify_metadata = {}  # Ensure spotify_metadata is defined
+
+        if title_item:
+            title_item_data = title_item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if (
+                isinstance(title_item_data, dict)
+                and title_item_data.get("type") == "spotify_track"
+            ):
+                spotify_metadata = title_item_data.get(
+                    "data", {}
+                )  # This should be the full Spotify track details
+                spotify_track_id = spotify_metadata.get("id")
 
         # Retrieve playlist ID, handling both dict and Playlist object types
         playlist_id = None
@@ -725,7 +773,59 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 f"[LinkingGuiHandler] Could not persist manual link for row {main_row_index}: Missing Spotify Track ID ({spotify_track_id}) or Playlist ID ({playlist_id})."
             )
 
+        # --- THIS IS THE FIX ---
         # Emit signal to trigger sub-row collapse
-        # self.manualLinkApplied.emit(main_row_index) # MODIFIED: Do not emit to prevent collapse
+        self.manualLinkApplied.emit(main_row_index)
+        # --- END OF FIX ---
+
         # Update the main link button state after applying a manual link
         self.update_link_button_state()
+
+    def unlinkSelectedTracks(self, selected_rows_indices: List[int]):
+        """
+        Removes the link for the selected Spotify tracks.
+        """
+        logger.info(f"Unlinking {len(selected_rows_indices)} selected tracks.")
+        if not self.main_view or not self.table_handler or not self.table_handler.table_widget or not self.persistence_manager:
+            logger.error("Cannot unlink tracks: critical components are missing (MainView, TableHandler, TableWidget, or PersistenceManager).")
+            return
+
+        playlist_id = None
+        playlist_obj = self.main_view.s_playlist_obj
+        if isinstance(playlist_obj, dict):
+            playlist_id = playlist_obj.get("data", {}).get("id")
+
+        if not playlist_id:
+            logger.error("Cannot unlink tracks: could not determine playlist ID.")
+            show_info_message(self.main_view, "Error", "Could not determine the current playlist.", "", icon_path=paths.resource_path("assets/icons/error_icon.png"))
+            return
+
+        table = self.table_handler.table_widget
+        for row_index in selected_rows_indices:
+            title_item = table.item(row_index, 1)
+            if not title_item:
+                continue
+            
+            item_data = title_item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(item_data, dict) and item_data.get("type") == "spotify_track":
+                spotify_track_id = item_data.get("data", {}).get("id")
+                if spotify_track_id:
+                    # Remove from persistence
+                    self.persistence_manager.remove_link(playlist_id, spotify_track_id)
+                    
+                    # Update UI
+                    self.table_handler.update_linking_status(
+                        row_index=row_index,
+                        status="not_linked",
+                        status_text="Not Linked",
+                        tidal_track=None,
+                        candidates=None,
+                        score=None
+                    )
+        
+        Printf.info(f"Finished unlinking {len(selected_rows_indices)} track(s).")
+        self.update_link_button_state()
+        if self.main_view.download_handler:
+            self.main_view.download_handler._update_download_button_text()
+
+# --- END OF FILE gui_linking_handler.py ---

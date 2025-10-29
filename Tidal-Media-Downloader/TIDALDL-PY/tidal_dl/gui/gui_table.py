@@ -69,6 +69,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
@@ -84,8 +85,8 @@ from ..printf import Printf  # Import Printf for formatDuration
 # --- Setup Logging ---
 logger = logging.getLogger(__name__)
 logger.setLevel(
-    logging.DEBUG
-)  # Set specific level for this module to only receive warnings
+    logging.WARNING
+)  # Set specific level for this module
 
 # The SelectableLabel and ColumnWidget classes have been replaced by a QTableWidget–based implementation.
 # The new SplitterTable class below implements a spreadsheet–like widget that supports row selection
@@ -109,10 +110,12 @@ class SplitterTable(QtWidgets.QTableWidget):
     candidateSelectedInSubRow = pyqtSignal(
         int, object
     )  # Args: main_row_index, selected_track
+    noMatchSelectedInSubRow = pyqtSignal(int) # Arg: main_row_index
 
     def __init__(self, column_names, parent=None):
         super().__init__(parent)
         self.setSortingEnabled(True)  # Enable sorting
+        self.linking_gui_handler = None
         self.setColumnCount(len(column_names))
         self.setHorizontalHeaderLabels(column_names)
         # Hide the vertical header to prevent displaying a numbered list in the first and second row.
@@ -202,6 +205,9 @@ class SplitterTable(QtWidgets.QTableWidget):
         if h_header:  # Add check
             h_header.sectionPressed.connect(self._handle_section_pressed)
             h_header.sectionResized.connect(self._handle_section_resized)
+
+    def set_linking_gui_handler(self, handler):
+        self.linking_gui_handler = handler
 
     # Removed _set_initial_column_widths and _restore_interactive_resize_modes methods
 
@@ -500,16 +506,17 @@ class SplitterTable(QtWidgets.QTableWidget):
         manual_link_fg_color = QtGui.QColor("#ff7f7f")
         fg_color_to_apply = default_fg_color  # Default
 
-        # Check the link_status from the data stored in the STATUS_COLUMN_INDEX item
-        status_item = self.item(row, 6)  # STATUS_COLUMN_INDEX = 6
-        item_data_for_status = (
-            status_item.data(QtCore.Qt.ItemDataRole.UserRole) if status_item else None
-        )
+        # --- START OF THE FIX for Red Text ---
+        # Check the link_status from the data stored in the TITLE item (column 1)
+        title_item = self.item(row, 1)
+        item_data_for_status = title_item.data(QtCore.Qt.ItemDataRole.UserRole) if title_item else None
+        # --- END OF THE FIX for Red Text ---
 
         is_manual_review = False
         link_status_from_data = None  # Initialize link_status_from_data
         if isinstance(item_data_for_status, dict):
             link_status_from_data = item_data_for_status.get("link_status")
+            # Add 'candidates_only' to the list of statuses that require manual review
             if link_status_from_data in ["manual_review_needed", "candidates_only"]:
                 is_manual_review = True
 
@@ -850,6 +857,27 @@ class SplitterTable(QtWidgets.QTableWidget):
                 f"[SplitterTable collapseSubRow] Could not find indicator item for main row {main_row_index} to reset its state."
             )
 
+    def collapse_all_sub_rows(self):
+        """
+        Finds and collapses all expanded candidate sub-rows in the table.
+        This is crucial to call before sorting to prevent UI corruption.
+        """
+        logger.debug("[SplitterTable] Collapsing all open sub-rows before sort.")
+        # Iterate in reverse to avoid index shifting issues when removing rows
+        for row in range(self.rowCount() - 1, -1, -1):
+            indicator_item = self.item(row, 0)
+            if not indicator_item:
+                continue
+
+            indicator_data = indicator_item.data(QtCore.Qt.ItemDataRole.UserRole) or {}
+            is_expanded = indicator_data.get("expanded", False)
+
+            if is_expanded:
+                # If the row is marked as expanded, call the toggle function
+                # which will handle the actual collapse logic.
+                logger.debug(f"[SplitterTable] Found expanded row at index {row}. Collapsing it.")
+                self._toggle_expand(row)
+
     def _toggle_expand(self, row: int):
         """
         Toggles the expanded state of a row with candidates, showing/hiding a sub-row
@@ -928,9 +956,7 @@ class SplitterTable(QtWidgets.QTableWidget):
                     if isinstance(track_dict, dict):
                         # Convert dict back to Track object
                         try:
-                            track_obj = aigpy.model.dictToModelHelper(
-                                track_dict, Track()
-                            )
+                            track_obj = aigpy.model.dictToModel(track_dict, Track())
                             # --- ADD THIS LOG ---
                             logger.debug(
                                 f"[SplitterTable _toggle_expand] Candidate {i} deserialized track_obj: {track_obj}, Title: {getattr(track_obj, 'title', 'N/A')}"
@@ -1002,10 +1028,16 @@ class SplitterTable(QtWidgets.QTableWidget):
             # Create the CandidateWidget and set it as a cell widget spanning all columns
             candidate_widget = CandidateWidget(
                 row, candidates, initial_selected_track_id=current_linked_id
-            )  # Pass main row index, candidates, and current_linked_id
+            )
             candidate_widget.candidateSelected.connect(
                 self.candidateSelectedInSubRow
-            )  # Connect signal
+            )
+            # --- START: CONNECT "NONE MATCH" SIGNAL ---
+            # This is the robust way: the table catches the signal from its child widget
+            # and re-emits its own signal, which the handler will connect to.
+            candidate_widget.noMatchSelected.connect(self.noMatchSelectedInSubRow)
+            # --- END: CONNECT "NONE MATCH" SIGNAL ---
+
             self.setCellWidget(sub_row, 0, candidate_widget)
             self.setSpan(sub_row, 0, 1, self.columnCount())  # Span across all columns
 
@@ -1154,6 +1186,9 @@ class CandidateWidget(QtWidgets.QWidget):
     candidateSelected = QtCore.pyqtSignal(
         int, object
     )  # Args: main_row_index, selected_track (Track object)
+    # --- START FIX: Add new signal ---
+    noMatchSelected = QtCore.pyqtSignal(int)  # Arg: main_row_index
+    # --- END FIX ---
 
     def __init__(
         self,
@@ -1290,6 +1325,23 @@ class CandidateWidget(QtWidgets.QWidget):
         self._populate_candidate_table()  # Populate before adding to layout might be fine
 
         layout.addWidget(self.candidate_table)
+
+        # --- START FIX: Use a horizontal layout for the button ---
+        bottom_layout = QHBoxLayout()
+        bottom_layout.setContentsMargins(0, 5, 0, 0) # Add some top margin
+
+        self.none_match_button = QtWidgets.QPushButton("None of these are a match")
+        self.none_match_button.setStyleSheet(
+            "QPushButton { padding: 4px; background-color: #553333; border: 1px solid #775555; }"
+            "QPushButton:hover { background-color: #664444; }"
+        )
+        self.none_match_button.clicked.connect(self._on_none_match_clicked)
+        
+        bottom_layout.addWidget(self.none_match_button)
+        bottom_layout.addStretch() # This pushes the button to the left
+
+        layout.addLayout(bottom_layout)
+        # --- END FIX ---
 
         # 2. Set the layout on the CandidateWidget (self)
         self.setLayout(
@@ -1471,6 +1523,14 @@ class CandidateWidget(QtWidgets.QWidget):
         # A more targeted update would be to iterate rows and update styles, but this is simpler.
         self._populate_candidate_table()  # Re-populate to update styles based on new self.selected_tidal_track_id
         # self.candidate_table.viewport().update() # Alternative, if styling is purely dynamic (less reliable here)
+
+    # --- START FIX: Add the slot for the new button ---
+    @pyqtSlot()
+    def _on_none_match_clicked(self):
+        """Slot to handle 'None of these are a match' button clicks."""
+        logger.debug(f"[CandidateWidget Row {self.main_row_index}] 'None Match' button clicked.")
+        self.noMatchSelected.emit(self.main_row_index)
+    # --- END FIX ---
 
     def calculate_required_height(self, max_rows_no_scroll=6) -> int:
         # Get the layout AFTER _setup_ui has run and self.setLayout() has been called.

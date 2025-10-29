@@ -45,6 +45,19 @@ Note: The `SuppressUrllib3DebugFilter` contains specific rules to target common
 # --- IMPORTS ---
 import logging
 
+# Monkey patch StreamHandler.emit to handle None stream (fixes PyInstaller issues)
+original_emit = logging.StreamHandler.emit
+
+def safe_emit(self, record):
+    if self.stream is None:
+        return
+    try:
+        original_emit(self, record)
+    except Exception:
+        pass
+
+logging.StreamHandler.emit = safe_emit
+
 # --- CONSTANTS ---
 
 # ANSI escape codes for terminal colors
@@ -141,14 +154,12 @@ class SuppressUrllib3DebugFilter(logging.Filter):
             # --- Filter rules for 'urllib3.connectionpool' logger ---
             if record.name == "urllib3.connectionpool":
                 msg = record.getMessage()
-                # Suppress messages about starting new connections
-                if msg.startswith("Starting new HTTPS connection"):
+                # Suppress messages about starting new connections (both HTTP and HTTPS)
+                if msg.startswith("Starting new HTTP connection") or msg.startswith("Starting new HTTPS connection"):
                     return False
                 # Suppress messages about specific Tidal domain connections
                 # (audio content, API, listen endpoint, resources)
-                if msg.startswith(
-                    "https://sp-pr-fa.audio.tidal.com:443 "
-                ):  # Audio streams
+                if msg.startswith("https://sp-pr-fa.audio.tidal.com:443 ") or msg.startswith("http://sp-ad-fa.audio.tidal.com:80 "):
                     return False
                 if msg.startswith("https://api.tidalhifi.com:443 "):  # Main API v1
                     return False
@@ -158,7 +169,16 @@ class SuppressUrllib3DebugFilter(logging.Filter):
                     return False
                 if msg.startswith("https://api.tidal.com:443 "):  # Base API (sessions)
                     return False
+                if msg.startswith("https://lgf.audio.tidal.com:443 "):  # Non-HTTPS audio (rare)
+                    return False
+                # Suppress messages about specific Spotify domain connections
                 if msg.startswith("https://api.spotify.com:443 "):  # Spotify API
+                    return False
+                if msg.startswith("https://mosaic.scdn.co:443 "):  # Spotify Image Mosaics
+                    return False
+                if msg.startswith("https://image-cdn-ak.spotifycdn.com:443 "):  # Spotify Image CDN
+                    return False
+                if msg.startswith("https://i.scdn.co:443 "):  # Spotify Image CDN
                     return False
 
         # If none of the suppression rules matched, allow the message to pass
@@ -306,7 +326,8 @@ class SuppressConfidentLinkingFilter(logging.Filter):
 
 # --- LOGGING SETUP FUNCTION ---
 
-print("DEBUG_TRACE: logging_config.py - Inside setup_logging()", file=sys.stderr)
+if sys.stderr is not None:
+    print("DEBUG_TRACE: logging_config.py - Inside setup_logging()", file=sys.stderr)
 
 
 def setup_logging():
@@ -335,10 +356,11 @@ def setup_logging():
     print(f"DEBUG_TRACE: logging_config.py - Getting root logger. Current level: {logging.getLevelName(logging.getLogger().level)}, Handlers: {logging.getLogger().handlers}", file=sys.stderr)
     """
     logger = logging.getLogger()  # Get the root logger instance
-    print(
-        "DEBUG_TRACE: logging_config.py - Checking for basic handlers to remove...",
-        file=sys.stderr,
-    )
+    if sys.stderr is not None:
+        print(
+            "DEBUG_TRACE: logging_config.py - Checking for basic handlers to remove...",
+            file=sys.stderr,
+        )
 
     # --- Remove Pre-existing Basic Handlers ---
     # Iterate over a copy of the handlers list to allow safe removal.
@@ -361,19 +383,21 @@ def setup_logging():
 
             # If it looks like a basic, unconfigured handler, remove it.
             if is_basic_handler:
-                print(
-                    f"DEBUG_TRACE: logging_config.py - Removing basic handler: {handler}",
-                    file=sys.stderr,
-                )
+                if sys.stderr is not None:
+                    print(
+                        f"DEBUG_TRACE: logging_config.py - Removing basic handler: {handler}",
+                        file=sys.stderr,
+                    )
                 logger.removeHandler(handler)
                 # print(f"DEBUG: Removed pre-existing basic stderr handler: {handler}", file=sys.stderr) # Uncomment for debug
 
     # --- Check if Custom Handler Already Exists ---
     # This prevents adding duplicate handlers if setup_logging is called multiple times.
-    print(
-        "DEBUG_TRACE: logging_config.py - Checking if custom handler exists...",
-        file=sys.stderr,
-    )
+    if sys.stderr is not None:
+        print(
+            "DEBUG_TRACE: logging_config.py - Checking if custom handler exists...",
+            file=sys.stderr,
+        )
     # We identify our handler by checking for the specific ColorFormatter.
     handler_exists = any(
         isinstance(h, logging.StreamHandler)
@@ -390,33 +414,45 @@ def setup_logging():
 
     # --- Add Custom Handler (if it doesn't exist) ---
     if not handler_exists:
-        print(
-            "DEBUG_TRACE: logging_config.py - Custom handler does NOT exist. Creating new handler.",
-            file=sys.stderr,
-        )
-        # Set the root logger level. All messages at this level or higher
-        # will be processed by handlers unless filtered.
-        logger.setLevel(logging.DEBUG)  # Process messages from DEBUG level upwards
+        if sys.stderr is not None:
+            print(
+                "DEBUG_TRACE: logging_config.py - Custom handler does NOT exist. Creating new handler.",
+                file=sys.stderr,
+            )
+        # Check if stderr is available (might be None in bundled apps)
+        if sys.stderr is None:
+            if sys.stderr is not None:
+                print(
+                    "DEBUG_TRACE: logging_config.py - sys.stderr is None, skipping console handler setup.",
+                    file=sys.stderr,
+                )
+            # Set logger level anyway
+            logger.setLevel(logging.DEBUG)
+        else:
+            # Set the root logger level. All messages at this level or higher
+            # will be processed by handlers unless filtered.
+            logger.setLevel(logging.DEBUG)  # Process messages from DEBUG level upwards
 
-        # Create and configure the custom console handler
-        # Use default stream (current sys.stderr) to follow redirection
-        console_handler = logging.StreamHandler()
-        color_formatter = ColorFormatter()
-        console_handler.setFormatter(color_formatter)
-        console_handler.setLevel(logging.DEBUG)  # Explicitly set handler level
+            # Create and configure the custom console handler
+            # Use default stream (current sys.stderr) to follow redirection
+            console_handler = logging.StreamHandler()
+            color_formatter = ColorFormatter()
+            console_handler.setFormatter(color_formatter)
+            console_handler.setLevel(logging.DEBUG)  # Explicitly set handler level
 
-        # Add filters to the NEW handler (Re-enabled)
-        console_handler.addFilter(empty_response_filter)
-        console_handler.addFilter(urllib3_filter)
-        console_handler.addFilter(linking_filter)
-        # logger.debug("Custom filters temporarily disabled for debugging.") # Remove debug message
+            # Add filters to the NEW handler (Re-enabled)
+            console_handler.addFilter(empty_response_filter)
+            console_handler.addFilter(urllib3_filter)
+            console_handler.addFilter(linking_filter)
+            # logger.debug("Custom filters temporarily disabled for debugging.") # Remove debug message
 
-        # Add the fully configured handler to the root logger
-        logger.addHandler(console_handler)
-        print(
-            f"DEBUG_TRACE: logging_config.py - Added new handler: {console_handler}",
-            file=sys.stderr,
-        )
+            # Add the fully configured handler to the root logger
+            logger.addHandler(console_handler)
+            if sys.stderr is not None:
+                print(
+                    f"DEBUG_TRACE: logging_config.py - Added new handler: {console_handler}",
+                    file=sys.stderr,
+                )
 
         # --- Configure Specific Third-Party Loggers ---
         # Ensure specific noisy loggers (like urllib3 sub-loggers) are set
@@ -432,7 +468,11 @@ def setup_logging():
 
         # Optional: Set the base 'urllib3' logger level higher if desired,
         # while keeping sub-loggers at DEBUG for filtering.
-        # logging.getLogger("urllib3").setLevel(logging.INFO)
+        logging.getLogger("urllib3").setLevel(logging.INFO)
+
+        # Suppress verbose PyInstaller logs in bundled applications
+        logging.getLogger('PyiFrozenFinder').setLevel(logging.WARNING)
+        logging.getLogger('PyInstaller').setLevel(logging.WARNING)
 
         # Log confirmation that setup is complete (using the new handler)
         logger.debug("Logging setup complete using ColorFormatter.")

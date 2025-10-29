@@ -20,12 +20,15 @@ mutagen for metadata validation. Error handling includes extensive logging for d
 and troubleshooting download issues.
 """
 
-from moviepy import VideoFileClip  # Explicit import for clarity
+# Import AudioFileClip from the correct path in moviepy 2.x
+# The old moviepy.editor module was removed in version 2.x
+from moviepy.audio.io.AudioFileClip import AudioFileClip
 
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Union, List, Dict, Any, cast
 import os
 import logging
+import tempfile
 
 # Removed sys import as it's no longer needed here
 # Removed ColorFormatter and logging setup - now handled in logging_config.py
@@ -44,6 +47,14 @@ import aigpy  # Imports aigpy.path, aigpy.file, aigpy.net, aigpy.string, aigpy.t
 
 # Import mutagen for detailed file inspection.
 from mutagen import File as MutagenFile
+
+# Add these imports for the new streamrip tagging engine
+import asyncio
+import tempfile
+from .metadata.album import AlbumMetadata
+from .metadata.track import TrackMetadata
+from .metadata.tagger import tag_file
+# End of new imports
 
 # logging.basicConfig(level=logging.DEBUG) # Removed as setup is now handled in logging_config.py
 
@@ -134,89 +145,102 @@ def __parseContributors__(
         return None
 
 
+def create_streamrip_metadata(track: Track, album: Album) -> TrackMetadata:
+    """
+    Converts tidal-dl's Track and Album models to streamrip's Metadata models.
+    This acts as a bridge between the two systems.
+    """
+    # ADDED: Debug log to inspect the album object being processed
+    logging.debug(f"[create_streamrip_metadata] Processing Album object: {album}")
+
+    # Step 1: Create the streamrip AlbumMetadata object from the tidal-dl Album
+    # We adapt the logic from streamrip's `from_tidal` classmethod
+    album_meta = AlbumMetadata.from_tidal(album)
+
+    # Step 2: Create the streamrip TrackMetadata object
+    # We adapt the logic from streamrip's `from_tidal` classmethod for tracks
+    track_meta = TrackMetadata.from_tidal(album_meta, track)
+
+    # Step 3: Manually add any extra information if needed
+    # For example, streamrip's model can hold composer, which we get from contributors
+    try:
+        contributors = TIDAL_API.getTrackContributors(str(track.id))
+        composers = __parseContributors__("Composer", contributors)
+        if composers:
+            track_meta.composer = ", ".join(composers)
+    except Exception as e:
+        logging.warning(f"Could not fetch contributors for track {track.id}: {e}")
+
+    return track_meta
+
+
 def __setMetaData__(
     track: "Track",
     album: Optional["Album"],
     filepath: str,
-    contributors: Optional[Dict[str, Any]],
-    lyrics: Optional[str],
+    contributors: Optional[Dict[str, Any]], # Kept for potential future use, but logic is now in bridge
+    lyrics: Optional[str], # Kept for potential future use
 ):
-    obj = aigpy.tag.TagTool(filepath)
-    # Use album parameter if available and not a string; otherwise, fallback to track.album if it is an object.
-    album_obj: Union[Album, Any]
-    if album is not None:
-        album_obj = album
-    elif (
-        hasattr(track, "album")
-        and track.album is not None
-        and not isinstance(track.album, str)
-    ):
-        album_obj = track.album
-    else:
-        # Create a dummy album object with minimal attributes to avoid attribute errors.
-        class DummyAlbum:
-            title = ""
-            artists: Union[str, List[Artist]] = ""  # Adjusted type hint
-            releaseDate = ""
-            numberOfVolumes = 1
-            numberOfTracks = 0
-            cover = ""
+    """
+    This function now uses the advanced streamrip tagging engine.
+    """
+    logging.info(f"Starting metadata tagging for '{os.path.basename(filepath)}' using streamrip engine.")
+    
+    # Determine the correct album object
+    album_obj = album if album is not None else track.album
+    if not isinstance(album_obj, Album):
+        logging.error("Could not determine a valid album object for metadata. Aborting tagging.")
+        return
 
-        album_obj = DummyAlbum()
-    obj.album = album_obj.title
-    obj.title = track.title
-    if not aigpy.string.isNull(track.version):
-        if obj.title is None:
-            obj.title = ""
-        obj.title += f" ({str(track.version)})"
-    # Ensure track.artists is a list of strings.
-    if not track.artists:
-        obj.artist = [""]
-    elif isinstance(track.artists, list):
-        obj.artist = [
-            artist.name if hasattr(artist, "name") else str(artist)
-            for artist in cast(List[Artist], track.artists)
-        ]
-    elif isinstance(track.artists, str):
-        obj.artist = [track.artists]
-    elif hasattr(track.artists, "name"):
-        obj.artist = [track.artists.name]
-    else:
-        obj.artist = [str(track.artists)]
-    obj.copyright = track.copyRight
-    obj.tracknumber = track.trackNumber
-    obj.discnumber = track.volumeNumber
-    obj.composer = __parseContributors__("Composer", contributors)
-    obj.isrc = track.isrc
+    cover_path = None  # Initialize cover_path to None
+    try:
+        # Step 1: Create the rich streamrip metadata object
+        streamrip_meta = create_streamrip_metadata(track, album_obj)
+        
+        # Add lyrics if available
+        if lyrics:
+            streamrip_meta.lyrics = lyrics
 
-    # Ensure album_obj.artists is a list of strings.
-    if not album_obj.artists:
-        obj.albumartist = [""]
-    elif isinstance(album_obj.artists, list):
-        obj.albumartist = [
-            artist.name if hasattr(artist, "name") else str(artist)
-            for artist in cast(List[Artist], album_obj.artists)
-        ]
-    elif isinstance(album_obj.artists, str):
-        obj.albumartist = [album_obj.artists]  # Handle string case
-    elif hasattr(album_obj.artists, "name"):  # Check if it's an object with 'name'
-        obj.albumartist = [album_obj.artists.name]
-    else:
-        obj.albumartist = [str(album_obj.artists)]  # Fallback to string conversion
-    obj.date = album_obj.releaseDate
-    # Ensure numberOfVolumes is an integer (default to 1 if missing)
-    totaldisc = (
-        album_obj.numberOfVolumes if album_obj.numberOfVolumes is not None else 1
-    )
-    obj.totaldisc = totaldisc
-    obj.lyrics = lyrics
-    # Similarly, ensure numberOfTracks is an integer (default to 0 if missing)
-    if totaldisc <= 1:
-        obj.totaltrack = (
-            album_obj.numberOfTracks if album_obj.numberOfTracks is not None else 0
-        )
-    coverpath = TIDAL_API.getCoverUrl(album_obj.cover, "1280", "1280")
-    obj.save(coverpath)
+        # --- ADVANCED: RYM Enrichment (Optional but Recommended) ---
+        # To enable this, you need to initialize the service.
+        # This is a simplified example.
+        try:
+            # These imports are here to prevent crashing if the files are not yet integrated
+            from .metadata.rym_service import RymMetadataService
+            # from streamrip.scraper import RYMMetadataScraper # You would need to integrate this file too
+            # from streamrip.config import RymConfig # You would need to integrate this file too
+            
+            # This setup should ideally be done once, not per track
+            # rym_config = RymConfig(enabled=True, genre_mode="replace") 
+            # scraper = RYMMetadataScraper()
+            # rym_service = RymMetadataService(scraper, rym_config)
+            # asyncio.run(streamrip_meta.album.enrich_with_rym(rym_service))
+            # logging.info("Enriched metadata with RYM data.")
+            logging.debug("RYM enrichment is a placeholder. Full integration of scraper/config needed.")
+        except ImportError:
+            logging.warning("Could not import RYM service components. Skipping metadata enrichment.")
+        # ---------------------------------------------------------
+
+        # Step 2: Download cover art to a temporary file
+        cover_data = TIDAL_API.getCoverData(album_obj.cover, "1280", "1280")
+        if cover_data:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_f:
+                temp_f.write(cover_data)
+                cover_path = temp_f.name
+        
+        # Step 3: Run the asynchronous tagging function
+        # We use asyncio.run() to call the async tag_file from our sync code
+        asyncio.run(tag_file(filepath, streamrip_meta, cover_path))
+
+        logging.info(f"Successfully tagged '{os.path.basename(filepath)}' with extensive metadata.")
+
+    except Exception as e:
+        logging.error(f"Failed to tag file '{os.path.basename(filepath)}' using streamrip engine: {e}", exc_info=True)
+        Printf.err(f"Failed to write metadata for '{track.title}': {e}")
+    finally:
+        # Clean up the temporary cover file
+        if cover_path and os.path.exists(cover_path):
+            os.remove(cover_path)
 
 
 def downloadCover(album: Album):
@@ -231,8 +255,14 @@ def downloadCover(album: Album):
     if path is None:
         return
     path += "/cover.jpg"
-    url = TIDAL_API.getCoverUrl(album.cover, "1280", "1280")
-    aigpy.net.downloadFile(url, path)
+    
+    # --- START OF MODIFICATION ---
+    # Use the authenticated getCoverData method instead of a direct, unauthenticated download.
+    cover_data = TIDAL_API.getCoverData(album.cover, "1280", "1280")
+    if cover_data:
+        with open(path, "wb") as f:
+            f.write(cover_data)
+    # --- END OF MODIFICATION ---
 
 
 def downloadAlbumInfo(album: Album, tracks: List[Track]):
@@ -291,7 +321,7 @@ def __validateTrackObject__(track: Any) -> Track:
     if isinstance(track, dict):
         logging.debug(f"Converting track from dict: {track}")
         # Use aigpy.model.dictToModel for conversion
-        track_obj = aigpy.model.dictToModel(track, Track)
+        track_obj = aigpy.model.dictToModel(track, Track())
         if track_obj is None:
             raise ValueError(f"Failed conversion from dict to Track object: {track}")
         track = track_obj  # Assign the converted object back
@@ -402,477 +432,145 @@ def downloadTrack(
     partSize: int = 1048576,
     downloadQuality: Optional[str] = None,
 ):
-    # Define check and actual_download_part_path with default values
-    # to ensure they exist in the finally block scope
     check = False
     actual_download_part_path = None
     try:
-        track = __validateTrackObject__(track)  # Ensure track is a valid Track object
-        # Add assertion for Pylance after validation
+        track = __validateTrackObject__(track)
         assert isinstance(
             track, Track
         ), f"Validation failed, expected Track, got {type(track)}"
 
-        logging.debug(f"downloadTrack: track type after validation: {type(track)}")
-        # Removed redundant string check as validation handles it
         logging.debug(f"Starting downloadTrack for '{track.title}'")
 
-        # Determine the intended quality based on parameters and settings
-        intended_quality = None
-        if downloadQuality is None:
-            # If None is passed, it means "Highest Available" was explicitly chosen in GUI
-            intended_quality = AudioQuality.HIGHEST
-            logging.debug(
-                f"downloadQuality is None, setting intended_quality to HIGHEST."
-            )
-        else:
-            # A specific quality string was passed
-            logging.debug(f"Specific downloadQuality requested: '{downloadQuality}'")
-            quality_map_enum = {
-                "m4a - aac – high efficiency (96 kbps, 44.1 khz)": AudioQuality.LOW,
-                "m4a - aac – full bandwidth (320 kbps, 44.1 khz)": AudioQuality.HIGH,
-                "flac – cd standard (16-bit, 44.1 khz)": AudioQuality.LOSSLESS,
-                "flac – high resolution (24-bit, 96 khz)": AudioQuality.HI_RES_LOSSLESS,
-                "highest available": AudioQuality.HIGHEST,  # Mapping for completeness
-                "low": AudioQuality.LOW,
-                "high": AudioQuality.HIGH,
-                "lossless": AudioQuality.LOSSLESS,
-                "hi_res_lossless": AudioQuality.HI_RES_LOSSLESS,
-                "highest": AudioQuality.HIGHEST,
+        requested_mp3 = False
+        intended_quality = SETTINGS.audioQuality
+
+        if downloadQuality:
+            quality_map = {
+                "low": AudioQuality.LOW, "high": AudioQuality.HIGH, "mp3": AudioQuality.MP3,
+                "lossless": AudioQuality.LOSSLESS, "hi_res_lossless": AudioQuality.HI_RES_LOSSLESS,
+                "highest": AudioQuality.HIGHEST
             }
-            intended_quality = quality_map_enum.get(downloadQuality.lower())
-            if intended_quality is None:
-                logging.warning(
-                    f"Could not map specific downloadQuality '{downloadQuality}', falling back to global settings."
-                )
-                intended_quality = SETTINGS.audioQuality  # Fallback if mapping fails
-            else:
-                logging.debug(
-                    f"Intended quality set from specific request: {intended_quality.name}"
-                )
+            # Normalize the input string for broader matching
+            normalized_quality = downloadQuality.lower().replace(" ", "_").replace("-", "_")
+            for key, value in quality_map.items():
+                if key in normalized_quality:
+                    intended_quality = value
+                    break
+        
+        if intended_quality == AudioQuality.MP3:
+            requested_mp3 = True
+            intended_quality = AudioQuality.HIGH
+            logging.debug("MP3 requested. Setting download quality to HIGH for conversion.")
 
-        # Initialize final request quality 'q' with the determined intent
         q = intended_quality
-
-        # If the *intended* quality is HIGHEST, determine the actual best available
         if intended_quality == AudioQuality.HIGHEST:
-            logging.debug(
-                f"Intended quality is HIGHEST, performing metadata analysis for track '{track.title}'..."
-            )
             is_hires = False
             media_metadata = getattr(track, "mediaMetadata", {})
             if isinstance(media_metadata, dict):
                 tags = media_metadata.get("tags", [])
-                if isinstance(tags, list):
-                    for tag in tags:
-                        if isinstance(tag, str) and tag.upper() == "HIRES_LOSSLESS":
-                            is_hires = True
-                            logging.debug(
-                                f"Track '{track.title}' identified as HIRES based on metadata."
-                            )
-                            break
+                if "HIRES_LOSSLESS" in [str(t).upper() for t in tags]:
+                    is_hires = True
+            q = AudioQuality.HI_RES_LOSSLESS if is_hires else AudioQuality.LOSSLESS
 
-            if is_hires:
-                q = AudioQuality.HI_RES_LOSSLESS  # Upgrade q
-                logging.debug(
-                    f"Setting final request quality 'q' to HI_RES_LOSSLESS for '{track.title}'."
-                )
-            else:
-                q = AudioQuality.LOSSLESS  # Downgrade q to LOSSLESS if HIRES not found
-                logging.debug(
-                    f"Setting final request quality 'q' to LOSSLESS for '{track.title}' (HIRES not available)."
-                )
-        else:
-            # If intended quality was specific (Low, High, Lossless), q remains as intended_quality
-            logging.debug(
-                f"Final request quality 'q' is '{q.name}' (specific quality requested)."
-            )
-
-        # Now, 'q' holds the correct AudioQuality enum value for the API call
-        # Add check for track.id before calling API
         if track.id is None:
-            raise ValueError(f"Track '{track.title}' has no ID. Cannot fetch stream.")
-        stream = TIDAL_API.getStreamUrl(str(track.id), q)  # Ensure ID is string
-        logging.debug(f"Requesting stream for '{track.title}' with quality: {q.name}")
-        logging.debug(f"Retrieved stream for '{track.title}': {stream}")
-        logging.debug(f"stream.url: {stream.url}")
-        # Do not log the entire list of URLs to avoid excessive output.
-        # logging.debug(f"stream.urls: {stream.urls}")
+            raise ValueError(f"Track '{track.title}' has no ID.")
+        stream = TIDAL_API.getStreamUrl(str(track.id), q)
 
-        # Check if the received stream quality matches the requested quality
-        requested_quality_str = q.value
-        received_quality_str = stream.soundQuality
-        if (
-            requested_quality_str == AudioQuality.HI_RES_LOSSLESS.value
-            and received_quality_str != AudioQuality.HI_RES_LOSSLESS.value
-        ):
-            logging.warning(
-                f"Requested HI_RES_LOSSLESS for track '{track.title}' (ID: {track.id}), but API returned stream quality: {received_quality_str}. Proceeding with download at {received_quality_str}."
-            )
-        elif requested_quality_str != received_quality_str:
-            logging.debug(
-                f"Requested quality '{requested_quality_str}' but received '{received_quality_str}' for track '{track.title}'."
-            )
-
-        # Get artist and flag info to pass to getTrackPath
-        artists = TIDAL_API.getArtistsName(
-            cast(List[Artist], getattr(track, "artists", []))
-        )
+        artists = TIDAL_API.getArtistsName(cast(List[Artist], getattr(track, "artists", [])))
         artist = getattr(getattr(track, "artist", None), "name", "") or artists
-
-        # Pass playlist_context to getTrackPath
         path = getTrackPath(track, stream, artist, artists, album, playlist_context)
-        logging.debug(f"Computed download path: {path}")
+        path = os.path.join(SETTINGS.downloadPath, path)
+        path = os.path.normpath(path)
+        aigpy.path.mkdirs(os.path.dirname(path))
 
         if SETTINGS.showTrackInfo and not SETTINGS.multiThread:
             Printf.track(cast(Track, track), stream)
-
-        if userProgress is not None:
-            logging.debug(
-                f"[DL Track] Calling userProgress.updateStream for '{track.title}'"
-            )
+        if userProgress:
             userProgress.updateStream(stream)
 
-        # check exist
-        if stream.url and __isSkip__(path, stream.url):
-            Printf.success(aigpy.path.getFileName(path) + " (skip:already exists!)")
-            logging.debug(f"File exists, skipping download for '{track.title}'")
+        ### START DASH INTEGRATION ###
+        # The key change is here. We now use `stream.urls` which can be a list of segments.
+        url_list = stream.urls if stream.urls and len(stream.urls) > 1 else [stream.url]
+        if not url_list or url_list[0] is None:
+            raise Exception("No valid URL or URL list available for download.")
+        
+        # The aigpy DownloadTool natively supports a list of URLs for concatenation.
+        logging.info(f"[DL Track] name='{os.path.basename(path)}'. Preparing to download {len(url_list)} segment(s).")
+        ### END DASH INTEGRATION ###
+
+        if __isSkip__(path, url_list[0]):
+            Printf.success(f"{os.path.basename(path)} (skip:already exists!)")
             return True, ""
 
-        logging.info(
-            f"[DL Track] name={aigpy.path.getFileName(path)}\nurl={stream.url or ''}"
-        )
-        logging.debug(f"Preparing to download '{track.title}'")
-        # --- Correction for MP4 streams saved with .flac extension ---
-        # Check if the stream is actually MP4/DASH but the path was set to .flac
-        logging.debug(
-            f"[Path Correction] Checking stream.manifestMimeType='{getattr(stream, 'manifestMimeType', 'N/A')}', stream.codec='{getattr(stream, 'codec', 'N/A')}', current path='{path}'"
-        )
-        is_mp4_stream = False
-        if stream.manifestMimeType and "dash+xml" in stream.manifestMimeType:
-            is_mp4_stream = True
-            logging.debug("Stream identified as DASH/MP4 based on manifestMimeType.")
-        elif stream.codec and (
-            "mp4a" in stream.codec.lower() or "avc" in stream.codec.lower()
-        ):  # Check codec if manifest type is missing
-            is_mp4_stream = True
-            logging.debug(f"Stream identified as MP4 based on codec: {stream.codec}.")
-
-        if is_mp4_stream and path.lower().endswith(".flac"):
-            original_path_flac = path  # Store the original intended .flac path
-            # Explicit log for detecting Hi-Res FLAC in MP4 container scenario
-            if q == AudioQuality.HI_RES_LOSSLESS:
-                logging.info(
-                    f"Detected HI-RES FLAC stream delivered in MP4 container for track '{track.title}'. Path correction applied."
-                )
-            path = path[:-5] + ".mp4"  # Correct path to .mp4 for download
-            logging.warning(
-                f"Corrected path extension to .mp4 for download based on stream type. Original: '{original_path_flac}', Corrected: '{path}'"
-            )
-        else:
-            original_path_flac = path  # Store the original path if no correction needed
-        # --- End Correction ---
-        if SETTINGS.showTrackInfo and not SETTINGS.multiThread:
-            Printf.track(cast(Track, track), stream)
-
-        if userProgress is not None:
-            logging.debug(
-                f"[DL Track] Calling userProgress.updateStream after path correction for '{track.title}'"
-            )
-            userProgress.updateStream(stream)
-
-        # check exist (again after potential path correction)
-        if stream.url and __isSkip__(path, stream.url):
-            Printf.success(aigpy.path.getFileName(path) + " (skip:already exists!)")
-            logging.debug(
-                f"File exists after path correction, skipping download for '{track.title}'"
-            )
-            return True, ""
-
-        # Log the final path used for the download tool (including .part)
         actual_download_part_path = path + ".part"
-        logging.info(
-            f"[DL Track] Starting download for '{track.title}' to temporary file: '{actual_download_part_path}'"
-        )
-        logging.info(
-            f"[DL Track] Source URL: {stream.url or ''}"
-        )  # Log URL for reference
-        logging.debug(f"Preparing to download '{track.title}'")
-
-        # === Immediate Cancellation Check ===
         if main_view_instance.cancel_requested:
-            Printf.info(
-                f"Cancellation requested before starting download for '{track.title}'."
-            )
-            # The finally block will handle cleanup
             return False, "Download cancelled by user before start."
-        # === End Cancellation Check ===
 
-        # Use stream.urls if available; otherwise, fallback to [stream.url] (and ensure nonempty list)
-        url_list = (
-            stream.urls
-            if stream.urls
-            else ([stream.url] if stream.url is not None else [])
-        )
-        logging.debug(
-            f"Created url_list for '{track.title}' with {len(url_list)} URL(s)"
-        )
-        if not url_list:
-            raise Exception("No URL available for download")
-
-        # *** TODO: Cancellation Check Point ***
-        # Need to investigate if aigpy.download.DownloadTool can be cancelled.
-        # If yes, pass main_view_instance.cancel_requested or an event to tool.start()
-        # If no, immediate cancellation is not possible mid-download.
         tool = aigpy.download.DownloadTool(actual_download_part_path, url_list)
         tool.setUserProgress(userProgress)
         tool.setPartSize(partSize)
-        logging.debug(
-            f"[DL Track] Starting download tool for '{track.title}' with partSize {partSize}"
-        )
-        # Re-enable the tool's internal progress printing for GUI progress bar
-        # Keep the tool's internal progress printing enabled (True) for console output
-        # --- CHANGE THIS LINE ---
-        check, err = tool.start(False)  # Set showProgress to False
-        # --- END CHANGE ---
-        logging.debug(
-            f"[DL Track] Download tool returned for '{track.title}' with check={check}, err={err}"
-        )
+        check, err = tool.start(False)
+
         if not check:
-            # Error occurred during download, return False
-            # The finally block will handle cleanup
-            Printf.err(f"DL Track '{track.title}' failed: {str(err) if err else ''}")
-            return False, str(err) if err else ""
+            Printf.err(f"DL Track '{track.title}' failed: {err or ''}")
+            return False, str(err or "")
 
-        # --- Debugging before decryption ---
-        part_path = actual_download_part_path  # Use the defined variable
-        logging.debug(f"--- Debug Info: Before Decryption for '{track.title}' ---")
-        try:
-            if os.path.exists(part_path):
-                with open(part_path, "rb") as f_part:
-                    part_header = f_part.read(64)
-                logging.debug(
-                    f"File header of '{part_path}' (first 64 bytes, hex): {part_header.hex()}"
-                )
-                # Run ffprobe on the .part file
-                log_ffprobe_info(part_path, "Before Decryption")
-            else:
-                logging.warning(f"Part file '{part_path}' not found before decryption.")
-        except Exception as e:
-            logging.error(
-                f"Error getting debug info before decryption for '{part_path}': {e}"
-            )
-        # --- End Debugging before decryption ---
+        __encrypted__(stream, actual_download_part_path, path)
 
-        # encrypted -> decrypt and remove encrypted file
-        logging.debug(
-            f"Starting decryption step for '{track.title}' (Input: '{part_path}', Output: '{path}')"
-        )
-        __encrypted__(stream, part_path, path)
-        logging.debug(f"Decryption complete for '{track.title}'")
-
-        # --- Debugging after decryption ---
-        logging.debug(f"--- Debug Info: After Decryption for '{track.title}' ---")
-        try:
-            if os.path.exists(path):
-                # Run ffprobe on the potentially decrypted file
-                log_ffprobe_info(path, "After Decryption")
-            else:
-                logging.warning(
-                    f"Output file '{path}' not found after decryption step."
-                )
-        except Exception as e:
-            logging.error(f"Error running ffprobe after decryption for '{path}': {e}")
-        # --- End Debugging after decryption ---
-
-        # Add additional debug information: file size and file header (in hex) - This logs the header *again* after decryption, which is fine.
-        try:
-            file_size = os.path.getsize(path)
-            with open(path, "rb") as f:
-                header = f.read(64)
-            logging.debug(f"Downloaded file '{path}' size: {file_size} bytes")
-            logging.debug(f"File header (first 64 bytes, hex): {header.hex()}")
-        except Exception as e:
-            logging.debug(
-                f"Failed to retrieve file header info for '{track.title}': {e}"
-            )
-
-        # Process quality conversion (Demuxing for HI_RES_LOSSLESS in MP4):
-        # This needs to happen BEFORE Mutagen check if the original download was MP4
-        # Check if the *resolved* quality for this track is HI_RES_LOSSLESS, not the global setting
-        if q == AudioQuality.HI_RES_LOSSLESS:
-            logging.debug(
-                f"Resolved quality 'q' is HI_RES_LOSSLESS, proceeding with demux check for track '{track.title}'."
-            )
+        if requested_mp3 and path.lower().endswith((".m4a", ".mp4", ".mov", ".flac")):
+            logging.info(f"Converting '{track.title}' to MP3 (320kbps)...")
+            Printf.info(f"Converting '{track.title}' to MP3...")
+            mp3_path = path.rsplit('.', 1)[0] + '.mp3'
             try:
-                # Check the stream codec or mime type if available, or rely on file extension as fallback
-                # For now, relying on the initial path extension determined by getTrackPath based on stream info
-                # Use the potentially corrected 'path' variable here!
-                if path.lower().endswith((".mp4", ".mov")):  # Check corrected path
-                    # Use the stored original .flac path as the target for ffmpeg output
-                    demuxed_path = original_path_flac
-
-                    # --- Replacing ffmpeg with moviepy ---
-                    logging.debug(
-                        f"--- Using moviepy to extract FLAC from '{path}' to '{demuxed_path}' for '{track.title}' ---"
-                    )
-                    try:
-                        logging.info(
-                            f"Attempting moviepy audio extraction from '{path}' to '{demuxed_path}'..."
-                        )
-                        # Use VideoFileClip directly
-                        with Clip(path) as video_clip:
-                            audio_clip = video_clip.audio
-                            if audio_clip:
-                                # Write audio with FLAC codec
-                                # Use logger=None to avoid moviepy's verbose console output if desired, or 'bar' for progress
-                                audio_clip.write_audiofile(
-                                    demuxed_path, codec="flac", logger="bar"
-                                )
-                                audio_clip.close()  # Explicitly close audio clip
-                            else:
-                                logging.error(
-                                    f"Moviepy could not extract audio stream from '{path}'."
-                                )
-                                raise ValueError(
-                                    f"No audio stream found in '{path}' by moviepy."
-                                )
-
-                        logging.info(
-                            f"Moviepy audio extraction completed successfully for '{track.title}'."
-                        )
-                        os.remove(path)  # Remove original MP4
-                        path = demuxed_path  # Update path to the new FLAC file
-                        logging.debug(
-                            f"Moviepy extraction complete. Path updated to '{path}'"
-                        )
-
-                        # --- Debugging after moviepy (ffprobe removed) ---
-                        logging.debug(
-                            f"--- Debug Info: After moviepy extraction for '{track.title}' ---"
-                        )
-                        # log_ffprobe_info(path, "After ffmpeg") # Removed ffprobe call
-                        # --- End Debugging ---
-                        # *** Use Mutagen to inspect the final audio file ***
-                        # This runs AFTER successful moviepy extraction
-                        try:
-                            # Use the 'path' variable which points to the final file (demuxed .flac)
-                            audio_info = MutagenFile(path)
-                            if audio_info is not None:
-                                logging.debug(
-                                    f"Mutagen validation successful for '{track.title}' on file '{path}'. Info: {audio_info}"
-                                )
-                            else:
-                                # If Mutagen returns None, the file is likely corrupt or not the expected format
-                                logging.error(
-                                    f"Mutagen could not parse file '{path}' after ffmpeg. It might be corrupt or an unexpected format."
-                                )
-                                raise ValueError(
-                                    f"Mutagen could not parse file '{path}' after ffmpeg."
-                                )
-                        except Exception as e:
-                            # Catch Mutagen-specific errors and other potential issues during validation
-                            logging.error(
-                                f"Mutagen inspection failed for '{track.title}' on file '{path}' after ffmpeg: {e}"
-                            )
-                            # Log the full traceback for detailed debugging
-                            logging.error(traceback.format_exc())
-                            # Re-raise the exception to halt the process if validation fails
-                            raise ValueError(
-                                f"Mutagen validation failed for '{path}' after ffmpeg"
-                            ) from e
-
-                    except Exception as moviepy_err:  # Catch moviepy/general errors
-                        logging.error(
-                            f"Moviepy audio extraction failed for '{track.title}': {moviepy_err}",
-                            exc_info=True,
-                        )
-                        # Attempt to clean up potentially incomplete output file
-                        if os.path.exists(demuxed_path):
-                            try:
-                                os.remove(demuxed_path)
-                                logging.info(
-                                    f"Cleaned up potentially incomplete output file: '{demuxed_path}'"
-                                )
-                            except OSError as remove_err:
-                                logging.error(
-                                    f"Failed to remove incomplete output file '{demuxed_path}': {remove_err}"
-                                )
-                        raise moviepy_err  # Re-raise to stop the process
-
-                else:
-                    logging.debug(
-                        f"No moviepy processing needed for '{track.title}' (file was not .mp4/.mov)"
-                    )
+                with AudioFileClip(path) as audio_clip:
+                    audio_clip.write_audiofile(mp3_path, codec='mp3', bitrate='320k', logger=None)
+                os.remove(path)
+                path = mp3_path
             except Exception as e:
-                Printf.err(f"Demuxing of FLAC stream failed: {str(e)}")
+                Printf.err(f"Failed to convert '{track.title}' to MP3: {e}")
+
+        if path.lower().endswith((".mp4", ".mov")) and stream.codec and 'flac' in stream.codec.lower():
+            logging.info(f"Detected FLAC in MP4 container for '{track.title}'. Extracting...")
+            demuxed_path = path.rsplit('.', 1)[0] + '.flac'
+            try:
+                with AudioFileClip(path) as audio_clip:
+                    audio_clip.write_audiofile(demuxed_path, codec="flac", logger="bar")
+                os.remove(path)
+                path = demuxed_path
+            except Exception as e:
+                Printf.err(f"Demuxing of FLAC stream failed: {e}")
                 return False, str(e)
 
-        # contributors
-        try:
-            # Add check for track.id before calling API
-            if track.id is None:
-                raise ValueError("Track ID is missing, cannot fetch contributors.")
-            contributors = TIDAL_API.getTrackContributors(
-                str(track.id)
-            )  # Ensure ID is string
-            logging.debug(f"Retrieved contributors for '{track.title}': {contributors}")
-        except Exception as ex:
-            logging.debug(f"Failed to retrieve contributors for '{track.title}': {ex}")
-            contributors = None
+        contributors = None
+        if track.id:
+            try:
+                contributors = TIDAL_API.getTrackContributors(str(track.id))
+            except Exception as ex:
+                logging.debug(f"Failed to get contributors: {ex}")
 
-        # lyrics
-        try:
-            # Add check for track.id before calling API
-            if track.id is None:
-                raise ValueError("Track ID is missing, cannot fetch lyrics.")
-            lyrics = TIDAL_API.getLyrics(str(track.id)).subtitles  # Ensure ID is string
-            logging.debug(f"Retrieved lyrics for '{track.title}'")
-            if SETTINGS.lyricFile:
-                lrcPath = path.rsplit(".", 1)[0] + ".lrc"
-                aigpy.file.write(lrcPath, lyrics, "w")
-                logging.debug(f"Written lyric file for '{track.title}' to {lrcPath}")
-        except Exception as ex:
-            # logging.debug(f"No lyrics available for '{track.title}': {ex}")
-            lyrics = ""
+        lyrics = ""
+        if track.id:
+            try:
+                lyrics = TIDAL_API.getLyrics(str(track.id)).subtitles
+                if SETTINGS.lyricFile:
+                    lrcPath = path.rsplit(".", 1)[0] + ".lrc"
+                    aigpy.file.write(lrcPath, lyrics, "w")
+            except Exception as ex:
+                logging.debug(f"No lyrics available: {ex}")
 
         __setMetaData__(cast(Track, track), album, path, contributors, lyrics)
         Printf.success(track.title or f"Track {track.id}")
-        logging.debug(
-            f"[DL Track] Finished downloadTrack for '{track.title}' successfully"
-        )
-
-        return True, ""  # Return success
+        return True, ""
 
     except Exception as e:
-        Printf.err(f"DL Track '{track.title}' failed: {str(e)}")
-        logging.debug(f"Exception in downloadTrack for '{track.title}': {e}")
+        Printf.err(f"DL Track '{getattr(track, 'title', 'Unknown')}' failed: {e}")
+        logging.error(f"Exception in downloadTrack for '{getattr(track, 'title', 'Unknown')}': {e}", exc_info=True)
         return False, str(e)
     finally:
-        # Cleanup: Remove .part file if download failed or was stopped/cancelled
-        # Check if the download tool completed successfully AND no stop/cancel was requested
-        check_defined_and_true = "check" in locals() and check
-        interrupted = (
-            main_view_instance.stop_requested or main_view_instance.cancel_requested
-        )
-
-        # Need the path to the .part file, ensure 'actual_download_part_path' is accessible
-        if (
-            "actual_download_part_path" in locals()
-            and actual_download_part_path is not None
-        ):
-            part_file_to_remove = actual_download_part_path
-            if not check_defined_and_true or interrupted:
-                if os.path.exists(part_file_to_remove):
-                    logging.warning(
-                        f"Download incomplete or interrupted for '{track.title}'. Removing temporary file: {part_file_to_remove}"
-                    )
-                    try:
-                        os.remove(part_file_to_remove)
-                    except OSError as remove_err:
-                        logging.error(
-                            f"Failed to remove temporary file '{part_file_to_remove}': {remove_err}"
-                        )
+        interrupted = main_view_instance.stop_requested or main_view_instance.cancel_requested
+        if (not check or interrupted) and actual_download_part_path and os.path.exists(actual_download_part_path):
+            os.remove(actual_download_part_path)
 
 
 # Modify signature to accept playlist_context (including Album)
@@ -889,10 +587,10 @@ def downloadTracks(
         filtered_tracks = []
         # Determine a quality filter using the same mapping.
         quality_map_enum = {
-            "m4a - aac – high efficiency (96 kbps, 44.1 khz)": AudioQuality.LOW,
-            "m4a - aac – full bandwidth (320 kbps, 44.1 khz)": AudioQuality.HIGH,
-            "flac – cd standard (16-bit, 44.1 khz)": AudioQuality.LOSSLESS,
-            "flac – high resolution (24-bit, 96 kbps)": AudioQuality.HI_RES_LOSSLESS,  # Corrected kHz typo
+            "m4a - aac – high efficiency (96 kbps, 44.1 khz)": AudioQuality.LOW,
+            "m4a - aac – full bandwidth (320 kbps, 44.1 khz)": AudioQuality.HIGH,
+            "flac – cd standard (16-bit, 44.1 khz)": AudioQuality.LOSSLESS,
+            "flac – high resolution (24-bit, 96 khz)": AudioQuality.HI_RES_LOSSLESS,  # Corrected kHz typo
             "highest available": AudioQuality.HIGHEST,
             "low": AudioQuality.LOW,
             "high": AudioQuality.HIGH,
@@ -1054,3 +752,5 @@ def downloadTracks(
                 downloadQuality,
             )  # Pass main_view_instance and playlist_context
         thread_pool.shutdown(wait=True)
+
+# --- END OF FILE download.py ---

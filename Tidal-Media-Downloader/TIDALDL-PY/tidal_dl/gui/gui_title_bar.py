@@ -28,9 +28,8 @@ from PyQt6.QtGui import QMouseEvent, QIcon, QPixmap, QCursor  # Add QCursor
 from typing import cast  # Add cast
 from .. import paths  # For resolving icon paths
 import os
-
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # MODIFIED: Change to DEBUG to see logs from this file
+logger.setLevel(logging.WARNING)  # Set specific level for this module
 
 
 # +++ START: Overlay Widget Definition +++
@@ -79,7 +78,8 @@ class TitleBarInteractionArea(QWidget):
         is_on_top_border = relative_y >= 0 and relative_y < BORDER_WIDTH
         # +++ Add Detailed Log BEFORE the check +++
         logger.debug(
-            f"TitleBarInteractionArea.mousePressEvent: Checking Press. GlobalY={global_pos.y()}, WinY={window_y}, RelativeY={relative_y}, IsOnTop={is_on_top_border}"
+            "TitleBarInteractionArea.mousePressEvent: Checking Press. GlobalY=%s, WinY=%s, RelativeY=%s, IsOnTop=%s",
+            global_pos.y(), window_y, relative_y, is_on_top_border
         )
 
         if is_on_top_border:
@@ -121,7 +121,8 @@ class TitleBarInteractionArea(QWidget):
 
         if log_this_event:
             logger.debug(
-                f"TitleBarInteractionArea.mouseMoveEvent: GlobalPos={a0.globalPosition().toPoint()}. Pressed={self._mouse_pressed}"
+                "TitleBarInteractionArea.mouseMoveEvent: GlobalPos=%s. Pressed=%s",
+                a0.globalPosition().toPoint(), self._mouse_pressed
             )
 
         # --- Handle Top Edge Hover Cursor ---
@@ -135,7 +136,8 @@ class TitleBarInteractionArea(QWidget):
 
             if log_this_event:
                 logger.debug(
-                    f"  HoverCheck: GlobalY={global_pos.y()}, WinY={window_y}, RelativeY={relative_y}, IsOnTop={is_on_top_border}"
+                    "  HoverCheck: GlobalY=%s, WinY=%s, RelativeY=%s, IsOnTop=%s",
+                    global_pos.y(), window_y, relative_y, is_on_top_border
                 )
 
             current_cursor = main_window.cursor().shape()
@@ -158,7 +160,7 @@ class TitleBarInteractionArea(QWidget):
             delta = a0.globalPosition().toPoint() - self._mouse_press_pos
             main_window.move(self._window_pos_before_move + delta)
             if log_this_event:
-                logger.debug(f"  DragLogic: Moving window by {delta}.")
+                logger.debug("  DragLogic: Moving window by %s.", delta)
             a0.accept()  # Accept move event during drag
 
         # --- Update throttle timer ---
@@ -202,9 +204,10 @@ class CustomTitleBar(QWidget):
 
         # +++ Add Debug Log +++
         logger.debug(
-            f"CustomTitleBar WA_TranslucentBackground: {self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)}"
+            "CustomTitleBar WA_TranslucentBackground: %s",
+            self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         )
-        logger.debug(f"CustomTitleBar autoFillBackground: {self.autoFillBackground()}")
+        logger.debug("CustomTitleBar autoFillBackground: %s", self.autoFillBackground())
         # +++ End Debug Log +++
         # +++ END: Added for rounded corners and transparency +++
 
@@ -213,7 +216,7 @@ class CustomTitleBar(QWidget):
         self.max_button = None  # Keep for icon toggling
         self.initUI()
         # +++ Add Debug Log for Stylesheet +++
-        logger.debug(f"CustomTitleBar effective stylesheet: {self.styleSheet()}")
+        logger.debug("CustomTitleBar effective stylesheet: %s", self.styleSheet())
         # +++ End Debug Log +++
 
     # --- Menu Slots ---
@@ -271,14 +274,15 @@ class CustomTitleBar(QWidget):
                 menu_button.setIcon(icon)
                 menu_button.setIconSize(default_icon_size)
                 logger.debug(
-                    f"Loaded menu icon from: {menu_icon_path.replace('\\\\', '/')}"
+                    "Loaded menu icon from: %s",
+                    menu_icon_path.replace("\\", "/")
                 )
             else:
-                logger.error(f"Failed to load QPixmap from menu icon: {menu_icon_path}")
+                logger.error("Failed to load QPixmap from menu icon: %s", menu_icon_path)
                 menu_button.setText("☰")
                 menu_button.setIconSize(default_icon_size)
         else:
-            logger.warning(f"Menu icon not found at: {menu_icon_path}")
+            logger.warning("Menu icon not found at: %s", menu_icon_path)
             menu_button.setText("☰")
             menu_button.setIconSize(default_icon_size)
 
