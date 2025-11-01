@@ -877,7 +877,10 @@ class PlaylistTreeHandler(QObject):
         try:
             item_type = item_data.get("type", "tidal")
             if item_type == "spotify":
-                playlist_id = item_data.get("data", {}).get("id")
+                playlist_data = item_data.get("data")
+                playlist_id = None
+                if playlist_data is not None:
+                    playlist_id = playlist_data.get("id")
                 if playlist_id:
                     logger.info(f"Spotify playlist selected: ID {playlist_id}")
                     self.spotifyPlaylistSelected.emit(item_data)
@@ -896,16 +899,15 @@ class PlaylistTreeHandler(QObject):
 
             elif item_type == "tidal":
                 playlist_obj = item_data.get("data")
-                if isinstance(playlist_obj, Playlist):
+                if playlist_obj is not None and isinstance(playlist_obj, Playlist):
                     playlist_id = getattr(playlist_obj, "uuid", None)
                     logger.info(f"Tidal playlist selected: UUID {playlist_id}")
                     self.tidalPlaylistSelected.emit(playlist_obj)
                     self._displayTidalTracks(playlist_obj)
                 else:
-                    logger.error(
-                        f"Tidal playlist item clicked, but data invalid: {playlist_obj}"
-                    )
-                    Printf.err("Error loading Tidal playlist: Invalid data.")
+                    error_msg = f"Tidal playlist item clicked, but data invalid or None: {type(playlist_obj)}"
+                    logger.error(error_msg)
+                    Printf.err(f"Error loading Tidal playlist: {error_msg}")
                     setattr(self.main_view, "s_playlist_obj", None)
             else:
                 logger.warning(f"Unknown item type clicked: {item_type}")
@@ -1354,7 +1356,10 @@ class PlaylistTreeHandler(QObject):
             iterator = QtWidgets.QTreeWidgetItemIterator(root)
             while iterator.value():
                 child = iterator.value()
-                item_data = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if child:
+                    item_data = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                else:
+                    item_data = None
                 if not isinstance(item_data, dict):
                     iterator += 1
                     continue
@@ -1364,11 +1369,13 @@ class PlaylistTreeHandler(QObject):
 
                 if service == 'tidal':
                     playlist_obj = item_data.get("data")
-                    if isinstance(playlist_obj, Playlist):
+                    if playlist_obj is not None and isinstance(playlist_obj, Playlist):
                         # Collage case: worker emits "tidal_playlist_<uuid>"
-                        collage_key = f"tidal_playlist_{getattr(playlist_obj, 'uuid', '')}"
-                        if url == collage_key:
-                            match = True
+                        playlist_uuid = getattr(playlist_obj, 'uuid', '')
+                        if playlist_uuid:
+                            collage_key = f"tidal_playlist_{playlist_uuid}"
+                            if url == collage_key:
+                                match = True
                         # Normal case: direct cover URL
                         elif item_data.get("image_url") == url:
                             match = True
@@ -1417,7 +1424,10 @@ class PlaylistTreeHandler(QObject):
                 continue
 
             item_data = child_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-            if isinstance(item_data, dict) and item_data.get("type") == "spotify":
+            if not isinstance(item_data, dict):
+                continue
+                
+            if item_data.get("type") == "spotify":
                 needs_refresh = item_data.get(
                     "icon_needs_refresh", True
                 )  # Default to True if key missing
@@ -1434,7 +1444,10 @@ class PlaylistTreeHandler(QObject):
                             child_item.setData(
                                 0, QtCore.Qt.ItemDataRole.UserRole, item_data
                             )  # Save update
-                            playlist_id = item_data.get("data", {}).get("id")
+                            playlist_data = item_data.get("data")
+                            playlist_id = None
+                            if playlist_data is not None:
+                                playlist_id = playlist_data.get("id")
                             self._start_icon_fetch(
                                 child_item, "spotify", playlist_id, image_url
                             )
@@ -1452,8 +1465,8 @@ class PlaylistTreeHandler(QObject):
                             child_item.setData(
                                 0, QtCore.Qt.ItemDataRole.UserRole, item_data
                             )
-                # else:
-                # logger.debug(f"Item {child_item.text(0)} does not need refresh or is already pending.")
+            # else:
+            #     logger.debug(f"Item {child_item.text(0)} does not need refresh or is already pending.")
 
     @pyqtSlot(int)
     def _onSpotifyScroll(self, value: int) -> None:

@@ -152,6 +152,10 @@ class SuppressUrllib3DebugFilter(logging.Filter):
                 if record.getMessage().startswith("Converted retries value:"):
                     return False  # Suppress this message
 
+            # --- Filter rules for oauth2 / spotipy debug messages ---
+            if record.name == "oauth2" or "oauth2" in record.name:
+                return False  # Suppress all oauth2 debug messages
+            
             # --- Filter rules for 'urllib3.connectionpool' logger ---
             if record.name == "urllib3.connectionpool":
                 msg = record.getMessage()

@@ -394,8 +394,16 @@ class Printf(object):
 
     @staticmethod
     def success(string: str):
-        # Check if INFO level logging is enabled before printing (SUCCESS is typically INFO level)
-        if logging.getLogger().isEnabledFor(logging.INFO):
+        # SUCCESS messages should be more visible - show them if either:
+        # 1. Root logger is at INFO level or lower (usual case for user-visible messages)
+        # 2. The SUCCESS message is critical (login, authentication, etc.)
+        is_critical_success = any(keyword in string.lower() for keyword in [
+            'login successful', 'authentication', 'token', 'credential', 
+            'connected', 'authenticated', 'logged in'
+        ])
+        
+        # Show if it's a critical success message OR if INFO logging is generally enabled
+        if is_critical_success or logging.getLogger().isEnabledFor(logging.INFO):
             global print_mutex
             print_mutex.acquire()
             print(aigpy.cmd.green(f"{settings.LANG.PRINT_SUCCESS} ") + string)
