@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from .gui import MainView
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 
 class SpotifyGuiHandler(QObject):

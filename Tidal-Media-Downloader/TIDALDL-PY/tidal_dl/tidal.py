@@ -38,7 +38,7 @@ import logging
 # Create a logger instance for this module
 logger = logging.getLogger(__name__)
 logger.setLevel(
-    logging.WARNING
+    logging.ERROR
 )  # Set specific level for this module to only receive warnings
 
 from PIL import Image

@@ -13,6 +13,7 @@
 
 import os
 from typing import TYPE_CHECKING
+import logging
 
 from PyQt6 import QtWidgets
 from PyQt6.QtCore import Qt
@@ -37,6 +38,8 @@ from ..apiKey import getItems
 if TYPE_CHECKING:
     from .gui_settings import SettingsPage
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 def init_ui(self: "SettingsPage"):
     """

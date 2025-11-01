@@ -1,52 +1,49 @@
 {
   "folders": [
-    {
-      "path": "."
-    }
+    { "path": "." },                    // root repo: C:\PythonProjects\tidal-dl-WinOSMacOS
+    // { "path": "Tidal-Media-Downloader" }, // code, but git-ignored by VS Code
+    // { "path": "AIGPY" }                   // code, but git-ignored by VS Code
   ],
-
   "settings": {
-    // ────────────── Git (per-folder) ──────────────
-    ".": {                       // keep root .git_disabled hidden
-      "git.enabled": false
-    },
-    "AIGPY": {                   // re-enabled earlier
-      "git.enabled": true
-    },
-    "Tidal-Media-Downloader": {  // active repo you just restored
-      "git.enabled": true
-    },
+    // ────────────── Git ──────────────
+    "git.enabled": true,
+    "git.autoRepositoryDetection": "subFolders",
+    "git.openRepositoryInParentFolders": "always",
+    "git.ignoredRepositories": [
+      "${workspaceFolder}/Tidal-Media-Downloader",
+      "${workspaceFolder}/AIGPY"
+    ],
+
+    // 👇 show files even if .gitignore says to ignore them
+    "explorer.excludeGitIgnore": false,
 
     // ────────────── File Exclusions ──────────────
-
-    // Hide large/unnecessary folders from Explorer view
     "files.exclude": {
       "**/.git_disabled": true,
       "**/.history": true,
       "**/.lh": true,
-      "**/.roo": true,
-      "**/.venv": false,
+      "**/.roo": false,
+      "**/.venv": false,   // <— show .venv
       "**/.vscode": false,
-      "**/backup": true,
+      "**/backup": false,
       "**/cache": true,
       "**/download": false,
       "AIGPY/.git_disabled": true,
       "AIGPY/__pycache__": true,
       "AIGPY/aigpy/__pycache__": true,
-      "Tidal-Media-Downloader/.git": true,
       "Tidal-Media-Downloader/build": true,
       "Tidal-Media-Downloader/dist": false,
       "Tidal-Media-Downloader/__pycache__": true,
       "Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/__pycache__": true
     },
 
-    // Omit these paths from “Search in Files”
+    // ────────────── Search Exclusions ──────────────
     "search.exclude": {
       "**/.git_disabled": true,
       "**/.history": true,
       "**/.lh": true,
       "**/.roo": true,
-      "**/.venv": true,
+      "**/.venv": false,
       "**/.vscode": true,
       "**/backup": true,
       "**/cache": true,
@@ -54,14 +51,13 @@
       "AIGPY/.git_disabled": true,
       "AIGPY/__pycache__": true,
       "AIGPY/aigpy/__pycache__": true,
-      "Tidal-Media-Downloader/.git": true,
       "Tidal-Media-Downloader/build": true,
       "Tidal-Media-Downloader/dist": true,
       "Tidal-Media-Downloader/__pycache__": true,
       "Tidal-Media-Downloader/TIDALDL-PY/tidal_dl/__pycache__": true
     },
 
-    // Instruct file-watcher to skip these large directories
+    // ────────────── Watcher Exclusions ──────────────
     "files.watcherExclude": {
       "**/.git_disabled/**": true,
       "**/.history/**": true,
@@ -75,7 +71,6 @@
       "AIGPY/.git_disabled/**": true,
       "AIGPY/__pycache__/**": true,
       "AIGPY/aigpy/__pycache__/**": true,
-      "Tidal-Media-Downloader/.git/**": true,
       "Tidal-Media-Downloader/build/**": true,
       "Tidal-Media-Downloader/dist/**": true,
       "Tidal-Media-Downloader/__pycache__/**": true,
@@ -83,11 +78,7 @@
     },
 
     // ────────────── Python / Pylance ──────────────
-
-    // tell VS Code to use the venv in <workspace>/.venv
     "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
-
-    // DO NOT exclude the virtual-env: Pylance needs it
     "python.analysis.exclude": [
       "**/.history",
       "**/.lh",
@@ -113,12 +104,10 @@
       "reportMissingImports": "error",
       "reportMissingTypeStubs": "none"
     },
-
-    // let Pylance auto-discover libs in site-packages
     "python.analysis.autoSearchPaths": true,
     "python.analysis.useLibraryCodeForTypes": true,
 
-    // don’t auto-activate venv in terminals
-    "python.terminal.activateEnvironment": false
+    // auto-activate venv in terminals
+    "python.terminal.activateEnvironment": true
   }
 }

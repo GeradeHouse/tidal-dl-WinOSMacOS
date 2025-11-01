@@ -56,7 +56,8 @@ from .metadata.track import TrackMetadata
 from .metadata.tagger import tag_file
 # End of new imports
 
-# logging.basicConfig(level=logging.DEBUG) # Removed as setup is now handled in logging_config.py
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Forward declaration for type hinting MainView without circular import
 from typing import TYPE_CHECKING
@@ -79,33 +80,33 @@ def log_ffprobe_info(filepath: str, stage_name: str):
             "-show_streams",
             filepath,
         ]
-        logging.debug(f"[{stage_name}] Running ffprobe: {' '.join(command)}")
+        logger.debug(f"[{stage_name}] Running ffprobe: {' '.join(command)}")
         result = subprocess.run(command, capture_output=True, text=True, check=True)
         probe_data = json.loads(result.stdout)
-        logging.debug(
+        logger.debug(
             f"[{stage_name}] ffprobe result for '{filepath}': {json.dumps(probe_data, indent=2)}"
         )
         # Log specific useful info
         if "format" in probe_data:
-            logging.debug(
+            logger.debug(
                 f"[{stage_name}] Format: {probe_data['format'].get('format_name', 'N/A')}, Duration: {probe_data['format'].get('duration', 'N/A')}"
             )
         if "streams" in probe_data:
             for i, stream in enumerate(probe_data["streams"]):
-                logging.debug(
+                logger.debug(
                     f"[{stage_name}] Stream #{i}: Codec: {stream.get('codec_name', 'N/A')}, Type: {stream.get('codec_type', 'N/A')}, Profile: {stream.get('profile', 'N/A')}, Bitrate: {stream.get('bit_rate', 'N/A')}, SampleFmt: {stream.get('sample_fmt', 'N/A')}, SampleRate: {stream.get('sample_rate', 'N/A')}"
                 )
     # except FileNotFoundError: # Removed ffprobe dependency
-    #     logging.warning(f"[{stage_name}] ffprobe command not found. Skipping ffprobe analysis for '{filepath}'. Make sure ffmpeg (which includes ffprobe) is installed and in your system's PATH.")
+    #     logger.warning(f"[{stage_name}] ffprobe command not found. Skipping ffprobe analysis for '{filepath}'. Make sure ffmpeg (which includes ffprobe) is installed and in your system's PATH.")
     # except subprocess.CalledProcessError as e: # Removed ffprobe dependency
-    #     logging.error(f"[{stage_name}] ffprobe failed for '{filepath}': {e}")
-    #     logging.error(f"[{stage_name}] ffprobe stderr: {e.stderr}")
+    #     logger.error(f"[{stage_name}] ffprobe failed for '{filepath}': {e}")
+    #     logger.error(f"[{stage_name}] ffprobe stderr: {e.stderr}")
     # except json.JSONDecodeError as e: # Removed ffprobe dependency
-    #     logging.error(f"[{stage_name}] Failed to parse ffprobe JSON output for '{filepath}': {e}")
+    #     logger.error(f"[{stage_name}] Failed to parse ffprobe JSON output for '{filepath}': {e}")
     except (
         Exception
     ) as e:  # Catch general exceptions during media analysis (ffprobe replacement/removal)
-        logging.error(
+        logger.error(
             f"[{stage_name}] Error during media analysis (ffprobe replacement) on '{filepath}': {e}"
         )
 
@@ -151,7 +152,7 @@ def create_streamrip_metadata(track: Track, album: Album) -> TrackMetadata:
     This acts as a bridge between the two systems.
     """
     # ADDED: Debug log to inspect the album object being processed
-    logging.debug(f"[create_streamrip_metadata] Processing Album object: {album}")
+    logger.debug(f"[create_streamrip_metadata] Processing Album object: {album}")
 
     # Step 1: Create the streamrip AlbumMetadata object from the tidal-dl Album
     # We adapt the logic from streamrip's `from_tidal` classmethod
@@ -169,7 +170,7 @@ def create_streamrip_metadata(track: Track, album: Album) -> TrackMetadata:
         if composers:
             track_meta.composer = ", ".join(composers)
     except Exception as e:
-        logging.warning(f"Could not fetch contributors for track {track.id}: {e}")
+        logger.warning(f"Could not fetch contributors for track {track.id}: {e}")
 
     return track_meta
 
@@ -184,12 +185,12 @@ def __setMetaData__(
     """
     This function now uses the advanced streamrip tagging engine.
     """
-    logging.info(f"Starting metadata tagging for '{os.path.basename(filepath)}' using streamrip engine.")
+    logger.info(f"Starting metadata tagging for '{os.path.basename(filepath)}' using streamrip engine.")
     
     # Determine the correct album object
     album_obj = album if album is not None else track.album
     if not isinstance(album_obj, Album):
-        logging.error("Could not determine a valid album object for metadata. Aborting tagging.")
+        logger.error("Could not determine a valid album object for metadata. Aborting tagging.")
         return
 
     cover_path = None  # Initialize cover_path to None
@@ -215,10 +216,10 @@ def __setMetaData__(
             # scraper = RYMMetadataScraper()
             # rym_service = RymMetadataService(scraper, rym_config)
             # asyncio.run(streamrip_meta.album.enrich_with_rym(rym_service))
-            # logging.info("Enriched metadata with RYM data.")
-            logging.debug("RYM enrichment is a placeholder. Full integration of scraper/config needed.")
+            # logger.info("Enriched metadata with RYM data.")
+            logger.debug("RYM enrichment is a placeholder. Full integration of scraper/config needed.")
         except ImportError:
-            logging.warning("Could not import RYM service components. Skipping metadata enrichment.")
+            logger.warning("Could not import RYM service components. Skipping metadata enrichment.")
         # ---------------------------------------------------------
 
         # Step 2: Download cover art to a temporary file
@@ -232,10 +233,10 @@ def __setMetaData__(
         # We use asyncio.run() to call the async tag_file from our sync code
         asyncio.run(tag_file(filepath, streamrip_meta, cover_path))
 
-        logging.info(f"Successfully tagged '{os.path.basename(filepath)}' with extensive metadata.")
+        logger.info(f"Successfully tagged '{os.path.basename(filepath)}' with extensive metadata.")
 
     except Exception as e:
-        logging.error(f"Failed to tag file '{os.path.basename(filepath)}' using streamrip engine: {e}", exc_info=True)
+        logger.error(f"Failed to tag file '{os.path.basename(filepath)}' using streamrip engine: {e}", exc_info=True)
         Printf.err(f"Failed to write metadata for '{track.title}': {e}")
     finally:
         # Clean up the temporary cover file
@@ -310,7 +311,7 @@ def __validateTrackObject__(track: Any) -> Track:
 
     # If track is a string, attempt to convert using TIDAL_API.getTypeData
     if isinstance(track, str):
-        logging.debug(f"Converting track from string: {track}")
+        logger.debug(f"Converting track from string: {track}")
         from .tidal import TIDAL_API, Type
 
         track_obj = TIDAL_API.getTypeData(track, Type.Track)
@@ -319,7 +320,7 @@ def __validateTrackObject__(track: Any) -> Track:
         track = track_obj
     # If track is a dict, convert to Track object using aigpy
     if isinstance(track, dict):
-        logging.debug(f"Converting track from dict: {track}")
+        logger.debug(f"Converting track from dict: {track}")
         # Use aigpy.model.dictToModel for conversion
         track_obj = aigpy.model.dictToModel(track, Track())
         if track_obj is None:
@@ -327,10 +328,10 @@ def __validateTrackObject__(track: Any) -> Track:
         track = track_obj  # Assign the converted object back
     # Extra check: if track.title is callable, this indicates invalid data
     if hasattr(track, "title") and callable(track.title):
-        logging.error(f"Track title is callable, invalid track data: {track}")
+        logger.error(f"Track title is callable, invalid track data: {track}")
         if "title" in track.__dict__ and not callable(track.__dict__["title"]):
             track.title = track.__dict__["title"]
-            logging.debug(f"Fixed track title from __dict__: {track.title}")
+            logger.debug(f"Fixed track title from __dict__: {track.title}")
         else:
             raise ValueError(
                 "Track title remains callable after conversion: " + str(track)
@@ -342,7 +343,7 @@ def __validateTrackObject__(track: Any) -> Track:
             raise ValueError(
                 "Invalid track object - missing ID and audioQuality attribute."
             )
-        logging.warning(
+        logger.warning(
             f"Track object missing audioQuality, attempting to fetch full info for ID: {track_id}"
         )
         try:
@@ -350,7 +351,7 @@ def __validateTrackObject__(track: Any) -> Track:
 
             full_track = TIDAL_API.getTrack(str(track_id))  # Ensure ID is string
             if full_track and hasattr(full_track, "audioQuality"):
-                logging.info(
+                logger.info(
                     f"Successfully fetched full track info with audioQuality for ID: {track_id}"
                 )
                 return full_track  # Return the complete object
@@ -359,7 +360,7 @@ def __validateTrackObject__(track: Any) -> Track:
                     "Failed to fetch full track info or audioQuality still missing."
                 )
         except Exception as e:
-            logging.error(f"Error fetching full track info for ID {track_id}: {e}")
+            logger.error(f"Error fetching full track info for ID {track_id}: {e}")
             raise ValueError(
                 "Invalid track object - missing audioQuality attribute and failed to fetch full info; got type "
                 + str(type(track))
@@ -367,7 +368,7 @@ def __validateTrackObject__(track: Any) -> Track:
 
     # Additional check: if track is still a string, attempt conversion using getTrack
     if isinstance(track, str):
-        logging.error(
+        logger.error(
             "Track remains a string after conversion; attempting getTrack conversion again"
         )
         from .tidal import TIDAL_API, Type
@@ -377,11 +378,11 @@ def __validateTrackObject__(track: Any) -> Track:
             if not isinstance(new_track, Track):
                 raise TypeError(f"Expected Track object but got {type(new_track)}")
             track = new_track
-            logging.debug(
+            logger.debug(
                 f"Successfully converted track string to Track object: {track.id}"
             )
         except Exception as e:
-            logging.error(f"Critical error converting track {track}: {str(e)}")
+            logger.error(f"Critical error converting track {track}: {str(e)}")
             raise ValueError(
                 f"Failed to convert track ID to valid object: {track}"
             ) from e
@@ -397,28 +398,28 @@ def __getTrackQuality__(track: Track) -> AudioQuality:
     """Safely get audio quality from track object with extra debug logging"""
     import logging
 
-    logging.debug(
+    logger.debug(
         f"Entering __getTrackQuality__ with track: {track} (type: {type(track)}) and mediaMetadata: {getattr(track, 'mediaMetadata', None)}"
     )
     try:
         if hasattr(track, "audioQuality") and track.audioQuality is not None:
             quality_str = str(track.audioQuality)
-            logging.debug(f"Track has audioQuality attribute: {quality_str}")
+            logger.debug(f"Track has audioQuality attribute: {quality_str}")
             return AudioQuality(quality_str)
         if hasattr(track, "mediaMetadata"):
             media_meta = track.mediaMetadata
             if isinstance(media_meta, dict):
                 quality_str = media_meta.get("audioQuality")
                 if quality_str and isinstance(quality_str, str):
-                    logging.debug(f"Derived quality from mediaMetadata: {quality_str}")
+                    logger.debug(f"Derived quality from mediaMetadata: {quality_str}")
                     return AudioQuality(quality_str)
         # Fallback if neither attribute exists
-        logging.warning(
+        logger.warning(
             f"Track object missing both audioQuality and mediaMetadata. Defaulting to LOSSLESS."
         )
         return AudioQuality.LOSSLESS
     except Exception as e:
-        logging.error(f"Exception in __getTrackQuality__: {e}. Defaulting to LOSSLESS.")
+        logger.error(f"Exception in __getTrackQuality__: {e}. Defaulting to LOSSLESS.")
         return AudioQuality.LOSSLESS
 
 
@@ -440,7 +441,7 @@ def downloadTrack(
             track, Track
         ), f"Validation failed, expected Track, got {type(track)}"
 
-        logging.debug(f"Starting downloadTrack for '{track.title}'")
+        logger.debug(f"Starting downloadTrack for '{track.title}'")
 
         requested_mp3 = False
         intended_quality = SETTINGS.audioQuality
@@ -461,7 +462,7 @@ def downloadTrack(
         if intended_quality == AudioQuality.MP3:
             requested_mp3 = True
             intended_quality = AudioQuality.HIGH
-            logging.debug("MP3 requested. Setting download quality to HIGH for conversion.")
+            logger.debug("MP3 requested. Setting download quality to HIGH for conversion.")
 
         q = intended_quality
         if intended_quality == AudioQuality.HIGHEST:
@@ -496,7 +497,7 @@ def downloadTrack(
             raise Exception("No valid URL or URL list available for download.")
         
         # The aigpy DownloadTool natively supports a list of URLs for concatenation.
-        logging.info(f"[DL Track] name='{os.path.basename(path)}'. Preparing to download {len(url_list)} segment(s).")
+        logger.info(f"[DL Track] name='{os.path.basename(path)}'. Preparing to download {len(url_list)} segment(s).")
         ### END DASH INTEGRATION ###
 
         if __isSkip__(path, url_list[0]):
@@ -519,7 +520,7 @@ def downloadTrack(
         __encrypted__(stream, actual_download_part_path, path)
 
         if requested_mp3 and path.lower().endswith((".m4a", ".mp4", ".mov", ".flac")):
-            logging.info(f"Converting '{track.title}' to MP3 (320kbps)...")
+            logger.info(f"Converting '{track.title}' to MP3 (320kbps)...")
             Printf.info(f"Converting '{track.title}' to MP3...")
             mp3_path = path.rsplit('.', 1)[0] + '.mp3'
             try:
@@ -531,7 +532,7 @@ def downloadTrack(
                 Printf.err(f"Failed to convert '{track.title}' to MP3: {e}")
 
         if path.lower().endswith((".mp4", ".mov")) and stream.codec and 'flac' in stream.codec.lower():
-            logging.info(f"Detected FLAC in MP4 container for '{track.title}'. Extracting...")
+            logger.info(f"Detected FLAC in MP4 container for '{track.title}'. Extracting...")
             demuxed_path = path.rsplit('.', 1)[0] + '.flac'
             try:
                 with AudioFileClip(path) as audio_clip:
@@ -547,7 +548,7 @@ def downloadTrack(
             try:
                 contributors = TIDAL_API.getTrackContributors(str(track.id))
             except Exception as ex:
-                logging.debug(f"Failed to get contributors: {ex}")
+                logger.debug(f"Failed to get contributors: {ex}")
 
         lyrics = ""
         if track.id:
@@ -557,7 +558,7 @@ def downloadTrack(
                     lrcPath = path.rsplit(".", 1)[0] + ".lrc"
                     aigpy.file.write(lrcPath, lyrics, "w")
             except Exception as ex:
-                logging.debug(f"No lyrics available: {ex}")
+                logger.debug(f"No lyrics available: {ex}")
 
         __setMetaData__(cast(Track, track), album, path, contributors, lyrics)
         Printf.success(track.title or f"Track {track.id}")
@@ -565,7 +566,7 @@ def downloadTrack(
 
     except Exception as e:
         Printf.err(f"DL Track '{getattr(track, 'title', 'Unknown')}' failed: {e}")
-        logging.error(f"Exception in downloadTrack for '{getattr(track, 'title', 'Unknown')}': {e}", exc_info=True)
+        logger.error(f"Exception in downloadTrack for '{getattr(track, 'title', 'Unknown')}': {e}", exc_info=True)
         return False, str(e)
     finally:
         interrupted = main_view_instance.stop_requested or main_view_instance.cancel_requested
@@ -641,35 +642,35 @@ def downloadTracks(
                     else 0
                 )
                 available_rank = quality_ranking.get(max_available_enum, 0)
-                logging.debug(
+                logger.debug(
                     f"Filtering track {track.id}: Max Available Quality Enum={max_available_enum.name} (Rank {available_rank}), Filter Quality Enum={filter_quality.name if filter_quality else 'None'} (Rank {filter_rank})"
                 )
 
                 # Allow download if available quality rank is >= filter quality rank
                 if filter_quality is not None and available_rank >= filter_rank:
-                    logging.debug(
+                    logger.debug(
                         f"Track {track.id} passed quality filter (Available >= Requested)."
                     )
                     filtered_tracks.append(track)
                 else:
                     # Provide more context in the log message when a track fails the filter
-                    logging.debug(
+                    logger.debug(
                         f"Track {track.id} did NOT pass quality filter (Available Rank {available_rank} < Requested Rank {filter_rank})."
                     )
             except Exception as e:
-                logging.warning(
+                logger.warning(
                     f"Error during quality filtering for track {track.id}: {e}"
                 )
-                logging.error(
+                logger.error(
                     traceback.format_exc()
                 )  # Add traceback for better debugging
                 continue
         tracks = filtered_tracks
-        logging.debug(
+        logger.debug(
             f"Finished filtering tracks. Number of tracks remaining: {len(tracks)}"
         )
         if not tracks:
-            logging.warning(
+            logger.warning(
                 "No tracks matched the specified quality filter. Nothing to download."
             )
             return  # Exit if no tracks are left
@@ -680,41 +681,41 @@ def downloadTracks(
     # and wants ONLY lossless tracks, even if HIRES is available.
 
     # Now, for each track that passes the quality filter, call downloadTrack with album forced as None.
-    logging.debug(
+    logger.debug(
         f"Proceeding to download {len(tracks)} tracks. MultiThread: {SETTINGS.multiThread}"
     )
     if not SETTINGS.multiThread:
-        logging.debug("Using single-thread download.")
+        logger.debug("Using single-thread download.")
         for index, item in enumerate(tracks):
             # === Pause/Stop Check (Inside Loop) ===
-            logging.debug(
+            logger.debug(
                 f"[Thread] Loop {index+1}/{len(tracks)}: Checking stop_event (is_set={main_view_instance.stop_event.is_set()})"
             )
             if main_view_instance.stop_event.is_set():
                 Printf.info("Stop request detected. Aborting download queue.")
                 break  # Exit the loop
 
-            logging.debug(
+            logger.debug(
                 f"[Thread] Loop {index+1}/{len(tracks)}: Checking download_paused (is {main_view_instance.download_paused})"
             )
             if main_view_instance.download_paused:
                 Printf.info(
                     "Download queue paused. Waiting for resume signal..."
                 )  # Updated log
-                logging.debug(
+                logger.debug(
                     f"[Thread] Loop {index+1}/{len(tracks)}: Emitting pause confirmation signal."
                 )
                 main_view_instance.signal_actually_paused.emit()
-                logging.debug(
+                logger.debug(
                     f"[Thread] Loop {index+1}/{len(tracks)}: Calling pause_event.wait() (event is_set={main_view_instance.pause_event.is_set()})"
                 )
                 main_view_instance.pause_event.wait()  # Wait for GUI to set() the event
-                logging.debug(
+                logger.debug(
                     f"[Thread] Loop {index+1}/{len(tracks)}: Returned from pause_event.wait() (event is_set={main_view_instance.pause_event.is_set()})"
                 )
                 Printf.info("Download queue resumed.")  # Updated log
                 # Re-check stop after pause
-                logging.debug(
+                logger.debug(
                     f"[Thread] Loop {index+1}/{len(tracks)}: Re-checking stop_event after pause (is_set={main_view_instance.stop_event.is_set()})"
                 )
                 if main_view_instance.stop_event.is_set():
@@ -724,7 +725,7 @@ def downloadTracks(
                     break
             # === End Pause/Stop Check ===
 
-            logging.debug(
+            logger.debug(
                 f"Initiating single-thread download for track {index+1}/{len(tracks)}: {item.title}"
             )
             # Pass main_view_instance and playlist_context to downloadTrack

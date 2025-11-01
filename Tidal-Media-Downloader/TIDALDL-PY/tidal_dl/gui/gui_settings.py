@@ -29,6 +29,7 @@ The SettingsPage class now delegates UI construction and event handling to helpe
 - gui_settings_widgets.py    (custom widgets like CollapsibleSection)
 """
 
+import logging
 from PyQt6 import QtWidgets
 from PyQt6.QtCore import pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
@@ -54,6 +55,8 @@ from .gui_settings_widgets import CollapsibleSection  # Backward compatibility r
 if TYPE_CHECKING:
     from .gui_auth_handler import AuthHandler
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Main Settings Page widget that contains all settings UI elements
 class SettingsPage(QtWidgets.QWidget):

@@ -12,6 +12,7 @@ import imageio_ffmpeg
 # --- END: New Imports ---
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 class PlayerLogic(QObject):
     # Signals remain the same, so the UI doesn't need to change

@@ -1,4 +1,4 @@
-# --- START OF FILE gui_linking_handler.py ---
+# tidal_dl/gui/gui_linking_handler.py
 
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from .gui_table import SplitterTable
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # Set specific level for this module
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 
 class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
@@ -47,11 +47,12 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
     """
 
     requestLinkingStart = pyqtSignal(
-        list
-    )  # Signal to request MainView start the worker
+        list, object # MODIFIED: Add callback
+    )
     manualLinkApplied = pyqtSignal(
         int
     )  # Signal to notify MainView that a manual link has been applied
+    linkProgress = pyqtSignal(str, int) # MODIFIED: Add progress signal (playlist_id, count)
 
     def __init__(
         self,
@@ -67,6 +68,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         self.persistence_manager = persistence_manager
         self.link_button = link_button
         self.main_view = parent  # Assuming parent is the MainView instance
+        self._processed_count = 0 # MODIFIED: Add counter
         # Connect manual link application to sub-row collapse
         self.manualLinkApplied.connect(self.table_handler.collapse_sub_row)
 
@@ -224,7 +226,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         # This check needs to be more robust, similar to TableHandler, to include all valid linked statuses
         any_selected_linked = False
         all_selected_linked_or_error = (
-            True  # Assume true, set to false if any are unlinked and not in error
+            True  # Assume true, set to false if any are unlinked and not in an error
         )
 
         valid_linked_statuses = [
@@ -302,7 +304,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         logger.info(
             f"Initiating linking for selected Spotify rows: {selected_rows_indices}"
         )
-        Printf.info(
+        logger.info(
             f"Initiating linking for {len(selected_rows_indices)} selected Spotify track(s)..."
         )
 
@@ -346,7 +348,8 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         logger.debug(
             f"Emitting requestLinkingStart signal with {len(tracks_to_link_data)} tracks."
         )
-        self.requestLinkingStart.emit(tracks_to_link_data)
+        self._processed_count = 0 # MODIFIED: Reset counter
+        self.requestLinkingStart.emit(tracks_to_link_data, None)
 
     def linkAllSpotifyTracks(self) -> None:
         """Initiates the track linking process for ALL Spotify tracks currently in the table."""
@@ -357,7 +360,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             return
 
         logger.info("Initiating linking for ALL Spotify tracks in the table.")
-        Printf.info("Initiating linking for all Spotify tracks...")
+        logger.info("Initiating linking for all Spotify tracks...")
 
         tracks_to_link_data = []
         table = self.main_view.tableWidget
@@ -395,7 +398,8 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         logger.debug(
             f"Emitting requestLinkingStart signal with {len(tracks_to_link_data)} tracks for 'Link All'."
         )
-        self.requestLinkingStart.emit(tracks_to_link_data)
+        self._processed_count = 0 # MODIFIED: Reset counter
+        self.requestLinkingStart.emit(tracks_to_link_data, None)
 
     @pyqtSlot()
     def _handle_link_button_click(self):
@@ -441,7 +445,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 return
             # Use table_handler to update the row status
             self.table_handler.update_linking_status(row_index, "linking", "Linking...")
-            Printf.info(f"Linking started for row {row_index + 1}...")
+            logger.info(f"Linking started for row {row_index + 1}...")
         except Exception as e:
             logger.error(
                 f"Error updating linking status for row {row_index}: {e}", exc_info=True
@@ -533,22 +537,23 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             score=score,
         )
 
-        Printf.info(f"Linking finished for row {row_index + 1}: {status_text}")
+        logger.info(f"Linking finished for row {row_index + 1}: {status_text}")
 
         # --- Persist Link ---
         # Persist only if it's an automatic or manually confirmed link.
         # For "auto_linked", "found_uncertain", and "manual_linked" (handled elsewhere)
         should_persist = link_status in ["auto_linked", "found_uncertain"]
+        
+        # MODIFIED: Correctly get playlist_id for persistence and progress signal
+        playlist_id = None
+        if self.main_view and isinstance(self.main_view.s_playlist_obj, dict):
+            playlist_id = self.main_view.s_playlist_obj.get("data", {}).get("id")
 
         if (
             should_persist
             and tidal_track
-            and isinstance(self.main_view.s_playlist_obj, dict)
-            and self.main_view.s_playlist_obj.get("type") == "spotify"
+            and playlist_id
         ):
-            playlist_data = self.main_view.s_playlist_obj.get("data", {})
-            playlist_id = playlist_data.get("id")
-
             table_widget = self.main_view.tableWidget
             title_item = table_widget.item(row_index, 1)  # Title is column 1
             title_item_data = (
@@ -592,6 +597,11 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 )
         # --- End Persist Link ---
 
+        # MODIFIED: Increment counter and emit progress
+        self._processed_count += 1
+        if playlist_id:
+            self.linkProgress.emit(str(playlist_id), self._processed_count)
+
     @pyqtSlot(int, str)
     def onLinkingError(self, row_index: int, error_message: str) -> None:
         """Slot called when an error occurs during linking for a specific row."""
@@ -612,12 +622,19 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 f"Error updating linking error status for row {row_index}: {e}",
                 exc_info=True,
             )
+        
+        # MODIFIED: Increment counter and emit progress even on error
+        self._processed_count += 1
+        if self.main_view and isinstance(self.main_view.s_playlist_obj, dict):
+            playlist_id = self.main_view.s_playlist_obj.get("data", {}).get("id")
+            if playlist_id:
+                self.linkProgress.emit(str(playlist_id), self._processed_count)
 
     @pyqtSlot()
     def onAllLinkingTasksFinished(self) -> None:
         """Slot called when the LinkingWorker has processed all tracks."""
         logger.info("All linking tasks finished.")
-        Printf.info("Finished linking process for all selected/queued tracks.")
+        logger.info("Finished linking process for all selected/queued tracks.")
         # Update button state after linking finishes
         self.update_link_button_state()  # This updates the "Link Tracks" button
 
@@ -640,7 +657,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             return
         if self.main_view.linking_active:
             logger.info("Stop linking requested by user.")
-            Printf.info("Stop linking requested...")
+            logger.info("Stop linking requested...")
             self.main_view.linking_stop_event.set()  # Signal the worker thread
             self.link_button.setText("Stopping...")
             self.link_button.setEnabled(False)  # Disable button while stopping
@@ -823,9 +840,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                         score=None
                     )
         
-        Printf.info(f"Finished unlinking {len(selected_rows_indices)} track(s).")
+        logger.info(f"Finished unlinking {len(selected_rows_indices)} track(s).")
         self.update_link_button_state()
         if self.main_view.download_handler:
             self.main_view.download_handler._update_download_button_text()
-
-# --- END OF FILE gui_linking_handler.py ---

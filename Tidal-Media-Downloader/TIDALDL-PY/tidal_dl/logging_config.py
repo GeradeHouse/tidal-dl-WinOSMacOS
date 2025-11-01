@@ -85,6 +85,7 @@ class ColorFormatter(logging.Formatter):
         """
         # Define the log format dynamically to include the filename
         # where the log message originated.
+        
         log_fmt = f"%(levelname)s:{record.filename}:%(message)s"
 
         # Use a standard formatter temporarily to apply the format string
@@ -427,18 +428,20 @@ def setup_logging():
                     file=sys.stderr,
                 )
             # Set logger level anyway
-            logger.setLevel(logging.DEBUG)
+            logger.setLevel(logging.NOTSET)
         else:
             # Set the root logger level. All messages at this level or higher
             # will be processed by handlers unless filtered.
-            logger.setLevel(logging.DEBUG)  # Process messages from DEBUG level upwards
+            logger.setLevel(logging.DEBUG)  # Allow all levels, let child loggers control their own levels
 
             # Create and configure the custom console handler
             # Use default stream (current sys.stderr) to follow redirection
             console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.DEBUG)  # Set handler to DEBUG level to respect individual logger levels
             color_formatter = ColorFormatter()
             console_handler.setFormatter(color_formatter)
-            console_handler.setLevel(logging.DEBUG)  # Explicitly set handler level
+            # By NOT setting the handler's level, it defaults to NOTSET.
+            # This makes the handler respect the level of each individual logger.
 
             # Add filters to the NEW handler (Re-enabled)
             console_handler.addFilter(empty_response_filter)
@@ -462,7 +465,7 @@ def setup_logging():
         for logger_name in ["urllib3.connectionpool", "urllib3.util.retry"]:
             ul3_logger = logging.getLogger(logger_name)
             ul3_logger.setLevel(logging.DEBUG)  # Ensure DEBUG messages are generated
-            ul3_logger.propagate = True  # Ensure messages reach root handler
+            ul3_logger.propagate = False  # Ensure messages DO NOT reach root handler
             if ul3_logger.hasHandlers():
                 ul3_logger.handlers.clear()  # Prevent direct handling
 

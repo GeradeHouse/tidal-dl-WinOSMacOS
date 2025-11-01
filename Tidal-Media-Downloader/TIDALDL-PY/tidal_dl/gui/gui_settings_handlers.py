@@ -26,6 +26,8 @@ from ..tidal import AudioQuality
 if TYPE_CHECKING:
     from .gui_settings import SettingsPage
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 def load_initial_settings(self: "SettingsPage"):
     """
@@ -154,41 +156,41 @@ def load_initial_settings(self: "SettingsPage"):
         )  # Default to 7 if missing
 
         # --- Debugging: Log loaded boolean values ---
-        logging.debug(
+        logger.debug(
             f"Loaded Settings - checkExist: {self.chkCheckExist.isChecked()} (from {getattr(SETTINGS, 'checkExist', 'N/A')})"
         )
-        logging.debug(
+        logger.debug(
             f"Loaded Settings - includeEP: {self.chkIncludeEP.isChecked()} (from {getattr(SETTINGS, 'includeEP', 'N/A')})"
         )
-        logging.debug(
+        logger.debug(
             f"Loaded Settings - saveCovers: {self.chkSaveCovers.isChecked()} (from {getattr(SETTINGS, 'saveCovers', 'N/A')})"
         )
-        logging.debug(
+        logger.debug(
             f"Loaded Settings - multiThread: {self.chkMultiThread.isChecked()} (from {getattr(SETTINGS, 'multiThread', 'N/A')})"
         )
-        logging.debug(
+        logger.debug(
             f"Loaded Settings - downloadDelay: {self.chkDownloadDelay.isChecked()} (from {getattr(SETTINGS, 'downloadDelay', 'N/A')})"
         )
-        logging.debug(
+        logger.debug(
             f"Loaded Settings - usePlaylistFolder: {self.chkUsePlaylistFolder.isChecked()} (from {getattr(SETTINGS, 'usePlaylistFolder', 'N/A')})"
         )
-        logging.debug(
+        logger.debug(
             f"Loaded Settings - lyricFile: {self.chkLyricFile.isChecked()} (from {getattr(SETTINGS, 'lyricFile', 'N/A')})"
         )
-        logging.debug(
+        logger.debug(
             f"Loaded Settings - showProgress: {self.chkShowProgress.isChecked()} (from {getattr(SETTINGS, 'showProgress', 'N/A')})"
         )
-        logging.debug(
+        logger.debug(
             f"Loaded Settings - showTrackInfo: {self.chkShowTrackInfo.isChecked()} (from {getattr(SETTINGS, 'showTrackInfo', 'N/A')})"
         )
-        logging.debug(
+        logger.debug(
             f"Loaded Settings - saveAlbumInfo: {self.chkSaveAlbumInfo.isChecked()} (from {getattr(SETTINGS, 'saveAlbumInfo', 'N/A')})"
         )
         # --- End Debugging ---
 
     except Exception as e:
         # Log error but don't crash - use defaults if settings can't be loaded
-        logging.error(f"Error loading initial settings: {e}", exc_info=True)
+        logger.error(f"Error loading initial settings: {e}", exc_info=True)
         QMessageBox.warning(
             self, "Settings Load Error", f"Could not load all settings: {e}"
         )
@@ -378,25 +380,25 @@ def save_settings(self: "SettingsPage"):
 
         # Persist settings to storage
         SETTINGS.save()
-        logging.debug("Settings saved to storage")
-        logging.debug(f"Saved download path: {SETTINGS.downloadPath}")
+        logger.debug("Settings saved to storage")
+        logger.debug(f"Saved download path: {SETTINGS.downloadPath}")
 
         # Emit the fontSizeChanged signal with the new font size
         self.fontSizeChanged.emit(SETTINGS.fontSize)
         self.playlistDisplaySettingsChanged.emit()
         # --- Debugging: Log saved boolean values ---
-        logging.debug(f"Saved Settings - checkExist: {SETTINGS.checkExist}")
-        logging.debug(f"Saved Settings - includeEP: {SETTINGS.includeEP}")
-        logging.debug(f"Saved Settings - saveCovers: {SETTINGS.saveCovers}")
-        logging.debug(f"Saved Settings - multiThread: {SETTINGS.multiThread}")
-        logging.debug(f"Saved Settings - downloadDelay: {SETTINGS.downloadDelay}")
-        logging.debug(
+        logger.debug(f"Saved Settings - checkExist: {SETTINGS.checkExist}")
+        logger.debug(f"Saved Settings - includeEP: {SETTINGS.includeEP}")
+        logger.debug(f"Saved Settings - saveCovers: {SETTINGS.saveCovers}")
+        logger.debug(f"Saved Settings - multiThread: {SETTINGS.multiThread}")
+        logger.debug(f"Saved Settings - downloadDelay: {SETTINGS.downloadDelay}")
+        logger.debug(
             f"Saved Settings - usePlaylistFolder: {SETTINGS.usePlaylistFolder}"
         )
-        logging.debug(f"Saved Settings - lyricFile: {SETTINGS.lyricFile}")
-        logging.debug(f"Saved Settings - showProgress: {SETTINGS.showProgress}")
-        logging.debug(f"Saved Settings - showTrackInfo: {SETTINGS.showTrackInfo}")
-        logging.debug(f"Saved Settings - saveAlbumInfo: {SETTINGS.saveAlbumInfo}")
+        logger.debug(f"Saved Settings - lyricFile: {SETTINGS.lyricFile}")
+        logger.debug(f"Saved Settings - showProgress: {SETTINGS.showProgress}")
+        logger.debug(f"Saved Settings - showTrackInfo: {SETTINGS.showTrackInfo}")
+        logger.debug(f"Saved Settings - saveAlbumInfo: {SETTINGS.saveAlbumInfo}")
         # --- End Debugging ---
 
         # Check if Spotify credentials were added or changed
@@ -406,7 +408,7 @@ def save_settings(self: "SettingsPage"):
             or new_spotify_client_secret != old_spotify_client_secret
         ):
             spotify_creds_changed = True
-            logging.info("Spotify credentials updated in settings.")
+            logger.info("Spotify credentials updated in settings.")
 
         # Show confirmation message to user
         QMessageBox.information(
@@ -418,7 +420,7 @@ def save_settings(self: "SettingsPage"):
 
         # Emit signal if Spotify credentials were added or changed
         if spotify_creds_changed:
-            logging.debug("Emitting spotifyCredentialsUpdated signal.")
+            logger.debug("Emitting spotifyCredentialsUpdated signal.")
             self.spotifyCredentialsUpdated.emit()
 
     except Exception as e:
@@ -448,15 +450,15 @@ def toggle_spotify_help(self: "SettingsPage"):
         scrollbar_visible = (
             scrollbar.isVisible() if scrollbar else False
         )  # Check visibility safely
-        logging.debug(
+        logger.debug(
             f"[toggleSpotifyHelp] Before toggle: lblSpotifyHelp.isVisible={self.lblSpotifyHelp.isVisible()}, spotify_section.sizeHint={spotify_section_size_hint_str}, "
             f'scroll_widget.sizeHint={scroll_widget.sizeHint() if scroll_widget else "N/A"}, scroll_area.verticalScrollBar.isVisible={scrollbar_visible}'
         )
     else:
-        logging.warning(
+        logger.warning(
             "[toggleSpotifyHelp] self.scrollArea is None at the start of toggleSpotifyHelp."
         )
-        logging.debug(
+        logger.debug(
             f"[toggleSpotifyHelp] Before toggle: lblSpotifyHelp.isVisible={self.lblSpotifyHelp.isVisible()}, spotify_section.sizeHint={spotify_section_size_hint_str}, scroll_widget=N/A, scroll_area=None"
         )
 
@@ -471,22 +473,22 @@ def toggle_spotify_help(self: "SettingsPage"):
 
     # Log post-toggle state
     # logger.debug("[toggleSpotifyHelp] POST-TOGGLE DEBUG:") # Original detailed logging can be restored if needed
-    logging.debug(
+    logger.debug(
         f"[toggleSpotifyHelp] lblSpotifyHelp geometry: {self.lblSpotifyHelp.geometry()}"
     )
     spotify_section_geometry_str = (
         str(self.spotify_section.geometry()) if self.spotify_section else "N/A"
     )
-    logging.debug(
+    logger.debug(
         f"[toggleSpotifyHelp] spotify_section geometry: {spotify_section_geometry_str}"
     )
     main_layout_geometry_str = (
         str(self.mainLayout.geometry()) if self.mainLayout else "N/A"
     )
-    logging.debug(
+    logger.debug(
         f"[toggleSpotifyHelp] mainLayout geometry: {main_layout_geometry_str}"
     )
-    logging.debug(
+    logger.debug(
         f"[toggleSpotifyHelp] scrollWidget exists: {hasattr(self, 'scrollWidget') and self.scrollWidget is not None}"
     )
 
@@ -514,15 +516,15 @@ def toggle_spotify_help(self: "SettingsPage"):
         scrollbar_visible_after = (
             scrollbar_after.isVisible() if scrollbar_after else False
         )  # Check visibility safely
-        logging.debug(
+        logger.debug(
             f"[toggleSpotifyHelp] After toggle: lblSpotifyHelp.isVisible={self.lblSpotifyHelp.isVisible()}, spotify_section.sizeHint={spotify_section_size_hint_str_after}, "
             f'scroll_widget.sizeHint={scroll_widget_after.sizeHint() if scroll_widget_after else "N/A"}, scroll_area.verticalScrollBar.isVisible={scrollbar_visible_after}'
         )
     else:
-        logging.warning(
+        logger.warning(
             "[toggleSpotifyHelp] self.scrollArea is None after toggle for logging."
         )
-        logging.debug(
+        logger.debug(
             f"[toggleSpotifyHelp] After toggle: lblSpotifyHelp.isVisible={self.lblSpotifyHelp.isVisible()}, spotify_section.sizeHint={spotify_section_size_hint_str_after}, scroll_widget=N/A, scroll_area=None"
         )
 
@@ -561,13 +563,13 @@ def toggle_path_format_help(self: "SettingsPage"):
             str(self.paths_section.sizeHint()) if self.paths_section else "N/A"
         )
 
-        logging.debug(
+        logger.debug(
             f"[togglePathFormatHelp] After toggle: lblPathFormatHelp.isVisible={self.lblPathFormatHelp.isVisible()}, "
             f"paths_section.sizeHint={paths_section_size_hint_str}, "
             f"scroll_widget.sizeHint={scroll_widget_size_hint_str}"
         )
     else:
-        logging.debug(
+        logger.debug(
             f"[togglePathFormatHelp] After toggle: lblPathFormatHelp.isVisible={self.lblPathFormatHelp.isVisible()}, "
             f'paths_section.sizeHint={self.paths_section.sizeHint() if self.paths_section else "N/A"}, '
             f"scroll_widget.sizeHint=N/A (scrollArea is None)"
@@ -583,9 +585,9 @@ def _handle_audio_quality_changed(self: "SettingsPage", index: int):
         if SETTINGS.audioQuality != selected_quality:
             SETTINGS.audioQuality = selected_quality
             SETTINGS.save()
-            logging.info(f"Default audio quality set to {selected_quality.name}")
+            logger.info(f"Default audio quality set to {selected_quality.name}")
             Printf.info(f"Default audio quality set to {selected_quality.name}")  # type: ignore
     else:
-        logging.error(
+        logger.error(
             f"Invalid data type retrieved from audio quality combobox at index {index}: {type(selected_quality)}"
         )

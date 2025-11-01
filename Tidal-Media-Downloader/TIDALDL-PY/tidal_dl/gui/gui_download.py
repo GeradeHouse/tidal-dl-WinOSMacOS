@@ -1,4 +1,4 @@
-# --- START OF FILE gui_download.py ---
+# tidal_dl/gui/gui_download.py
 
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
@@ -213,6 +213,8 @@ class DownloadHandler(QObject):
     Manages download operations, state (active, paused, stopped),
     and interactions between the GUI (MainView) and the core download functions.
     """
+    # MODIFIED: Add progress signal
+    downloadProgress = pyqtSignal(str, int) # playlist_id, count
 
     def __init__(
         self,
@@ -233,6 +235,7 @@ class DownloadHandler(QObject):
         self.active_downloads: Dict[str, Dict[str, Any]] = {}
         self.download_thread: Optional[QThread] = None
         self.download_worker: Optional[DownloadWorker] = None
+        self._processed_count = 0 # MODIFIED: Add counter
 
         table_widget = getattr(self.main_view, "tableWidget", None)
         if table_widget:
@@ -285,6 +288,7 @@ class DownloadHandler(QObject):
                 "Download In Progress",
                 "Another download is already in progress.",
                 "",
+                icon_path=resource_path("assets/icons/info_icon.png")
             )
             return
 
@@ -294,17 +298,17 @@ class DownloadHandler(QObject):
                 "Download Error",
                 "Could not retrieve track information for download.",
                 "Please select valid tracks.",
+                icon_path=resource_path("assets/icons/error_icon.png")
             )
             return
 
         tracks_only = [track for _, track in tracks_with_rows]
         current_playlist_context = getattr(self.main_view, "s_playlist_obj", None)
 
-        index = self.main_view.c_combTQuality.findData(quality_enum)
-        if index != -1:
-            self.main_view.c_combTQuality.setCurrentIndex(index)
+        quality_str = Printf.map_quality(quality_enum)
 
-        self._start_download_thread(tracks_only, current_playlist_context)
+        self._start_download_thread(tracks_only, current_playlist_context, quality_str)
+
 
     def downloadTableContextMenu(self, menu: QMenu, selected_rows_indices: List[int]):
         logger.debug("[GUI ContextMenu] downloadTableContextMenu executing.")
@@ -395,7 +399,8 @@ class DownloadHandler(QObject):
             selected_rows_indices = table.getSelectedRows()
             if not selected_rows_indices:
                 show_info_message(
-                    self.main_view, "Selection Error", "Please select rows first.", ""
+                    self.main_view, "Selection Error", "Please select rows first.", "",
+                    icon_path=resource_path("assets/icons/info_icon.png")
                 )
                 return
             for row_index in selected_rows_indices:
@@ -438,6 +443,7 @@ class DownloadHandler(QObject):
                 "Download Error",
                 "No downloadable tracks found in selection.",
                 "",
+                icon_path=resource_path("assets/icons/error_icon.png")
             )
             return
 
@@ -447,17 +453,23 @@ class DownloadHandler(QObject):
                 "Download In Progress",
                 "A download is already in progress.",
                 "",
+                icon_path=resource_path("assets/icons/info_icon.png")
             )
             return
+        
+        selected_quality_enum = self.main_view.c_combTQuality.currentData()
+        quality_arg_str = Printf.map_quality(selected_quality_enum)
 
-        self._start_download_thread(tracks_to_download, current_playlist_obj)
+        self._start_download_thread(tracks_to_download, current_playlist_obj, quality_arg_str)
 
     def _start_download_thread(
         self,
         tracks_to_start: List[Track],
         playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
+        quality_arg_str: Optional[str]
     ):
         self.main_view.download_active = True
+        self._processed_count = 0 # MODIFIED: Reset counter
         self.main_view.stop_event.clear()
         self.main_view.pause_event.set()
         self.main_view.download_paused = False
@@ -480,11 +492,6 @@ class DownloadHandler(QObject):
         self.main_view.table_handler.refresh_view_for_pending_downloads(
             tracks_to_start
         )
-
-        selected_quality_enum = self.main_view.c_combTQuality.currentData()
-        quality_arg_str: Optional[str] = None
-        if selected_quality_enum != AudioQuality.HIGHEST:
-            quality_arg_str = Printf.map_quality(selected_quality_enum)
 
         self.download_thread = QThread(self.main_view)
         self.download_worker = DownloadWorker(
@@ -533,6 +540,18 @@ class DownloadHandler(QObject):
             if not ok:
                 state["error"] = error_msg
         self.main_view.table_handler.mark_track_completed(track_id, ok, error_msg)
+
+        # MODIFIED: Increment counter and emit progress
+        self._processed_count += 1
+        playlist_context = state.get("playlist_context") if state else None
+        playlist_id = None
+        if isinstance(playlist_context, Playlist):
+            playlist_id = playlist_context.uuid
+        elif isinstance(playlist_context, dict): # Spotify playlist
+            playlist_id = playlist_context.get("data", {}).get("id")
+        
+        if playlist_id:
+            self.downloadProgress.emit(str(playlist_id), self._processed_count)
 
     def onPauseResumeClicked(self):
         if not self.main_view.download_active:
@@ -592,21 +611,25 @@ class DownloadHandler(QObject):
         self._update_download_button_text()
         self.main_view.table_handler.refresh_table_view()
 
-        if result:
-            info_icon_path = resource_path("assets/icons/success_icon.png")
-            custom_dialog = ModernDarkDialog(
-                title="Info",
-                main_message="Download finished successfully.",
-                informative_text=f"Saved to: {path if path else 'N/A'}",
-                icon_path=info_icon_path,
-                parent=self.main_view,
-                show_folder_path=path,
-                show_in_folder_func=show_in_folder,
-            )
-            custom_dialog.exec()
-        elif title in ["Download Stopped", "Download Cancelled", "Download Error"]:
-            show_info_message(self.main_view, title, msg or f"Download failed: {msg}", "")
+        # The TaskQueueManager will now handle the final dialog
+        if self.main_view.task_queue_manager and self.main_view.task_queue_manager.is_running_task:
+             # Let the queue manager know this job is done
+            self.main_view.task_queue_manager.job_finished()
         else:
-            show_info_message(self.main_view, "Download Failed", f"Download failed: {msg}", "")
-
-# --- END OF FILE gui_download.py ---
+            # If not part of a queue, show the dialog as before
+            if result:
+                info_icon_path = resource_path("assets/icons/success_icon.png")
+                custom_dialog = ModernDarkDialog(
+                    title="Info",
+                    main_message="Download finished successfully.",
+                    informative_text=f"Saved to: {path if path else 'N/A'}",
+                    icon_path=info_icon_path,
+                    parent=self.main_view,
+                    show_folder_path=path,
+                    show_in_folder_func=show_in_folder,
+                )
+                custom_dialog.exec()
+            elif title in ["Download Stopped", "Download Cancelled", "Download Error"]:
+                show_info_message(self.main_view, title, msg or f"Download failed: {msg}", "", icon_path=resource_path("assets/icons/error_icon.png"))
+            else:
+                show_info_message(self.main_view, "Download Failed", f"Download failed: {msg}", "", icon_path=resource_path("assets/icons/error_icon.png"))

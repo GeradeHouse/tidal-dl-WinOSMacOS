@@ -14,6 +14,9 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QSpacerItem,
     QWidget,
+    QStyleOption,
+    QStyle,
+    QApplication,
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import (
@@ -25,6 +28,18 @@ from PyQt6.QtGui import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class StyledWidget(QWidget):
+    """A QWidget that ensures its stylesheet background is painted correctly, especially on macOS."""
+    def paintEvent(self, a0):
+        opt = QStyleOption()
+        opt.initFrom(self)
+        painter = QPainter(self)
+        style = self.style() or QApplication.style()
+        if style:
+            style.drawPrimitive(QStyle.PrimitiveElement.PE_Widget, opt, painter, self)
+        super().paintEvent(a0)
 
 
 class ModernDarkDialog(QDialog):
@@ -59,7 +74,7 @@ class ModernDarkDialog(QDialog):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
-        self.content_widget = QWidget(self)
+        self.content_widget = StyledWidget(self)
         self.content_widget.setStyleSheet(
             """
             QWidget#dialogContentWidget {

@@ -14,6 +14,7 @@ import threading
 import time
 import os
 from typing import Dict, cast, Any, Union, List
+import logging
 
 import aigpy
 import tidal_dl.settings as settings
@@ -24,6 +25,9 @@ from . import apiKey
 from .printf import Printf
 from .enums import Type, AudioQuality
 from .model import Album, Track, Artist, Playlist, Mix
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 
 class DummyMainView:

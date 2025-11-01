@@ -17,9 +17,7 @@ from PyQt6.QtWidgets import QWidget
 from PyQt6.QtGui import QCursor  # Added QCursor
 
 logger = logging.getLogger(__name__)
-logger.setLevel(
-    logging.WARNING
-)  # Set specific level for this module to only receive warnings
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 
 class ResizeHandler:

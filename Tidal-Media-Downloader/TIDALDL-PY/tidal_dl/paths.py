@@ -13,10 +13,10 @@
 import os
 import sys
 import logging
-from aigpy import systemHelper
 from typing import Any
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Define public API for the module
 __all__ = [
@@ -24,6 +24,7 @@ __all__ = [
     "getTokenPath",
     "getProfilePath",
     "getSettingsFilePath",
+    "get_user_download_path",
     "resource_path",
 ]
 
@@ -148,6 +149,37 @@ def getSettingsFilePath():
     path = os.path.join(__getBaseDirectory__(), ".tidal-dl.json")
     logger.debug(f"getSettingsFilePath() -> '{path}'")
     return path
+
+
+def get_user_download_path(path_from_settings: str) -> str:
+    """
+    Resolves a user-provided path, anchoring relative paths to the home directory.
+
+    This is critical for macOS .app bundles, where the current working directory
+    is '/' and relative paths like './Downloads' would fail.
+
+    Args:
+        path_from_settings (str): The path string from the application settings.
+
+    Returns:
+        str: An absolute path that is safe to use for downloads.
+    """
+    if not path_from_settings or not isinstance(path_from_settings, str):
+        path_from_settings = "Downloads"  # Fallback to a sensible default
+
+    # If the path is already absolute, use it as is.
+    if os.path.isabs(path_from_settings):
+        logger.debug(f"Download path '{path_from_settings}' is absolute. Using directly.")
+        return path_from_settings
+
+    # If the path is relative, resolve it against the user's home directory.
+    home_dir = os.path.expanduser("~")
+    resolved_path = os.path.join(home_dir, path_from_settings)
+    logger.debug(
+        f"Download path '{path_from_settings}' is relative. Resolved against home "
+        f"directory to '{resolved_path}'."
+    )
+    return resolved_path
 
 
 # --- Resource Path Function (for bundled assets) ---

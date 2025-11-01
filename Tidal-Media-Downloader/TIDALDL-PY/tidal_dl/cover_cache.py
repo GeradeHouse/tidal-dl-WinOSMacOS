@@ -20,7 +20,7 @@ from tidal_dl.paths import getProfilePath
 
 # Initialize logger for this module
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)  # Set specific level for this module
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 
 class SaveIconRunnable(QRunnable):
@@ -101,7 +101,7 @@ class PlaylistCoverCache:
                         loaded_data = json.load(f)
                         # Add robustness check for loaded metadata type
                         if not isinstance(loaded_data, dict):
-                            logging.warning(
+                            logger.warning(
                                 f"Loaded metadata from {self.metadata_path} is not a dictionary. Resetting to empty."
                             )
                             self.metadata = {}

@@ -29,6 +29,8 @@ from PyQt6.QtWidgets import (
     QStyle,
 )
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # --- CollapsibleSection Class Definition ---
 # This custom widget creates expandable/collapsible sections for grouping settings
@@ -75,7 +77,7 @@ class CollapsibleSection(QWidget):
                     icon_enum
                 )  # Apply icon if one was successfully loaded
             else:
-                logging.warning("Could not obtain style to load standard icon.")
+                logger.warning("Could not obtain style to load standard icon.")
         if loaded_icon:
             self.toggle_button.setIcon(loaded_icon)
             self.toggle_button.setIconSize(QSize(16, 16))  # Keep icon size reasonable
@@ -197,7 +199,7 @@ class CollapsibleSection(QWidget):
             + margins.bottom()
             + buffer
         )
-        logging.debug(
+        logger.debug(
             f"[{self.toggle_button.text()}] _calculate_target_expanded_height: content_layout.sizeHint={self.content_layout.sizeHint().height()}, margins={margins.top()}+{margins.bottom()}, buffer={buffer}, total={calculated_height}"
         )
         return max(0, calculated_height)  # Ensure non-negative
@@ -239,7 +241,7 @@ class CollapsibleSection(QWidget):
 
         if checked:
             end_height = self._calculate_target_expanded_height()
-            logging.debug(
+            logger.debug(
                 f"[CollapsibleSection {self.toggle_button.text()}] Expanding. Calculated end_height: {end_height}"
             )
         else:
@@ -282,19 +284,19 @@ class CollapsibleSection(QWidget):
         """Slot called after expand/collapse animation finishes."""
         # Update geometry hints after animation to ensure parent layouts resize correctly
         self.content_area.updateGeometry()
-        logging.debug(
+        logger.debug(
             f"[CollapsibleSection {self.toggle_button.text()}] Animation finished. content_area.sizeHint={self.content_area.sizeHint()}, self.sizeHint={self.sizeHint()}"
         )
         self.updateGeometry()
 
     def updateContentHeight(self):
         if not self.is_expanded:
-            logging.debug(
+            logger.debug(
                 f"[{self.toggle_button.text()}] updateContentHeight called but section not expanded."
             )
             return
 
-        logging.debug(
+        logger.debug(
             f"[{self.toggle_button.text()}] updateContentHeight called while expanded."
         )
 
@@ -311,7 +313,7 @@ class CollapsibleSection(QWidget):
             new_target_height != self.content_area.maximumHeight()
             or new_target_height != current_content_height
         ):
-            logging.info(
+            logger.info(
                 f"[{self.toggle_button.text()}] Content height changing. Animating from {current_content_height} to {new_target_height}. (Old max: {self.content_area.maximumHeight()})"
             )
             self.animation.stop()  # Stop any current animation
@@ -319,6 +321,6 @@ class CollapsibleSection(QWidget):
             self.animation.setEndValue(new_target_height)
             self.animation.start()
         else:
-            logging.debug(
+            logger.debug(
                 f"[{self.toggle_button.text()}] Content height effectively unchanged or invalid. New target: {new_target_height}, Current height: {current_content_height}, Current max: {self.content_area.maximumHeight()}"
             )

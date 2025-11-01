@@ -47,7 +47,7 @@ class LeftPanelWidget(QWidget):
     def paintEvent(self, a0: Optional[QPaintEvent]):
         """Fills the widget background with the desired semi-transparent color."""
         painter = QPainter(self)
-        color = QColor("#1A1A1BF5")
+        color = QColor("#09090AF5")
         painter.fillRect(self.rect(), color)
 
 
@@ -229,7 +229,7 @@ class PlaylistTreeWidget(LeftPanelWidget):
                 self.spotify_connect_button.setIcon(connect_icon)
                 self.spotify_connect_button.setIconSize(QSize(24, 24))
         else:
-            logging.warning(f"Spotify connect icon not found at: {spotify_icon_path}")
+            logger.warning(f"Spotify connect icon not found at: {spotify_icon_path}")
 
         self.spotify_connect_button.setStyleSheet(
             "QPushButton { text-align: left; border: none; background: transparent; padding: 4px; color: white; }"

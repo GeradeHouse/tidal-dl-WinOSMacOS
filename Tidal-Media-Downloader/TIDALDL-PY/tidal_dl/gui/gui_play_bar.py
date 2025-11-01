@@ -17,7 +17,7 @@ from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QPaintEvent
 from .. import paths  # For icon loading
 
 logger = logging.getLogger(__name__)
-
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 class PlayBarWidget(QWidget):
     """

@@ -55,9 +55,7 @@ if TYPE_CHECKING:
     # from .gui_linking_handler import LinkingGuiHandler # Removed unused import
 
 logger = logging.getLogger(__name__)
-logger.setLevel(
-    logging.WARNING
-)  # Set specific level for this module to only receive warnings
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 
 # --- Worker Class for Live Search ---

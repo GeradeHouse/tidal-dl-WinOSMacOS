@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.WARNING)
 
 MANUAL_LINK_REQUIRED_ROLE = Qt.ItemDataRole.UserRole + 100
 

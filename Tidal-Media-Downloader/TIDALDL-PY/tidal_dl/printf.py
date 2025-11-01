@@ -43,9 +43,9 @@ __LOGO__ = rf"""
    | $$   | $$|  $$$$$$$|  $$$$$$$| $$        |  $$$$$$$| $$
    |__/   |__/ \_______/ \_______/|__/         \_______/|__/
 
-       https://github.com/GeradeHouse/Tidal-Media-Downloader
+        https://github.com/GeradeHouse/Tidal-Media-Downloader
 
-                        {VERSION}
+                         {VERSION}
 """
 
 print_mutex = threading.Lock()
@@ -84,7 +84,7 @@ class Printf(object):
         """Handle track objects with metadata check, ensuring proper attribute values."""
         # Validate track type first
         if not isinstance(track, Track):
-            logging.error(
+            logger.error(
                 f"Invalid track type passed to map_track_quality: {type(track)}"
             )
             return "Unknown Quality"
@@ -110,50 +110,50 @@ class Printf(object):
                 if hasattr(track, "__dict__")
                 else "unknown title"
             )
-        # logging.debug(f"\n=== Quality analysis for track {track_id} '{track_title}' ===")
+        # logger.debug(f"\n=== Quality analysis for track {track_id} '{track_title}' ===")
 
         # Get mediaMetadata with type checking
         media_metadata = getattr(track, "mediaMetadata", {})
-        # logging.debug(f"MediaMetadata type: {type(media_metadata)}")
-        # logging.debug(f"Raw mediaMetadata: {repr(media_metadata)}")
+        # logger.debug(f"MediaMetadata type: {type(media_metadata)}")
+        # logger.debug(f"Raw mediaMetadata: {repr(media_metadata)}")
 
         # Extract tags with detailed type checking
         if isinstance(media_metadata, dict):
             tags = media_metadata.get("tags", [])
-            # logging.debug("Extracted tags from dictionary")
+            # logger.debug("Extracted tags from dictionary")
         else:
             tags = getattr(media_metadata, "tags", [])
-            # logging.debug("Extracted tags from object attribute")
+            # logger.debug("Extracted tags from object attribute")
 
-        # logging.debug(f"Tags type: {type(tags)}")
-        # logging.debug("Individual tag checks:")
+        # logger.debug(f"Tags type: {type(tags)}")
+        # logger.debug("Individual tag checks:")
         for i, tag in enumerate(tags):
             tag_type = type(tag).__name__
             normalized_tag = tag.upper() if isinstance(tag, str) else str(tag)
-            # logging.debug(f"  Tag {i}: {tag} (type: {tag_type}) -> Normalized: {normalized_tag}")
+            # logger.debug(f"  Tag {i}: {tag} (type: {tag_type}) -> Normalized: {normalized_tag}")
 
         # Check for HIRES_LOSSLESS with detailed logging
         hires_detected = False
         for tag in tags:
             if isinstance(tag, str) and tag.upper() == "HIRES_LOSSLESS":
                 hires_detected = True
-                # logging.debug("MATCHED HIRES_LOSSLESS tag!")
+                # logger.debug("MATCHED HIRES_LOSSLESS tag!")
                 break
 
         # Handle audioQuality attribute properly
         audio_quality_attr = getattr(track, "audioQuality", None)
         if callable(audio_quality_attr):
-            # logging.debug("track.audioQuality is callable; retrieving from __dict__")
+            # logger.debug("track.audioQuality is callable; retrieving from __dict__")
             audio_quality_attr = track.__dict__.get("audioQuality", None)
         final_quality = (
             Printf.map_quality_enum(audio_quality_attr)
             if not hires_detected
-            else "FLAC – High Resolution (24-bit, 96 kHz)"
+            else "FLAC – High Resolution (24-bit, 96 kHz)"
         )
 
-        # logging.debug(f"Final quality decision based on metadata: {'HIRES' if hires_detected else 'Standard'} -> {final_quality}")
-        # logging.debug(f"Track's base 'audioQuality' attribute from API: {audio_quality_attr}") # Clarified log
-        # logging.debug("=== End of quality analysis ===\n")
+        # logger.debug(f"Final quality decision based on metadata: {'HIRES' if hires_detected else 'Standard'} -> {final_quality}")
+        # logger.debug(f"Track's base 'audioQuality' attribute from API: {audio_quality_attr}") # Clarified log
+        # logger.debug("=== End of quality analysis ===\n")
 
         return final_quality
 
@@ -161,10 +161,10 @@ class Printf(object):
     def map_quality_enum(q):
         """Map AudioQuality enum to string"""
         quality_map = {
-            AudioQuality.LOW: "M4a - AAC – High Efficiency (96 kbps, 44.1 kHz)",
-            AudioQuality.HIGH: "M4a - AAC – Full Bandwidth (320 kbps, 44.1 kHz)",
-            AudioQuality.LOSSLESS: "FLAC – CD Standard (16-bit, 44.1 kHz)",
-            AudioQuality.HI_RES_LOSSLESS: "FLAC – High Resolution (24-bit, 96 kHz)",
+            AudioQuality.LOW: "M4a - AAC – High Efficiency (96 kbps, 44.1 kHz)",
+            AudioQuality.HIGH: "M4a - AAC – Full Bandwidth (320 kbps, 44.1 kHz)",
+            AudioQuality.LOSSLESS: "FLAC – CD Standard (16-bit, 44.1 kHz)",
+            AudioQuality.HI_RES_LOSSLESS: "FLAC – High Resolution (24-bit, 96 kHz)",
             AudioQuality.HIGHEST: "Highest available",
             AudioQuality.MP3: "MP3 - Constant Bitrate (320 kbps, 44.1 kHz)",
         }
@@ -180,7 +180,7 @@ class Printf(object):
     @staticmethod
     def logo():
         print(__LOGO__)
-        logging.info(__LOGO__)
+        logger.info(__LOGO__)
 
     @staticmethod
     def __gettable__(columns, rows):
@@ -355,43 +355,51 @@ class Printf(object):
 
     @staticmethod
     def err(string: str):
-        from .settings import LANG
+        # ERROR messages should always be shown (they are critical)
+        if logging.getLogger().isEnabledFor(logging.ERROR):
+            from .settings import LANG
 
-        # ANSI escape codes (redefined here for clarity, could also import)
-        COLOR_RED = "\033[91m"
-        COLOR_RESET = "\033[0m"
+            # ANSI escape codes (redefined here for clarity, could also import)
+            COLOR_RED = "\033[91m"
+            COLOR_RESET = "\033[0m"
 
-        global print_mutex
-        print_mutex.acquire()
-        # Apply ANSI color codes directly, bypassing aigpy.cmd.red()
-        print(f"{COLOR_RED}{settings.LANG.PRINT_ERR} {string}{COLOR_RESET}")
-        # logging.error(string) # Keep this commented out to avoid duplicate logs
-        print_mutex.release()
+            global print_mutex
+            print_mutex.acquire()
+            # Apply ANSI color codes directly, bypassing aigpy.cmd.red()
+            print(f"{COLOR_RED}{settings.LANG.PRINT_ERR} {string}{COLOR_RESET}")
+            # logger.error(string) # Keep this commented out to avoid duplicate logs
+            print_mutex.release()
 
     @staticmethod
     def warning(string: str):
-        from . import settings  # Import settings locally
+        # Check if WARNING level logging is enabled before printing
+        if logging.getLogger().isEnabledFor(logging.WARNING):
+            from . import settings  # Import settings locally
 
-        global print_mutex
-        print_mutex.acquire()
-        # Use yellow color for warnings, referencing the new LANG variable
-        print(aigpy.cmd.yellow(f"{settings.LANG.PRINT_WARNING} ") + string)
-        # Optional: Add logging.warning(string) here if needed for log files
-        print_mutex.release()
+            global print_mutex
+            print_mutex.acquire()
+            # Use yellow color for warnings, referencing the new LANG variable
+            print(aigpy.cmd.yellow(f"{settings.LANG.PRINT_WARNING} ") + string)
+            # Optional: Add logger.warning(string) here if needed for log files
+            print_mutex.release()
 
     @staticmethod
     def info(string: str):
-        global print_mutex
-        print_mutex.acquire()
-        print(aigpy.cmd.blue(f"{settings.LANG.PRINT_INFO} ") + string)
-        print_mutex.release()
+        # Check if INFO level logging is enabled before printing
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            global print_mutex
+            print_mutex.acquire()
+            print(aigpy.cmd.blue(f"{settings.LANG.PRINT_INFO} ") + string)
+            print_mutex.release()
 
     @staticmethod
     def success(string: str):
-        global print_mutex
-        print_mutex.acquire()
-        print(aigpy.cmd.green(f"{settings.LANG.PRINT_SUCCESS} ") + string)
-        print_mutex.release()
+        # Check if INFO level logging is enabled before printing (SUCCESS is typically INFO level)
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            global print_mutex
+            print_mutex.acquire()
+            print(aigpy.cmd.green(f"{settings.LANG.PRINT_SUCCESS} ") + string)
+            print_mutex.release()
 
     @staticmethod
     def album(data: Album):
@@ -408,7 +416,7 @@ class Printf(object):
             ],
         )
         print(tb)
-        logging.info(
+        logger.info(
             "====album "
             + str(data.id)
             + "====\n"
@@ -436,12 +444,12 @@ class Printf(object):
             retrieved_quality_str = Printf.map_quality_enum(stream.soundQuality)
             tb.add_row(["Get-Q", retrieved_quality_str])
             # Compare the *retrieved* quality string to determine codec display
-            if retrieved_quality_str == "FLAC – High Resolution (24-bit, 96 kHz)":
+            if retrieved_quality_str == "FLAC – High Resolution (24-bit, 96 kHz)":
                 tb.add_row(["Get-Codec", "flac"])  # Assuming HI_RES_LOSELESS is always FLAC
             else:
                 tb.add_row(["Get-Codec", str(stream.codec)])
         print(tb)
-        logging.info(
+        logger.info(
             "====track "
             + str(data.id)
             + "====\n"
@@ -462,7 +470,7 @@ class Printf(object):
             ],
         )
         print(tb)
-        logging.info(
+        logger.info(
             "====artist "
             + str(data.id)
             + "====\n"
@@ -482,7 +490,7 @@ class Printf(object):
             ],
         )
         print(tb)
-        logging.info(
+        logger.info(
             "====playlist "
             + str(data.uuid)
             + "====\n"
@@ -508,7 +516,7 @@ class Printf(object):
             ],
         )
         print(tb)
-        logging.info(
+        logger.info(
             "====Mix "
             + str(data.id)
             + "====\n"

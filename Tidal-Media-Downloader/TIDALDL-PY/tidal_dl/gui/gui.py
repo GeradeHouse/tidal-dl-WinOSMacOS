@@ -1,7 +1,9 @@
+# tidal_dl/gui/gui.py
+
 import logging
 import sys
 import threading
-from typing import Optional, List, Any, Dict, Union, cast
+from typing import Optional, List, Any, Dict, Union, cast, TYPE_CHECKING, Callable # MODIFIED: Added Callable
 
 from PyQt6.QtWidgets import (
     QWidget,
@@ -59,16 +61,19 @@ from .gui_table import SplitterTable
 from .gui_title_bar import CustomTitleBar
 from .gui_auth_handler import AuthHandler
 from .gui_search_handler import SearchHandler
-from .gui_table_handler import TableHandler
 from .gui_download import DownloadHandler
 from .gui_linking_handler import LinkingGuiHandler
 from .gui_spotify_handler import SpotifyGuiHandler
 from .gui_navigation import NavigationHandler
 from .gui_search import SearchBarWidget
 from .gui_playlist_tree import PlaylistTreeWidget
-from .gui_utils import show_info_message, enableGui
+from .gui_utils import show_info_message, enableGui, EmittingStream, append_text_to_output
 from .gui_resize_handler import ResizeHandler
 from .gui_event_handlers import MainViewEventHandlers
+from .task_queue_manager import TaskQueueManager # Import the new manager
+
+if TYPE_CHECKING:
+    from .gui_table_handler import TableHandler
 
 logger_gui = logging.getLogger(__name__)
 logger_gui.setLevel(logging.WARNING)
@@ -85,6 +90,7 @@ class MainView(QWidget):
     
 
     auth_handler: AuthHandler
+    table_handler: "TableHandler" # Use forward reference string
 
     # Download state used by core functions; the handler orchestrates UI/state transitions.
     download_active: bool = False
@@ -130,6 +136,7 @@ class MainView(QWidget):
         self.initView()
 
         from .gui_playlist_tree_handler import PlaylistTreeHandler
+        from .gui_table_handler import TableHandler # Import here
         self.auth_handler = AuthHandler(self.spotify_api, parent=self)
         self.settingsPage = SettingsPage(auth_handler=self.auth_handler, parent=self)
         self.tree_handler = PlaylistTreeHandler(
@@ -159,6 +166,32 @@ class MainView(QWidget):
             self.stackedLayout, self.mainPage, self.settingsPage, parent=self
         )
         self.resize_handler = ResizeHandler(self, self.title_bar)
+        
+        # Initialize the Task Queue Manager
+        self.task_queue_manager = TaskQueueManager(self)
+        self.tree_handler.set_task_queue_manager(self.task_queue_manager)
+
+
+        # --- Redirect stdout to the log widget ---
+        self.stdout_stream = EmittingStream()
+        self.stdout_stream.textWritten.connect(
+            lambda text: append_text_to_output(self.c_printTextEdit, text)
+        )
+        sys.stdout = self.stdout_stream
+        # --- End stdout redirection ---
+
+        # --- NEW: Create and add a dedicated handler for the GUI Log Area ---
+        gui_log_handler = logging.StreamHandler(self.stdout_stream)
+        gui_log_handler.setLevel(logging.INFO)  # Set the level for the GUI log
+        
+        # Optional: Add a simple formatter for a cleaner look in the GUI
+        formatter = logging.Formatter('%(levelname)s: %(message)s')
+        gui_log_handler.setFormatter(formatter)
+        
+        # Add this new handler to the root logger
+        logging.getLogger().addHandler(gui_log_handler)
+        logger_gui.info("GUI log handler configured.")
+        # --- END NEW SECTION ---
 
         self.settingsPage.audio_combo = self.c_combTQuality
         self.tree_handler.set_download_handler(self.download_handler)
@@ -433,7 +466,7 @@ class MainView(QWidget):
             )
         )
         self.tree_handler.requestTidalPlaylistDownload.connect(
-            self.download_handler.startContextMenuDownload
+            self.task_queue_manager.add_tidal_download_job
         )
         self.s_spotifyLoginFinished.connect(
             self.spotify_gui_handler.onSpotifyLoginFinished
@@ -505,6 +538,16 @@ class MainView(QWidget):
         )
         self.play_bar_widget.volumeChanged.connect(self.player_logic.set_volume)
         self.play_bar_widget.muteClicked.connect(self.player_logic.toggle_mute)
+
+        # --- Add these lines to connect the progress signals ---
+
+        # Connect Task Queue Manager signals to Playlist Tree Handler slots
+        self.task_queue_manager.jobStarted.connect(self.tree_handler.on_job_started)
+        self.task_queue_manager.jobFinished.connect(self.tree_handler.on_job_finished)
+
+        # Connect progress signals from individual handlers to the Playlist Tree Handler
+        self.download_handler.downloadProgress.connect(self.tree_handler.on_job_progress)
+        self.linking_gui_handler.linkProgress.connect(self.tree_handler.on_job_progress)
 
     @pyqtSlot(QtWidgets.QTableWidgetItem)
     def _on_table_item_double_clicked(self, item: QtWidgets.QTableWidgetItem):
@@ -674,7 +717,7 @@ class MainView(QWidget):
         self.search_handler.perform_search(query)
 
     @pyqtSlot(list)
-    def startLinkingWorker(self, tracks_to_link_data: list):
+    def startLinkingWorker(self, tracks_to_link_data: list, on_finish_callback: Optional[Callable] = None): # MODIFIED: Added callback parameter
         if not tracks_to_link_data or self.linking_active:
             return
         self.linking_active = True
@@ -698,6 +741,11 @@ class MainView(QWidget):
         self.linking_worker.error.connect(self.s_linkingError)
         self.linking_thread.started.connect(self.linking_worker.run)
         self.linking_worker.allTasksFinished.connect(self.linking_thread.quit)
+        
+        # MODIFIED: Connect the optional callback if it exists
+        if on_finish_callback:
+            self.linking_worker.allTasksFinished.connect(on_finish_callback)
+
         self.linking_worker.error.connect(self.linking_thread.quit)
         self.linking_thread.finished.connect(self.linking_worker.deleteLater)
         self.linking_thread.finished.connect(self.linking_thread.deleteLater)
@@ -727,6 +775,8 @@ class MainView(QWidget):
         # It's safe to call these even if no download/linking is active.
         self.download_handler.onStopClicked()
         self.linking_gui_handler.onStopLinkingClicked()
+        if self.task_queue_manager:
+            self.task_queue_manager.stop_all_tasks()
 
         # 2. Specifically wait for the linking QThread to finish.
         # The download handler uses a ThreadPoolExecutor which is harder to wait for

@@ -29,7 +29,7 @@ from typing import cast  # Add cast
 from .. import paths  # For resolving icon paths
 import os
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)  # Set specific level for this module
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 
 # +++ START: Overlay Widget Definition +++

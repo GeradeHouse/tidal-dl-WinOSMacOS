@@ -18,8 +18,7 @@ import threading
 from io import BytesIO  # Needed for loading image data
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)  # Set specific level for this module
-# logger.propagate = False # Removed: Allow propagation if level permits
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # --- Monkey Patch spotipy.client logging ---
 from spotipy.client import logger as spotipy_logger

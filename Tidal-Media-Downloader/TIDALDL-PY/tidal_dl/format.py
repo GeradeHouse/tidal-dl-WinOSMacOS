@@ -10,7 +10,7 @@
 import re
 import datetime
 import logging
-import platform
+import os
 from typing import Optional, Union, Dict, Any
 
 import aigpy
@@ -19,9 +19,11 @@ import aigpy
 from .settings import SETTINGS
 from .enums import Type
 from .model import Album, Playlist, Track, StreamUrl
+from .paths import get_user_download_path
 
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 
 def __fixPath__(name: Any) -> str:
@@ -84,7 +86,7 @@ def __getExtension__(stream: StreamUrl) -> str:
 def getAlbumPath(album: Album, artistName: str, albumArtistName: str, flag: str) -> Optional[str]:
     """Generates the directory path for an album based on settings."""
     if not album or not hasattr(album, 'title'):
-        logging.error("Invalid album object passed to getAlbumPath.")
+        logger.error("Invalid album object passed to getAlbumPath.")
         return None
 
     if flag:
@@ -95,35 +97,38 @@ def getAlbumPath(album: Album, artistName: str, albumArtistName: str, flag: str)
     albumName = __fixPath__(album.title)
     year = __getYear__(getattr(album, 'releaseDate', ''))
 
-    retpath = SETTINGS.albumFolderFormat or SETTINGS.getDefaultPathFormat(Type.Album)
+    relative_path = SETTINGS.albumFolderFormat or SETTINGS.getDefaultPathFormat(Type.Album)
 
-    retpath = retpath.replace(R"{ArtistName}", __fixPath__(artistName))
-    retpath = retpath.replace(R"{AlbumArtistName}", __fixPath__(albumArtistName))
-    retpath = retpath.replace(R"{Flag}", flag)
-    retpath = retpath.replace(R"{AlbumID}", str(getattr(album, 'id', '')))
-    retpath = retpath.replace(R"{AlbumYear}", year)
-    retpath = retpath.replace(R"{AlbumTitle}", albumName)
+    relative_path = relative_path.replace(R"{ArtistName}", __fixPath__(artistName))
+    relative_path = relative_path.replace(R"{AlbumArtistName}", __fixPath__(albumArtistName))
+    relative_path = relative_path.replace(R"{Flag}", flag)
+    relative_path = relative_path.replace(R"{AlbumID}", str(getattr(album, 'id', '')))
+    relative_path = relative_path.replace(R"{AlbumYear}", year)
+    relative_path = relative_path.replace(R"{AlbumTitle}", albumName)
     audio_quality_name = getattr(getattr(album, 'audioQuality', None), 'name', '')
-    retpath = retpath.replace(R"{AudioQuality}", audio_quality_name)
-    retpath = retpath.replace(R"{DurationSeconds}", str(getattr(album, 'duration', 0)))
-    retpath = retpath.replace(R"{Duration}", __getDurationStr__(getattr(album, 'duration', 0)))
-    retpath = retpath.replace(R"{NumberOfTracks}", str(getattr(album, 'numberOfTracks', 0)))
-    retpath = retpath.replace(R"{NumberOfVideos}", str(getattr(album, 'numberOfVideos', 0)))
-    retpath = retpath.replace(R"{NumberOfVolumes}", str(getattr(album, 'numberOfVolumes', 0)))
-    retpath = retpath.replace(R"{ReleaseDate}", str(getattr(album, 'releaseDate', '')))
+    relative_path = relative_path.replace(R"{AudioQuality}", audio_quality_name)
+    relative_path = relative_path.replace(R"{DurationSeconds}", str(getattr(album, 'duration', 0)))
+    relative_path = relative_path.replace(R"{Duration}", __getDurationStr__(getattr(album, 'duration', 0)))
+    relative_path = relative_path.replace(R"{NumberOfTracks}", str(getattr(album, 'numberOfTracks', 0)))
+    relative_path = relative_path.replace(R"{NumberOfVideos}", str(getattr(album, 'numberOfVideos', 0)))
+    relative_path = relative_path.replace(R"{NumberOfVolumes}", str(getattr(album, 'numberOfVolumes', 0)))
+    relative_path = relative_path.replace(R"{ReleaseDate}", str(getattr(album, 'releaseDate', '')))
     record_type_name = getattr(getattr(album, 'type', None), 'name', '')
-    retpath = retpath.replace(R"{RecordType}", record_type_name)
-    retpath = retpath.replace(R"{None}", "")
+    relative_path = relative_path.replace(R"{RecordType}", record_type_name)
+    relative_path = relative_path.replace(R"{None}", "")
 
     # Post-process to avoid leading '/' if artist empty and trailing '[]' if year empty
     if not artistName.strip():
-        retpath = retpath.lstrip('/')
-    if year == '' and '[{AlbumYear}]' in retpath:
-        retpath = retpath.replace(' [{AlbumYear}]', '')
+        relative_path = relative_path.lstrip('/')
+    if year == '' and '[{AlbumYear}]' in relative_path:
+        relative_path = relative_path.replace(' [{AlbumYear}]', '')
 
-    logger.debug(f"getAlbumPath result: artist='{artistName}', year='{year}', path='{retpath.strip()}'")
+    base_path = get_user_download_path(SETTINGS.downloadPath)
+    full_path = os.path.join(base_path, relative_path.strip())
 
-    return retpath.strip()
+    logger.debug(f"getAlbumPath result: artist='{artistName}', year='{year}', path='{full_path}'")
+
+    return full_path
 
 
 def getPlaylistPath(playlist: Union[Playlist, Dict[str, Any]]) -> Optional[str]:
@@ -139,21 +144,24 @@ def getPlaylistPath(playlist: Union[Playlist, Dict[str, Any]]) -> Optional[str]:
         playlistName = __fixPath__(playlist.title)
         playlistUUID = str(playlist.uuid)
     else:
-        logging.warning(f"getPlaylistPath: Received unexpected playlist type: {type(playlist)}")
+        logger.warning(f"getPlaylistPath: Received unexpected playlist type: {type(playlist)}")
         return None
 
-    retpath = SETTINGS.playlistFolderFormat or SETTINGS.getDefaultPathFormat(Type.Playlist)
-    retpath = retpath.replace(R"{PlaylistUUID}", playlistUUID)
-    retpath = retpath.replace(R"{PlaylistName}", playlistName)
+    relative_path = SETTINGS.playlistFolderFormat or SETTINGS.getDefaultPathFormat(Type.Playlist)
+    relative_path = relative_path.replace(R"{PlaylistUUID}", playlistUUID)
+    relative_path = relative_path.replace(R"{PlaylistName}", playlistName)
 
-    return retpath.strip()
+    base_path = get_user_download_path(SETTINGS.downloadPath)
+    full_path = os.path.join(base_path, relative_path.strip())
+
+    return full_path
 
 
 def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists: str, album: Optional[Album] = None, playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None) -> str:
     """Generates the full file path for a track based on context and settings."""
     logger.debug(f"getTrackPath: artist='{artist}', artists='{artists}', track.title='{track.title if track else 'None'}'")
     if not track or not hasattr(track, 'title') or not stream:
-        logging.error("Invalid track or stream object passed to getTrackPath.")
+        logger.error("Invalid track or stream object passed to getTrackPath.")
         return "Invalid_Track.m4a"
 
     # Determine track number string
@@ -184,59 +192,59 @@ def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists
 
     extension = __getExtension__(stream)
 
-    retpath = SETTINGS.trackFileFormat or SETTINGS.getDefaultPathFormat(Type.Track)
+    filename_format = SETTINGS.trackFileFormat or SETTINGS.getDefaultPathFormat(Type.Track)
 
-    # Replace all placeholders
-    retpath = retpath.replace(R"{TrackNumber}", number_for_format)
-    retpath = retpath.replace(R"{ArtistName}", __fixPath__(artist))
-    retpath = retpath.replace(R"{ArtistsName}", __fixPath__(artists))
-    retpath = retpath.replace(R"{TrackTitle}", title)
-    retpath = retpath.replace(R"{ExplicitFlag}", explicit)
-    retpath = retpath.replace(R"{AlbumYear}", year)
-    retpath = retpath.replace(R"{AlbumTitle}", albumName)
+    # Replace all placeholders in the filename format
+    filename_format = filename_format.replace(R"{TrackNumber}", number_for_format)
+    filename_format = filename_format.replace(R"{ArtistName}", __fixPath__(artist))
+    filename_format = filename_format.replace(R"{ArtistsName}", __fixPath__(artists))
+    filename_format = filename_format.replace(R"{TrackTitle}", title)
+    filename_format = filename_format.replace(R"{ExplicitFlag}", explicit)
+    filename_format = filename_format.replace(R"{AlbumYear}", year)
+    filename_format = filename_format.replace(R"{AlbumTitle}", albumName)
     audio_quality_name = getattr(getattr(track, 'audioQuality', None), 'name', '')
-    retpath = retpath.replace(R"{AudioQuality}", audio_quality_name)
-    retpath = retpath.replace(R"{DurationSeconds}", str(getattr(track, 'duration', 0)))
-    retpath = retpath.replace(R"{Duration}", __getDurationStr__(getattr(track, 'duration', 0)))
-    retpath = retpath.replace(R"{TrackID}", str(getattr(track, 'id', '')))
-    retpath = retpath.replace(R"{None}", "")
+    filename_format = filename_format.replace(R"{AudioQuality}", audio_quality_name)
+    filename_format = filename_format.replace(R"{DurationSeconds}", str(getattr(track, 'duration', 0)))
+    filename_format = filename_format.replace(R"{Duration}", __getDurationStr__(getattr(track, 'duration', 0)))
+    filename_format = filename_format.replace(R"{TrackID}", str(getattr(track, 'id', '')))
+    filename_format = filename_format.replace(R"{None}", "")
 
-    # Clean up path string
-    retpath = ' '.join(retpath.split())
-    retpath = re.sub(r"^\s*[-._]\s*", "", retpath)
-    retpath = re.sub(r"\s*[-._]\s*$", "", retpath)
-    retpath = re.sub(r"\s*([-._])\s*(\1\s*)+", r" \1 ", retpath)
-    retpath = re.sub(r"\s*([-._])\s*", r" \1 ", retpath)
+    # Clean up filename string
+    filename_format = ' '.join(filename_format.split())
+    filename_format = re.sub(r"^\s*[-._]\s*", "", filename_format)
+    filename_format = re.sub(r"\s*[-._]\s*$", "", filename_format)
+    filename_format = re.sub(r"\s*([-._])\s*(\1\s*)+", r" \1 ", filename_format)
+    filename_format = re.sub(r"\s*([-._])\s*", r" \1 ", filename_format)
 
-    # --- START OF CORRECTION ---
-    # The platform check has been removed to make this logic universal.
-    # This will now correctly create subfolders on macOS, Linux, and Windows.
-    folder = ""
+    # Determine the subdirectory structure
+    sub_folder = ""
     if album:
-        folder = f"Albums/{__fixPath__(album.title)}/"
+        sub_folder = os.path.join("Albums", __fixPath__(album.title))
     elif playlist_context:
         if isinstance(playlist_context, dict):
             if playlist_context.get('type') == 'single':
-                folder = "Tracks/"
+                sub_folder = "Tracks"
             elif playlist_context.get('type') == 'spotify':
                 playlist_name = __fixPath__(playlist_context['data'].get('name', 'Unknown'))
                 playlist_uuid = playlist_context['data'].get('id', 'Unknown')
                 logger.debug(f"Spotify playlist: name='{playlist_name}', id='{playlist_uuid}'")
-                folder = f"Playlists/{playlist_name} [{playlist_uuid}]/"
+                sub_folder = os.path.join("Playlists", f"{playlist_name} [{playlist_uuid}]")
             else:
-                folder = f"Artists/{__fixPath__(artist)}/"
+                sub_folder = os.path.join("Artists", __fixPath__(artist))
         else:
             # Tidal playlist
             playlist_name = __fixPath__(getattr(playlist_context, 'title', 'Unknown'))
             playlist_uuid = getattr(playlist_context, 'uuid', 'Unknown')
-            folder = f"Playlists/{playlist_name} [{playlist_uuid}]/"
+            sub_folder = os.path.join("Playlists", f"{playlist_name} [{playlist_uuid}]")
     else:
-        folder = f"Artists/{__fixPath__(artist)}/"
-    
-    # Prepend the folder path to the filename path
-    retpath = folder + retpath
-    # --- END OF CORRECTION ---
+        sub_folder = os.path.join("Artists", __fixPath__(artist))
 
-    final_path = f"{retpath.strip()}{extension}"
+    # Get the resolved, absolute base download path
+    base_path = get_user_download_path(SETTINGS.downloadPath)
+
+    # Construct the full, absolute path
+    filename_with_ext = f"{filename_format.strip()}{extension}"
+    final_path = os.path.join(base_path, sub_folder, filename_with_ext)
+
     logger.debug(f"getTrackPath final path: '{final_path}'")
     return final_path

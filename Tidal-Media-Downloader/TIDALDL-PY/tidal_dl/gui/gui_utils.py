@@ -28,7 +28,7 @@ from typing import Callable
 from ..settings import SETTINGS
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)  # Set specific level for this module
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # ########## GUI INITIALIZATION CHECK ##########
 

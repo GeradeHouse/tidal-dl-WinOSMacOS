@@ -9,30 +9,66 @@ This script cleans up previous build artifacts and runs PyInstaller
 to create a standalone executable for the Tidal Media Downloader GUI.
 It allows specifying the build type (Windowed or Console).
 Includes icons, fonts, and images assets. Excludes common ML libraries.
+After a successful build, it also copies the resulting executable and the `_internal`
+folder to a fixed test location so the app can be run and tested immediately.
 
 .PARAMETER BuildType
 Specifies the type of executable to build.
 'Windowed' creates a standard GUI application without a console window (--noconsole).
 'Console' creates an executable that opens a console window (useful for debugging).
 Defaults to 'Windowed'.
+(Kept for backward compatibility. Prefer using -Windowed or -Console.)
+
+.PARAMETER Windowed
+Switch-style way to request a windowed/GUI build. Equivalent to: -BuildType Windowed
+
+.PARAMETER Console
+Switch-style way to request a console build. Equivalent to: -BuildType Console
 
 .EXAMPLE
 .\build-tidal_dl_gui.ps1
-Builds the default 'Windowed' executable.
+Builds the default 'Windowed' executable (if no switches/parameters are supplied,
+the script will prompt for a choice).
 
 .EXAMPLE
 .\build-tidal_dl_gui.ps1 -BuildType Console
-Builds the 'Console' executable.
+Builds the 'Console' executable. (Legacy invocation, still supported.)
 
 .EXAMPLE
 .\build-tidal_dl_gui.ps1 -BuildType Windowed
-Builds the 'Windowed' executable.
+Builds the 'Windowed' executable. (Legacy invocation, still supported.)
+
+.EXAMPLE
+.\build-tidal_dl_gui.ps1 -Windowed
+Builds the 'Windowed' executable using the new switch-style invocation.
+
+.EXAMPLE
+.\build-tidal_dl_gui.ps1 -Console
+Builds the 'Console' executable using the new switch-style invocation.
 #>
 param(
     [Parameter(Mandatory=$false)]
     [ValidateSet("Windowed", "Console")]
-    [string]$BuildType
+    [string]$BuildType,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$Windowed,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$Console
 )
+
+# --- Resolve Build Type (new switch style takes precedence) ---
+if ($Windowed -and $Console) {
+    Write-Error "You cannot specify both -Windowed and -Console at the same time."
+    exit 1
+}
+
+if ($Windowed) {
+    $BuildType = "Windowed"
+} elseif ($Console) {
+    $BuildType = "Console"
+}
 
 if (-not $BuildType) {
     Write-Host "Please select the build type:"
@@ -48,6 +84,7 @@ if (-not $BuildType) {
         $BuildType = "Console"
     }
 }
+
 # --- Define PyInstaller Path ---
 $PyInstallerPath = Join-Path $PSScriptRoot ".venv\Scripts\pyinstaller.exe"
 
@@ -110,6 +147,18 @@ $AppName = "tidal-dl-gui"
 $MainScript = "main.py" # Relative to $ProjectSourceDir
 $IconFile = Join-Path $PackageDir "tidal_dl\assets\icons\icon-tidal-dl-gui.ico" # Relative to $PackageDir, use backslash for Windows path
 $SplashImage = Join-Path $PackageDir "tidal_dl\assets\images\splash.png" # Path to the splash screen image
+
+# --- Post-Build Copy Configuration ---
+# The user requested that after building, the following path's artifacts are copied:
+#   EXE:     <project-root>\Tidal-Media-Downloader\dist\tidal-dl-gui\tidal-dl-gui.exe
+#   FOLDER:  <project-root>\Tidal-Media-Downloader\dist\tidal-dl-gui\_internal
+# to:
+#   C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl-test
+# We derive the source from the actual project root to keep it aligned with where we built.
+$BuildOutputDir     = Join-Path $ProjectSourceDir ("dist\" + $AppName)
+$PostBuildExePath   = Join-Path $BuildOutputDir ($AppName + ".exe")
+$PostBuildFolder    = Join-Path $BuildOutputDir "_internal"
+$PostBuildTargetDir = "C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl-test"
 
 # --- Start ---
 Write-Host "-------------------------------------" -ForegroundColor Cyan
@@ -208,7 +257,7 @@ try {
         exit $LASTEXITCODE
     } else {
         Write-Host "PyInstaller build completed successfully!" -ForegroundColor Green
-        Write-Host "Executable created in: $(Join-Path $ProjectSourceDir 'dist')" -ForegroundColor Green
+        Write-Host "Executable created in: $BuildOutputDir" -ForegroundColor Green
     }
 }
 catch {
@@ -220,6 +269,48 @@ catch {
 Set-Location $ScriptDir
 Write-Host "Restored working directory to: $ScriptDir"
 
+# --- Post-Build: Copy Artifacts to Test Location ---
+Write-Host "-------------------------------------" -ForegroundColor Cyan
+Write-Host "Copying build artifacts to test location..." -ForegroundColor Cyan
+
+# Ensure the target directory exists
+try {
+    if (-not (Test-Path $PostBuildTargetDir)) {
+        Write-Host "Test directory does not exist. Creating: $PostBuildTargetDir" -ForegroundColor Yellow
+        New-Item -ItemType Directory -Path $PostBuildTargetDir -Force | Out-Null
+    }
+} catch {
+    Write-Error "Failed to ensure test directory '$PostBuildTargetDir' exists: $($_.Exception.Message)"
+    # do not exit here; show that build finished but copy failed
+}
+
+# Copy the EXE
+if (Test-Path $PostBuildExePath) {
+    try {
+        Write-Host "Copying EXE from '$PostBuildExePath' to '$PostBuildTargetDir'..." -ForegroundColor Yellow
+        Copy-Item -Path $PostBuildExePath -Destination $PostBuildTargetDir -Force
+        Write-Host "EXE copied successfully." -ForegroundColor Green
+    } catch {
+        Write-Error "Failed to copy EXE to test location: $($_.Exception.Message)"
+    }
+} else {
+    Write-Warning "Expected EXE not found at '$PostBuildExePath'. Skipping EXE copy."
+}
+
+# Copy the _internal folder (and its contents)
+if (Test-Path $PostBuildFolder) {
+    try {
+        Write-Host "Copying '_internal' folder from '$PostBuildFolder' to '$PostBuildTargetDir'..." -ForegroundColor Yellow
+        Copy-Item -Path $PostBuildFolder -Destination $PostBuildTargetDir -Recurse -Force
+        Write-Host "'_internal' folder copied successfully." -ForegroundColor Green
+    } catch {
+        Write-Error "Failed to copy '_internal' folder to test location: $($_.Exception.Message)"
+    }
+} else {
+    Write-Warning "Expected '_internal' folder not found at '$PostBuildFolder'. Skipping folder copy."
+}
+
 Write-Host "-------------------------------------" -ForegroundColor Cyan
 Write-Host "Build Script Finished." -ForegroundColor Cyan
+Write-Host "Artifacts are available (where present) at: $PostBuildTargetDir" -ForegroundColor Cyan
 Write-Host "-------------------------------------"

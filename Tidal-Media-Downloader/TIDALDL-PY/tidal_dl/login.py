@@ -27,6 +27,7 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 
 def initialize_and_login():

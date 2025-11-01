@@ -9,13 +9,15 @@
 """
 
 import logging
-from typing import List, Optional, cast, Tuple, Dict, Any
+from typing import List, Optional, cast, Tuple, Dict, Any, Union
 import threading
 import re
 
 # Import Qt components needed for the handler
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)  # Set specific level for this module
+
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot  # Added for LinkingWorker
 
 # Import project components
@@ -27,12 +29,13 @@ from .tidal import TidalAPI
 try:
     from aigpy.modelHelper import dictToModel as aigpy_dictToModel
 except ImportError:
-    logging.warning(
+    logger.warning(
         "aigpy.modelHelper could not be imported. Model casting might fail."
     )
 
-    def aigpy_dictToModel(indict: Any, model_type: Any) -> Any:
-        return model_type  # Fallback for aigpy function, match expected param name 'indict'
+    # MODIFIED: Changed parameter name from 'model_type' to 'model' to fix Pylance warning
+    def aigpy_dictToModel(indict: Any, model: Any) -> Any:
+        return model  # Fallback for aigpy function
 
 
 # Forward declaration for type hinting MainView without circular import
@@ -151,14 +154,14 @@ def searchLinkTrack(
                     # Add check for best_match not being None
                     # Correct indentation and add None check for id
                     if best_match and best_match.id is not None:
-                        logging.info(
+                        logger.info(
                             f"Confident ISRC match found: Tidal ID {best_match.id} ('{best_match.title}'). Fetching full track data."
                         )
                         # Emit buffer before returning
-                        logging.debug(f"--- Emitting buffered logs for ISRC match ---")
+                        logger.debug(f"--- Emitting buffered logs for ISRC match ---")
                         for msg in debug_buffer:
-                            logging.debug(msg)
-                        logging.debug(f"--- End buffered logs ---")
+                            logger.debug(msg)
+                        logger.debug(f"--- End buffered logs ---")
                         # Fetch full track data, ensuring ID is str
                         full_track = api.getTrack(
                             str(best_match.id), suppress_debug_prints=True
@@ -166,29 +169,29 @@ def searchLinkTrack(
                         return full_track, None, 0  # ISRC match has score 0
                     else:
                         # Handle case where best_match or its id is None despite is_isrc_match flag
-                        logging.error(
+                        logger.error(
                             f"ISRC match flag set, but best_match ({best_match}) or best_match.id is None. Cannot fetch full track."
                         )
                         # Emit buffer before returning
-                        logging.debug(
+                        logger.debug(
                             f"--- Emitting buffered logs for ISRC match failure ---"
                         )
                         for msg in debug_buffer:
-                            logging.debug(msg)
-                        logging.debug(f"--- End buffered logs ---")
+                            logger.debug(msg)
+                        logger.debug(f"--- End buffered logs ---")
                         return None, None, None
 
         except Exception as e:
-            logging.error(
+            logger.error(
                 f"Error during Tidal ISRC search for '{isrc}': {e}", exc_info=True
             )
             # Emit buffer on exception
-            logging.debug(
+            logger.debug(
                 f"--- Emitting buffered logs due to exception during ISRC search ---"
             )
             for msg in debug_buffer:
-                logging.debug(msg)
-            logging.debug(f"--- End buffered logs ---")
+                logger.debug(msg)
+            logger.debug(f"--- End buffered logs ---")
             # Continue to metadata search even if ISRC search fails
 
     # 2. If ISRC search didn't find a match OR no ISRC provided, search by metadata
@@ -229,7 +232,7 @@ def searchLinkTrack(
                 raw_api_response = search_tuple[1]
             elif search_tuple:  # Handle unexpected return type
                 search_result = search_tuple
-                logging.warning(
+                logger.warning(
                     f"api.search with return_raw=True returned unexpected type: {type(search_tuple)}"
                 )
 
@@ -254,7 +257,7 @@ def searchLinkTrack(
 
             # Handle case where initial search yields no results
             if num_items_found == 0:
-                logging.warning(
+                logger.warning(
                     f"No Tidal tracks found for initial metadata query: '{query}'. Attempting fallback."
                 )
                 debug_buffer.append(
@@ -277,7 +280,7 @@ def searchLinkTrack(
                     debug_buffer.append(
                         f"Attempting Fallback 1 search with query: '{fallback_query_1}'"
                     )
-                    logging.info(
+                    logger.info(
                         f"Attempting Fallback 1 search for '{title}' with query: '{fallback_query_1}'"
                     )
                     try:
@@ -298,7 +301,7 @@ def searchLinkTrack(
                             fallback_raw_response_1 = fallback_search_tuple_1[1]
                         elif fallback_search_tuple_1:
                             fallback_search_result_1 = fallback_search_tuple_1
-                            logging.warning(
+                            logger.warning(
                                 f"Fallback 1 search returned unexpected type: {type(fallback_search_tuple_1)}"
                             )
 
@@ -320,7 +323,7 @@ def searchLinkTrack(
                         debug_buffer.append(
                             f"Fallback 1 query '{fallback_query_1}' found {fallback_num_items_1} potential matches."
                         )
-                        logging.debug(
+                        logger.debug(
                             f"Fallback 1 query '{fallback_query_1}' found {fallback_num_items_1} matches."
                         )
 
@@ -330,13 +333,13 @@ def searchLinkTrack(
                             raw_api_response = fallback_raw_response_1  # Update for consistency if needed later
                             num_items_found = fallback_num_items_1
                             fallback_1_successful = True
-                            logging.info(
+                            logger.info(
                                 f"Fallback 1 search successful. Proceeding with {fallback_num_items_1} candidates."
                             )
                             # Let it flow into the candidate loop below
                         else:
                             # Fallback 1 also failed
-                            logging.warning(
+                            logger.warning(
                                 f"Fallback 1 search query '{fallback_query_1}' also found 0 results."
                             )
                             debug_buffer.append(
@@ -344,7 +347,7 @@ def searchLinkTrack(
                             )
                             # Continue to Fallback 2
                     except Exception as fallback_e_1:
-                        logging.error(
+                        logger.error(
                             f"Error during Fallback 1 search for '{fallback_query_1}': {fallback_e_1}",
                             exc_info=True,
                         )
@@ -354,7 +357,7 @@ def searchLinkTrack(
                         # Continue to Fallback 2 despite exception in Fallback 1
                 else:
                     # Fallback 1 not attempted (identical query or no ' - ')
-                    logging.warning(
+                    logger.warning(
                         f"Initial query failed, Fallback 1 not attempted (query identical or no ' - ' in title)."
                     )
                     debug_buffer.append(
@@ -368,7 +371,7 @@ def searchLinkTrack(
                     if fallback_query_2.lower() == query.lower().replace(
                         f" {primary_artist.lower()}", ""
                     ):
-                        logging.warning(
+                        logger.warning(
                             f"Skipping Fallback 2: Query '{fallback_query_2}' would be identical to the initial title part."
                         )
                         debug_buffer.append(
@@ -378,7 +381,7 @@ def searchLinkTrack(
                         debug_buffer.append(
                             f"Attempting Fallback 2 search with query: '{fallback_query_2}' (title part only)"
                         )
-                        logging.info(
+                        logger.info(
                             f"Attempting Fallback 2 search for '{title}' with query: '{fallback_query_2}' (title part only)"
                         )
                         try:
@@ -399,7 +402,7 @@ def searchLinkTrack(
                                 fallback_raw_response_2 = fallback_search_tuple_2[1]
                             elif fallback_search_tuple_2:
                                 fallback_search_result_2 = fallback_search_tuple_2
-                                logging.warning(
+                                logger.warning(
                                     f"Fallback 2 search returned unexpected type: {type(fallback_search_tuple_2)}"
                                 )
 
@@ -423,7 +426,7 @@ def searchLinkTrack(
                             debug_buffer.append(
                                 f"Fallback 2 query '{fallback_query_2}' found {fallback_num_items_2} potential matches."
                             )
-                            logging.debug(
+                            logger.debug(
                                 f"Fallback 2 query '{fallback_query_2}' found {fallback_num_items_2} matches."
                             )
 
@@ -434,28 +437,28 @@ def searchLinkTrack(
                                     fallback_raw_response_2  # Update for consistency
                                 )
                                 num_items_found = fallback_num_items_2
-                                logging.info(
+                                logger.info(
                                     f"Fallback 2 search successful. Proceeding with {fallback_num_items_2} candidates."
                                 )
                                 # Let it flow into the candidate loop below
                             else:
                                 # Fallback 2 also failed
-                                logging.warning(
+                                logger.warning(
                                     f"Fallback 2 search query '{fallback_query_2}' also found 0 results."
                                 )
                                 debug_buffer.append(
                                     f"Fallback 2 query '{fallback_query_2}' also yielded 0 results. Raw response: {fallback_raw_response_2}"
                                 )
                                 # Both initial and fallbacks failed, emit buffer and return None
-                                logging.debug(
+                                logger.debug(
                                     f"--- Emitting buffered logs for failed initial and fallback matches ---"
                                 )
                                 for msg in debug_buffer:
-                                    logging.debug(msg)
-                                logging.debug(f"--- End buffered logs ---")
+                                    logger.debug(msg)
+                                logger.debug(f"--- End buffered logs ---")
                                 return None, None, None  # All searches failed
                         except Exception as fallback_e_2:
-                            logging.error(
+                            logger.error(
                                 f"Error during Fallback 2 search for '{fallback_query_2}': {fallback_e_2}",
                                 exc_info=True,
                             )
@@ -463,26 +466,26 @@ def searchLinkTrack(
                                 f"Exception during Fallback 2 search: {fallback_e_2}"
                             )
                             # Emit buffer before returning None, None
-                            logging.debug(
+                            logger.debug(
                                 f"--- Emitting buffered logs due to Fallback 2 exception ---"
                             )
                             for msg in debug_buffer:
-                                logging.debug(msg)
-                            logging.debug(f"--- End buffered logs ---")
+                                logger.debug(msg)
+                            logger.debug(f"--- End buffered logs ---")
                             return None, None, None  # Exception during Fallback 2
 
                 # If we are here and num_items_found is still 0, it means all fallbacks failed or were skipped.
                 if num_items_found == 0:
-                    logging.warning(
+                    logger.warning(
                         f"All search attempts (initial and fallbacks) failed for '{title}'."
                     )
                     # Ensure buffer is emitted if not already done by exceptions/failures above
-                    logging.debug(
+                    logger.debug(
                         f"--- Emitting buffered logs for final failure after all fallbacks ---"
                     )
                     for msg in debug_buffer:
-                        logging.debug(msg)
-                    logging.debug(f"--- End buffered logs ---")
+                        logger.debug(msg)
+                    logger.debug(f"--- End buffered logs ---")
                     return None, None, None
 
                 # --- End Fallback Search Logic ---
@@ -651,25 +654,25 @@ def searchLinkTrack(
             if best_match:
                 best_match_id = getattr(best_match, "id", "N/A")
                 best_match_title = getattr(best_match, "title", "N/A")
-                logging.debug(
+                logger.debug(
                     f"    - Final Best Match (Pre-Confidence Check): Tidal ID {best_match_id} ('{best_match_title}'), Final Score: {min_score}"
                 )
             else:
-                logging.debug("    - No best match found during metadata search.")
+                logger.debug("    - No best match found during metadata search.")
 
             should_emit_buffer = (
                 best_match is None or min_score >= 2
             )  # Emit if no match or uncertain
 
             if should_emit_buffer:  # Keep original logging for emitting buffer
-                logging.debug(
+                logger.debug(
                     f"--- Emitting buffered logs for uncertain/failed match (Score: {min_score}) ---"
                 )
                 for msg in debug_buffer:
-                    logging.debug(msg)
-                logging.debug(f"--- End buffered logs ---")
+                    logger.debug(msg)
+                logger.debug(f"--- End buffered logs ---")
             # else: # Optional: Log that buffer is being discarded for confident match
-            # logging.debug(f"--- Discarding buffered logs for confident match (Score: {min_score}) ---")
+            # logger.debug(f"--- Discarding buffered logs for confident match (Score: {min_score}) ---")
 
             if best_match and best_match.id is not None:
                 is_confident = (min_score < 2) or (
@@ -678,7 +681,7 @@ def searchLinkTrack(
                 )  # Confident if score 2 AND no *other* candidates
 
                 if is_confident:
-                    logging.info(
+                    logger.info(
                         f"Confident metadata match found (Score: {min_score}): Tidal ID {best_match.id} ('{best_match.title}'). Fetching full track data."
                     )
                     full_track = api.getTrack(
@@ -693,7 +696,7 @@ def searchLinkTrack(
                         int(min_score),
                     )  # No alternative candidates to return for confident match
                 else:
-                    logging.info(
+                    logger.info(
                         f"Uncertain metadata match found: Tidal ID {best_match.id} ('{best_match.title}') with score {min_score}. Fetching full track data."
                     )
                     full_track = api.getTrack(
@@ -717,17 +720,17 @@ def searchLinkTrack(
             else:
                 # No best_match found at all (or best_match.id is None)
                 if best_match is None:  # Explicitly check if best_match itself is None
-                    logging.warning(
+                    logger.warning(
                         f"No metadata match found for '{title}' by '{primary_artist}'."
                     )
                 else:  # best_match exists but best_match.id is None
-                    logging.error(
+                    logger.error(
                         f"Best match found ({best_match}) but its ID is None. Cannot proceed."
                     )
                 # Buffer should have already been emitted if should_emit_buffer was True
                 # Return the processed_candidates if any were found, even if no single best_match was chosen
                 # This allows UI to show candidates even if auto-linking failed completely.
-                logging.debug(
+                logger.debug(
                     f"searchLinkTrack: No confident match. Returning processed_candidates (length {len(processed_candidates) if processed_candidates else 0}): {processed_candidates}"
                 )
                 logger.debug(
@@ -740,17 +743,17 @@ def searchLinkTrack(
                 )
 
         except Exception as e:
-            logging.error(
+            logger.error(
                 f"Error during Tidal metadata search for '{title}': {e}", exc_info=True
             )
             # Emit buffer on exception as well
-            logging.debug(
+            logger.debug(
                 f"--- Emitting buffered logs due to exception during metadata search ---"
             )
             for msg in debug_buffer:
-                logging.debug(msg)
-            logging.debug(f"--- End buffered logs ---")
-            logging.debug(
+                logger.debug(msg)
+            logger.debug(f"--- End buffered logs ---")
+            logger.debug(
                 f"searchLinkTrack: Returning None, None, None due to exception."
             )  # DEBUG ADDED
             logger.debug(
@@ -759,7 +762,7 @@ def searchLinkTrack(
             return None, None, None  # Exception during metadata search
 
     # Should not be reached if ISRC match was found and returned earlier
-    logging.debug(
+    logger.debug(
         f"searchLinkTrack: Reached final return statement. Returning None, None, None."
     )  # DEBUG ADDED
     logger.debug(
@@ -794,15 +797,15 @@ class LinkingWorker(QObject):
     # Corrected run method signature and indentation
     @pyqtSlot()  # Added decorator for clarity, though not strictly needed for QThread.started connection
     def run(self):
-        logging.debug(f"LinkingWorker started for {len(self.tracks_to_link)} tracks.")
+        logger.debug(f"LinkingWorker started for {len(self.tracks_to_link)} tracks.")
         for row_index, spotify_data in self.tracks_to_link:
             # Check stop event FIRST
             if self.stop_event.is_set():
-                logging.info("LinkingWorker: Stop event detected, breaking loop.")
+                logger.info("LinkingWorker: Stop event detected, breaking loop.")
                 break  # Exit the loop gracefully
             # Check _is_running (optional, for immediate stop)
             if not self._is_running:
-                logging.info("LinkingWorker stopping early (_is_running is False).")
+                logger.info("LinkingWorker stopping early (_is_running is False).")
                 break
             try:
                 self.started.emit(row_index)
@@ -851,7 +854,7 @@ class LinkingWorker(QObject):
                 # --- End data extraction ---
 
                 if not title or not artists or not album:
-                    logging.error(
+                    logger.error(
                         f"Row {row_index}: Missing essential metadata after extraction: Title={title}, Artists={artists}, Album={album}. Original data: {spotify_data}"
                     )
                     self.error.emit(
@@ -874,12 +877,12 @@ class LinkingWorker(QObject):
                 self.finished.emit(row_index, best_match, candidates, score)
 
             except Exception as e:
-                logging.error(
+                logger.error(
                     f"Error linking track at row {row_index}: {e}", exc_info=True
                 )
                 self.error.emit(row_index, str(e))
         # Emit allTasksFinished signal AFTER the loop completes
-        logging.debug("LinkingWorker loop finished. Emitting allTasksFinished.")
+        logger.debug("LinkingWorker loop finished. Emitting allTasksFinished.")
         self.allTasksFinished.emit()
 
     # Corrected stop method signature and indentation

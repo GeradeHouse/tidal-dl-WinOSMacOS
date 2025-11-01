@@ -20,7 +20,7 @@ from PyQt6.QtGui import QKeyEvent, QKeySequence, QMouseEvent
 # If this causes issues, we might need to pass the logger instance.
 logger = logging.getLogger(__name__)
 logger.setLevel(
-    logging.WARNING
+    logging.ERROR
 )  # Set specific level for this module to only receive warnings
 
 

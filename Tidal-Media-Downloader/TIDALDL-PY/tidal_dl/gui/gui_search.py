@@ -22,6 +22,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QApplication,
     QSizePolicy,
+    QStyleOption,
+    QStyle,
 )
 from PyQt6.QtCore import (
     pyqtSignal,
@@ -42,6 +44,8 @@ from PyQt6.QtGui import (
     QResizeEvent,
     QAction,
     QIcon,
+    QPainter,
+    QPaintEvent,
 )
 from ..enums import Type
 from ..model import Track, Album, Artist, Playlist
@@ -52,7 +56,7 @@ if TYPE_CHECKING:
     from .gui import MainView
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # Set specific level for this module
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 
 # --- Custom Widget for Search Results ---
@@ -63,7 +67,8 @@ class SearchResultItemWidget(QWidget):
         self, primary_text: str, secondary_text: str, item_type: str, parent=None
     ):
         super().__init__(parent)
-        self.setAutoFillBackground(True)
+        # Ensure the widget background is driven by stylesheet, not the default palette
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.item_type = item_type
 
         layout = QHBoxLayout(self)
@@ -128,6 +133,57 @@ class SearchResultItemWidget(QWidget):
     #     pass
 
 
+class StyledListWidget(QListWidget):
+    """
+    A QListWidget subclass that overrides paintEvent to ensure its background,
+    as defined by a stylesheet, is always painted correctly. This is a robust
+    fix for rendering issues on macOS and Windows when the widget is a child
+    of a translucent window.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Enable styled background for the list itself
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        # Enable styled background for the viewport (where items are actually drawn)
+        vp = self.viewport()
+        if vp is not None:
+            vp.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+            # Make sure the viewport uses the same dark palette as the list, so even if
+            # global styles change, the panel won't turn white.
+            vp_palette = vp.palette()
+            vp_palette.setColor(QPalette.ColorRole.Base, QColor("#252525"))
+            vp_palette.setColor(QPalette.ColorRole.Text, QColor("#f0f0f0"))
+            vp.setPalette(vp_palette)
+            vp.setAutoFillBackground(True)
+
+    def paintEvent(self, e: QPaintEvent | None) -> None:  # MODIFIED: signature exactly matches stub ("e")
+        if e is None:
+            # Forward the None to the base class to satisfy the stub contract
+            super().paintEvent(e)
+            return
+
+        opt = QStyleOption()
+        opt.initFrom(self)
+
+        # Paint directly on the viewport – this is the surface that actually shows the items.
+        vp = self.viewport()
+        painter_target = vp if vp is not None else self
+        painter = QPainter(painter_target)
+
+        # Force the style to draw the primitive widget background, which respects
+        # the 'background-color' property from the stylesheet.
+        style = self.style() or QApplication.style()
+        if style:
+            style.drawPrimitive(QStyle.PrimitiveElement.PE_Widget, opt, painter, self)
+
+        # After ensuring the background is drawn, call the original paintEvent
+        # to handle the drawing of items, scrollbars, and other decorations.
+        super().paintEvent(e)  # MODIFIED: now passes 'e' that matches base class
+
+
 class SearchBarWidget(QWidget):
     """
     A custom widget providing a search bar with type selection and live results.
@@ -163,7 +219,9 @@ class SearchBarWidget(QWidget):
         # --- End Search Icon ---
 
         # Create list widget as a child of MAIN_VIEW, not self
-        self.live_results_list = QListWidget(self.main_view)  # *** CHANGED PARENT ***
+        # Use the custom StyledListWidget to fix background rendering issues.
+        self.live_results_list = StyledListWidget(self.main_view)
+
         # Keep other list settings
         self.live_results_list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.live_results_list.setMouseTracking(True)
@@ -185,6 +243,9 @@ class SearchBarWidget(QWidget):
                 border-radius: 8px;
                 padding: 2px;
                 outline: 0px;
+            }
+            QListView::viewport {
+                background-color: #252525;
             }
             QListWidget::item {
                  background-color: transparent; /* Make item area transparent by default */
@@ -382,7 +443,9 @@ class SearchBarWidget(QWidget):
 
                 if isinstance(result, Track):
                     primary_text = result.title
-                    secondary_text = f"Track - {', '.join(artist.name for artist in result.artists) if isinstance(result.artists, list) else result.artists.name}"
+                    secondary_text = (
+                        f"Track - {', '.join(artist.name for artist in result.artists) if isinstance(result.artists, list) else result.artists.name}"
+                    )
                     item_type_str = "Track"
                     data_dict = {
                         "type": Type.Track,
@@ -401,7 +464,9 @@ class SearchBarWidget(QWidget):
                             )
                 elif isinstance(result, Album):
                     primary_text = result.title
-                    secondary_text = f"Album - {', '.join(artist.name for artist in result.artists) if isinstance(result.artists, list) else result.artists.name}"
+                    secondary_text = (
+                        f"Album - {', '.join(artist.name for artist in result.artists) if isinstance(result.artists, list) else result.artists.name}"
+                    )
                     item_type_str = "Album"
                     data_dict = {
                         "type": Type.Album,
@@ -511,6 +576,8 @@ class SearchBarWidget(QWidget):
         self.thread_pool.start(worker)
 
     def _on_cover_art_ready(self, item, url, pixmap):
+        if sip.isdeleted(item):
+            return
         widget = self.live_results_list.itemWidget(item)
         if isinstance(widget, SearchResultItemWidget):
             widget.set_icon(pixmap, from_url=True)

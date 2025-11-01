@@ -192,7 +192,7 @@ class Container(Enum):
                     if isinstance(tag, str):
                         tag = f"{int(tag):02}"
                     else:
-                        logging.warning(f"Unexpected type for tag '{k}': {type(tag)}. Expected str.")
+                        logger.warning(f"Unexpected type for tag '{k}': {type(tag)}. Expected str.")
                         continue
                 elif k in ["source_track_id", "source_album_id", "source_artist_id"]:
                     # Format source tags dynamically based on platform

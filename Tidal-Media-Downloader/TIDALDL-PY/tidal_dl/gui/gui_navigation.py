@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import QStackedLayout, QWidget
 from PyQt6.QtCore import QObject, pyqtSlot  # Import pyqtSlot correctly
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)  # Set specific level for this module
+logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 
 class NavigationHandler(QObject):

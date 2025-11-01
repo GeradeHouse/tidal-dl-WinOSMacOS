@@ -25,7 +25,7 @@ from ..model import Track, Album
 from ..settings import SETTINGS
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)
+logger.setLevel(logging.ERROR)
 
 CACHE_FILE_NAME = "cover_cache.pkl"
 
