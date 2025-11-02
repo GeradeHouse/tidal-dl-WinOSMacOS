@@ -25,6 +25,10 @@ from .paths import get_user_download_path
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (format operations)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 
 def __fixPath__(name: Any) -> str:
     """Replaces invalid path characters and strips whitespace."""

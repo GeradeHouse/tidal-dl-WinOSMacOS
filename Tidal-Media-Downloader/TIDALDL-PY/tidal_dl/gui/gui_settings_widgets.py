@@ -32,6 +32,10 @@ from PyQt6.QtWidgets import (
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (settings widget operations need visibility)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 # --- CollapsibleSection Class Definition ---
 # This custom widget creates expandable/collapsible sections for grouping settings
 # Each section has a header button with an icon and title that can be clicked to show/hide content

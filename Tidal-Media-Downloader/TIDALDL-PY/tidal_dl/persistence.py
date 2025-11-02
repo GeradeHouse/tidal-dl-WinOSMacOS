@@ -53,6 +53,10 @@ logger.setLevel(
     logging.WARNING
 )  # Set specific level for this module to only receive warnings
 
+# Set up GUI logging with DEBUG level for this module (debugging persistence operations)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.DEBUG)
+
 # ########## CLASS DEFINITIONS ##########
 
 

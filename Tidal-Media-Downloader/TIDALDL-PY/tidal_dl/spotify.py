@@ -20,6 +20,10 @@ from io import BytesIO  # Needed for loading image data
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (API operations)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 # --- Monkey Patch spotipy.client logging ---
 from spotipy.client import logger as spotipy_logger
 
@@ -109,7 +113,7 @@ class SpotifyAPI:
                 f"Failed to create profile directory for Spotify cache: {e}",
                 exc_info=True,
             )
-            Printf.err(f"Error setting up Spotify cache directory: {e}")
+            logger.error(f"Error setting up Spotify cache directory: {e}")
 
     def _initialize_auth_manager(self):
         """Initializes the SpotifyOAuth manager."""
@@ -140,7 +144,7 @@ class SpotifyAPI:
                     "Spotify Client ID or Secret not found in settings. Spotify features will be unavailable."
                 )
                 # Provide a more helpful message to the user in the main UI
-                Printf.info(
+                logger.info(
                     "Spotify integration skipped: Please enter your Client ID and Secret in the 'Spotify Account Settings' section."
                 )
                 # Return specific indicator instead of None
@@ -160,7 +164,7 @@ class SpotifyAPI:
                 f"Error accessing Spotify settings: {e}. Please ensure settings are loaded.",
                 exc_info=True,
             )
-            Printf.err(f"Error accessing Spotify settings: {e}")
+            logger.error(f"Error accessing Spotify settings: {e}")
             return None
 
         # Use the defined cache path and settings
@@ -182,7 +186,7 @@ class SpotifyAPI:
             return self.auth_manager
         except Exception as e:
             logger.error(f"Failed to create SpotifyOAuth manager: {e}", exc_info=True)
-            Printf.err(f"Error initializing Spotify authentication: {e}")
+            logger.error(f"Error initializing Spotify authentication: {e}")
             return None
 
     # --- NEW AUTHENTICATE METHOD ---
@@ -254,7 +258,7 @@ class SpotifyAPI:
                         logger.warning(
                             "Interactive authentication failed or was cancelled by user."
                         )
-                        Printf.err(
+                        logger.error(
                             "Spotify login required or failed. If a browser window opened, ensure you completed the authorization."
                         )
                         return False
@@ -283,7 +287,7 @@ class SpotifyAPI:
                             f"Failed to explicitly write token_info to cache file: {explicit_write_err}",
                             exc_info=True,
                         )
-                        Printf.err(
+                        logger.error(
                             f"Warning: Failed to update Spotify token cache file: {explicit_write_err}"
                         )
 
@@ -319,7 +323,7 @@ class SpotifyAPI:
                     logger.warning(
                         f"Detected potential server error. Retrying in {retry_delay}s..."
                     )
-                    Printf.warning(f"Spotify auth failed (Server Error). Retrying...")
+                    logger.warning(f"Spotify auth failed (Server Error). Retrying...")
                     time.sleep(retry_delay)
                     continue  # Go to next attempt
                 else:
@@ -327,7 +331,7 @@ class SpotifyAPI:
                         f"Spotify OAuth error during authentication (final attempt or non-retryable): {e}",
                         exc_info=True,
                     )
-                    Printf.err(f"Spotify authentication error: {e}")
+                    logger.error(f"Spotify authentication error: {e}")
                     self.auth_manager = None  # Reset on definitive failure
                     self.sp = None
                     return False  # Failed
@@ -338,7 +342,7 @@ class SpotifyAPI:
                     exc_info=True,
                 )
                 if attempt < max_retries - 1:
-                    Printf.warning(f"Spotify auth failed (Network Error). Retrying...")
+                    logger.warning(f"Spotify auth failed (Network Error). Retrying...")
                     time.sleep(retry_delay)
                     continue  # Go to next attempt
                 else:
@@ -346,7 +350,7 @@ class SpotifyAPI:
                         f"Spotify auth failed due to network error after {attempt + 1} attempts: {req_e}",
                         exc_info=True,
                     )
-                    Printf.err(
+                    logger.error(
                         f"Spotify authentication failed due to a network error: {req_e}"
                     )
                     self.auth_manager = None  # Reset on definitive failure
@@ -359,11 +363,11 @@ class SpotifyAPI:
                     exc_info=True,
                 )
                 if attempt < max_retries - 1:
-                    Printf.warning(f"Unexpected error during Spotify auth. Retrying...")
+                    logger.warning(f"Unexpected error during Spotify auth. Retrying...")
                     time.sleep(retry_delay)
                     continue  # Retry on generic errors too
                 else:
-                    Printf.err(
+                    logger.error(
                         f"Spotify authentication failed due to an unexpected error: {e}"
                     )
                     self.auth_manager = None  # Reset on definitive failure
@@ -375,7 +379,7 @@ class SpotifyAPI:
         logger.error(
             f"Spotify {flow_type} authentication failed after {max_retries} attempts."
         )
-        Printf.err("Spotify authentication failed after multiple attempts.")
+        logger.error("Spotify authentication failed after multiple attempts.")
         self.auth_manager = None  # Reset on definitive failure
         self.sp = None
         return False
@@ -389,7 +393,7 @@ class SpotifyAPI:
             logger.warning(
                 "Not authenticated with Spotify in get_user_playlists. Attempting auth."
             )
-            Printf.warning("Not authenticated with Spotify. Please authenticate first.")
+            logger.warning("Not authenticated with Spotify. Please authenticate first.")
             if not self.authenticate():
                 logger.error("Authentication failed within get_user_playlists.")
                 return None  # Return None or empty list on auth failure
@@ -398,7 +402,7 @@ class SpotifyAPI:
                 logger.error(
                     "self.sp is still None after successful authentication call."
                 )
-                Printf.err(
+                logger.error(
                     "Internal error: Spotify client not available after authentication."
                 )
                 return None
@@ -412,7 +416,7 @@ class SpotifyAPI:
             logger.debug(f"Raw results from self.sp.current_user_playlists: {results}")
             if not results:
                 logger.warning("current_user_playlists returned None or empty.")
-                Printf.warning("Could not retrieve playlists from Spotify.")
+                logger.warning("Could not retrieve playlists from Spotify.")
                 return []  # Return empty list
 
             playlists = results.get("items", [])
@@ -437,7 +441,7 @@ class SpotifyAPI:
                         f"Error fetching next page of playlists: {page_e}",
                         exc_info=True,
                     )
-                    Printf.err(f"Error fetching subsequent playlist page: {page_e}")
+                    logger.error(f"Error fetching subsequent playlist page: {page_e}")
                     # Decide whether to return partial list or None
                     break  # Stop pagination on error
 
@@ -468,21 +472,21 @@ class SpotifyAPI:
                     logger.warning(f"Skipping invalid playlist item: {item}")
 
             logger.info(f"Processed {len(playlists_data)} valid playlists.")
-            Printf.info(f"Found {len(playlists_data)} playlists.")
+            logger.info(f"Found {len(playlists_data)} playlists.")
             return playlists_data
         except spotipy.SpotifyException as e:
             logger.error(
                 f"Spotify API error fetching playlists: {e.http_status} - {e.msg}",
                 exc_info=True,
             )
-            Printf.err(f"Spotify API error fetching playlists: {e.msg}")
+            logger.error(f"Spotify API error fetching playlists: {e.msg}")
             return None
         except Exception as e:
             logger.error(
                 f"Unexpected error fetching Spotify playlists: {e}", exc_info=True
             )
-            Printf.err(f"Error fetching Spotify playlists: {e}")
-            Printf.err("Check log file for detailed traceback.")
+            logger.error(f"Error fetching Spotify playlists: {e}")
+            logger.error("Check log file for detailed traceback.")
             return None
 
     def get_playlist_tracks(self, playlist_id):
@@ -492,7 +496,7 @@ class SpotifyAPI:
             logger.warning(
                 "Not authenticated with Spotify in get_playlist_tracks. Attempting auth."
             )
-            Printf.warning("Not authenticated with Spotify. Please authenticate first.")
+            logger.warning("Not authenticated with Spotify. Please authenticate first.")
             if not self.authenticate():
                 logger.error("Authentication failed within get_playlist_tracks.")
                 return None
@@ -500,7 +504,7 @@ class SpotifyAPI:
                 logger.error(
                     "self.sp is still None after successful authentication call."
                 )
-                Printf.err(
+                logger.error(
                     "Internal error: Spotify client not available after authentication."
                 )
                 return None
@@ -508,7 +512,7 @@ class SpotifyAPI:
         tracks_data = []
         try:
             logger.info(f"Fetching tracks for Spotify playlist ID: {playlist_id}...")
-            Printf.info(f"Fetching tracks for Spotify playlist ID: {playlist_id}...")
+            logger.info(f"Fetching tracks for Spotify playlist ID: {playlist_id}...")
             offset = 0
             limit = 100  # Max limit per page
 
@@ -586,22 +590,22 @@ class SpotifyAPI:
             logger.info(
                 f"Processed {len(tracks_data)} tracks for playlist {playlist_id}."
             )
-            Printf.info(f"Found {len(tracks_data)} tracks in playlist {playlist_id}.")
+            logger.info(f"Found {len(tracks_data)} tracks in playlist {playlist_id}.")
             return tracks_data
         except spotipy.SpotifyException as e:
             logger.error(
                 f"Spotify API error fetching tracks for playlist {playlist_id}: {e.http_status} - {e.msg}",
                 exc_info=True,
             )
-            Printf.err(f"Spotify API error fetching tracks: {e.msg}")
+            logger.error(f"Spotify API error fetching tracks: {e.msg}")
             return None
         except Exception as e:
             logger.error(
                 f"Unexpected error fetching tracks for playlist {playlist_id}: {e}",
                 exc_info=True,
             )
-            Printf.err(f"Error fetching tracks for playlist {playlist_id}: {e}")
-            Printf.err("Check log file for detailed traceback.")
+            logger.error(f"Error fetching tracks for playlist {playlist_id}: {e}")
+            logger.error("Check log file for detailed traceback.")
             return None
 
 

@@ -16,6 +16,10 @@ from PyQt6.QtGui import QFont, QIcon, QPixmap
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+# Set up GUI logging with INFO level for this module (playlist item operations need visibility)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 class PlaylistItemProgressWidget(QWidget):
     """A custom widget for displaying playlist status including a progress bar."""
 

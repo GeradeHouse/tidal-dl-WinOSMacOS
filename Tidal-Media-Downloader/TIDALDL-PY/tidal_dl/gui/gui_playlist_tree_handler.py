@@ -73,6 +73,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (more verbose GUI output for downloads)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 # --- Font Size Configuration for Playlist Items ---
 
 
@@ -505,7 +509,7 @@ class PlaylistTreeHandler(QObject):
     def refreshTidalPlaylists(self) -> None:
         """Fetches and displays the user's TIDAL playlists."""
         logger.debug("Refreshing TIDAL playlists...")
-        Printf.info("Refreshing TIDAL playlists...")
+        logger.info("Refreshing TIDAL playlists...")
 
         while self.tidal_root_item.childCount() > 0:
             self.tidal_root_item.removeChild(self.tidal_root_item.child(0))
@@ -527,7 +531,7 @@ class PlaylistTreeHandler(QObject):
         except Exception as e:
             error_msg = f"Error fetching TIDAL playlists: {e}"
             logger.error(error_msg, exc_info=True)
-            Printf.err(error_msg)
+            logger.error(error_msg)
 
         QtCore.QMetaObject.invokeMethod(
             self,
@@ -624,7 +628,7 @@ class PlaylistTreeHandler(QObject):
                         image_url=None,
                     )
 
-        Printf.success("TIDAL playlists refreshed.")
+        logger.info("TIDAL playlists refreshed.")
         self._apply_playlist_filter()  # Apply filter after populating
 
     # --- Spotify Playlist Handling ---
@@ -754,7 +758,7 @@ class PlaylistTreeHandler(QObject):
 
         except Exception as e:
             logger.error(f"Error updating Spotify playlist tree: {e}", exc_info=True)
-            Printf.err(f"GUI Error displaying Spotify playlists: {e}")
+            logger.error(f"GUI Error displaying Spotify playlists: {e}")
             self.update_spotify_root_item(logged_in=False, error=True)
 
     def update_spotify_root_item(
@@ -856,7 +860,7 @@ class PlaylistTreeHandler(QObject):
             logger.warning(
                 f"Clicked playlist item '{item_name}' has no associated data."
             )
-            Printf.warning(f"Cannot process click on '{item_name}': Missing data.")
+            logger.warning(f"Cannot process click on '{item_name}': Missing data.")
             return
 
         if hasattr(self.main_view, "table_handler"):
@@ -894,7 +898,7 @@ class PlaylistTreeHandler(QObject):
                     logger.error(
                         f"Spotify playlist item clicked, but no ID found: {item_data}"
                     )
-                    Printf.err("Error loading Spotify playlist: Missing ID.")
+                    logger.error("Error loading Spotify playlist: Missing ID.")
                     setattr(self.main_view, "s_playlist_obj", None)
 
             elif item_type == "tidal":
@@ -907,7 +911,7 @@ class PlaylistTreeHandler(QObject):
                 else:
                     error_msg = f"Tidal playlist item clicked, but data invalid or None: {type(playlist_obj)}"
                     logger.error(error_msg)
-                    Printf.err(f"Error loading Tidal playlist: {error_msg}")
+                    logger.error(f"Error loading Tidal playlist: {error_msg}")
                     setattr(self.main_view, "s_playlist_obj", None)
             else:
                 logger.warning(f"Unknown item type clicked: {item_type}")
@@ -916,7 +920,7 @@ class PlaylistTreeHandler(QObject):
         except Exception as e:
             error_msg = f"Error handling playlist item click for '{item_name}': {e}"
             logger.error(error_msg, exc_info=True)
-            Printf.err(f"Error processing playlist click: {e}")
+            logger.error(f"Error processing playlist click: {e}")
             setattr(self.main_view, "s_playlist_obj", None)
 
     def _displayTidalTracks(self, playlist_obj: Playlist) -> None:
@@ -928,7 +932,7 @@ class PlaylistTreeHandler(QObject):
         )
 
         if not playlist_id:
-            Printf.err(f"Cannot display tracks for '{playlist_name}': Missing UUID.")
+            logger.error(f"Cannot display tracks for '{playlist_name}': Missing UUID.")
             if hasattr(self.main_view, "table_handler"):
                 self.main_view.table_handler.show_error_message(
                     "Playlist missing identifier."
@@ -968,7 +972,7 @@ class PlaylistTreeHandler(QObject):
             )
 
             if tracks_data and isinstance(tracks_data[0], str):
-                Printf.info(f"Fetching details for {len(tracks_data)} tracks...")
+                logger.info(f"Fetching details for {len(tracks_data)} tracks...")
                 for t_idx, t_id_or_obj in enumerate(tracks_data):
                     track_id_str: Optional[str] = None
                     if isinstance(t_id_or_obj, Track):
@@ -993,7 +997,7 @@ class PlaylistTreeHandler(QObject):
                             f"Could not get TIDAL track object for ID: {track_id_str}"
                         )
                     if (t_idx + 1) % 50 == 0:
-                        Printf.info(
+                        logger.info(
                             f"Fetched details for {t_idx + 1}/{len(tracks_data)} tracks..."
                         )
             elif tracks_data and isinstance(tracks_data[0], Track):
@@ -1015,7 +1019,7 @@ class PlaylistTreeHandler(QObject):
                 f"Error fetching/processing Tidal tracks for '{playlist_name}': {e}"
             )
             logger.error(error_msg, exc_info=True)
-            Printf.err(error_msg)
+            logger.error(error_msg)
 
         QtCore.QMetaObject.invokeMethod(
             self.main_view.table_handler,
@@ -1213,13 +1217,13 @@ class PlaylistTreeHandler(QObject):
             child_items.append(self.tidal_root_item.child(i))
 
         if not child_items:
-            Printf.info("No Tidal playlists to sort.")
+            logger.info("No Tidal playlists to sort.")
             return
 
         if sort_key == "alpha":
             # MODIFIED: Sort by widget name
             child_items.sort(key=lambda item: self._get_name_from_item(item).lower())
-            Printf.info("Sorting Tidal playlists alphabetically.")
+            logger.info("Sorting Tidal playlists alphabetically.")
         elif sort_key == "created":
 
             def get_sort_val_created(item_widget: QTreeWidgetItem) -> datetime.datetime:
@@ -1231,7 +1235,7 @@ class PlaylistTreeHandler(QObject):
                 return datetime.datetime.min
 
             child_items.sort(key=get_sort_val_created, reverse=True)
-            Printf.info("Sorting Tidal playlists by created date (newest first).")
+            logger.info("Sorting Tidal playlists by created date (newest first).")
         elif sort_key == "updated":
 
             def get_sort_val_updated(item_widget: QTreeWidgetItem) -> datetime.datetime:
@@ -1243,10 +1247,10 @@ class PlaylistTreeHandler(QObject):
                 return datetime.datetime.min
 
             child_items.sort(key=get_sort_val_updated, reverse=True)
-            Printf.info("Sorting Tidal playlists by updated date (newest first).")
+            logger.info("Sorting Tidal playlists by updated date (newest first).")
         else:
             logger.warning(f"Unknown Tidal sort key: {sort_key}")
-            Printf.warning(f"Cannot sort Tidal playlists by '{sort_key}'.")
+            logger.warning(f"Cannot sort Tidal playlists by '{sort_key}'.")
             return
 
         # Re-add sorted items
@@ -1267,13 +1271,13 @@ class PlaylistTreeHandler(QObject):
             child_items.append(self.spotify_root_item.child(i))
 
         if not child_items:
-            Printf.info("No Spotify playlists to sort.")
+            logger.info("No Spotify playlists to sort.")
             return
 
         if sort_key == "alpha":
             # MODIFIED: Sort by widget name
             child_items.sort(key=lambda item: self._get_name_from_item(item).lower())
-            Printf.info("Sorting Spotify playlists alphabetically.")
+            logger.info("Sorting Spotify playlists alphabetically.")
         else:
             logger.warning(
                 f"Unsupported Spotify sort key: {sort_key}. Spotify API does not readily provide date information for sorting user playlists by creation/update date."

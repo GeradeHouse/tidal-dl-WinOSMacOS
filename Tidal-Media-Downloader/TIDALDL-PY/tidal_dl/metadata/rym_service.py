@@ -5,6 +5,10 @@ from ..config import RymConfig
 
 logger = logging.getLogger("streamrip")
 
+# Set up GUI logging with DEBUG level for this module (metadata operations)
+from ..gui.gui_logging import setup_gui_logger
+setup_gui_logger("streamrip", logging.DEBUG)
+
 
 class RymMetadataService:
     """Minimal service for RYM integration with config and policy management."""

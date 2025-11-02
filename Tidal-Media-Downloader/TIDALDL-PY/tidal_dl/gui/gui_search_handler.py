@@ -57,6 +57,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (search operations need visibility)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 
 # --- Worker Class for Live Search ---
 class LiveSearchWorker(QObject):
@@ -277,7 +281,7 @@ class SearchHandler(QObject):
 
             if query.startswith("http://") or query.startswith("https://"):
                 logger.debug(f"Processing input as URL: {query}")
-                Printf.info(f"Fetching item from URL: '{query}'")
+                logger.info(f"Fetching item from URL: '{query}'")
                 tmpType, tmpId = TIDAL_API.parseUrl(query)
 
                 if tmpType == Type.Null:

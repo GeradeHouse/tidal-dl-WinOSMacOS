@@ -15,13 +15,12 @@ from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtGui import QKeyEvent, QKeySequence, QMouseEvent
 
 
-# Assuming logger is configured elsewhere and accessible,
-# or passed in if necessary. For now, let's import it directly.
-# If this causes issues, we might need to pass the logger instance.
 logger = logging.getLogger(__name__)
-logger.setLevel(
-    logging.ERROR
-)  # Set specific level for this module to only receive warnings
+logger.setLevel(logging.ERROR)  # Set specific level for this module
+
+# Set up GUI logging with INFO level for this module (more verbose GUI output for downloads)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
 
 
 class MainViewEventHandlers:

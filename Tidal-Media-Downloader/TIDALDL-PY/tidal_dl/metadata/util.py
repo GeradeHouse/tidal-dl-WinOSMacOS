@@ -4,6 +4,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Set up GUI logging with DEBUG level for this module (metadata operations)
+from ..gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.DEBUG)
+
 
 def safe_get(dictionary, *keys, default=None):
     return functools.reduce(

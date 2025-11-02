@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (task operations need visibility)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 class TaskQueueManager(QObject):
     """Manages a queue of linking and downloading jobs to run them sequentially."""
     # MODIFIED: Add signals
@@ -43,7 +47,7 @@ class TaskQueueManager(QObject):
                 "description": f"Link tracks for Spotify playlist: {p_data.get('data', {}).get('name', 'Unknown')}"
             }
             self.task_queue.append(job)
-            Printf.info(f"Queued job: {job['description']}")
+            logger.info(f"Queued job: {job['description']}")
         
         self.process_next_job()
 
@@ -60,7 +64,7 @@ class TaskQueueManager(QObject):
                 "description": f"Download Spotify playlist: {p_data.get('data', {}).get('name', 'Unknown')}"
             }
             self.task_queue.append(job)
-            Printf.info(f"Queued job: {job['description']}")
+            logger.info(f"Queued job: {job['description']}")
 
         self.process_next_job()
 
@@ -77,7 +81,7 @@ class TaskQueueManager(QObject):
                 "description": f"Download Tidal playlist: {getattr(playlist, 'title', 'Unknown')}"
             }
             self.task_queue.append(job)
-            Printf.info(f"Queued job: {job['description']}")
+            logger.info(f"Queued job: {job['description']}")
 
         self.process_next_job()
 
@@ -95,7 +99,7 @@ class TaskQueueManager(QObject):
             return
 
         job = self.current_job
-        Printf.info(f"Starting job: {job['description']}")
+        logger.info(f"Starting job: {job['description']}")
 
         job_type = job.get("type")
         if job_type == "link_spotify":
@@ -105,12 +109,12 @@ class TaskQueueManager(QObject):
         elif job_type == "download_tidal":
             self._execute_tidal_download_job(job)
         else:
-            Printf.err(f"Unknown job type: {job_type}")
+            logger.error(f"Unknown job type: {job_type}")
             self.job_finished()
 
     def job_finished(self):
         """Marks the current job as finished and processes the next one."""
-        Printf.info("Job finished.")
+        logger.info("Job finished.")
         # MODIFIED: Emit jobFinished signal with playlist ID
         if self.current_job:
             job_type = self.current_job.get("type")
@@ -136,7 +140,7 @@ class TaskQueueManager(QObject):
             self.main_view.linking_gui_handler.onStopLinkingClicked()
         if self.main_view.download_active:
             self.main_view.download_handler.onStopClicked()
-        Printf.info("All queued tasks have been cleared.")
+        logger.info("All queued tasks have been cleared.")
 
 
     def _execute_spotify_link_job(self, job: Dict[str, Any]):
@@ -145,7 +149,7 @@ class TaskQueueManager(QObject):
         playlist_id = playlist_data.get("data", {}).get("id")
 
         if not playlist_id:
-            Printf.err("Cannot link playlist: Missing ID.")
+            logger.error("Cannot link playlist: Missing ID.")
             self.job_finished()
             return
 
@@ -167,7 +171,7 @@ class TaskQueueManager(QObject):
     def _start_linking_for_tracks(self, playlist_id: str, tracks: List[Dict[str, Any]]):
         """Starts the LinkingWorker after tracks have been fetched."""
         if not tracks:
-            Printf.warning(f"No tracks found for Spotify playlist {playlist_id}. Skipping link job.")
+            logger.warning(f"No tracks found for Spotify playlist {playlist_id}. Skipping link job.")
             self.job_finished()
             return
 
@@ -185,7 +189,7 @@ class TaskQueueManager(QObject):
         quality = job.get("quality")
 
         if not playlist_id:
-            Printf.err("Cannot download playlist: Missing ID.")
+            logger.error("Cannot download playlist: Missing ID.")
             self.job_finished()
             return
 
@@ -198,7 +202,7 @@ class TaskQueueManager(QObject):
                                             QtCore.Q_ARG(int, len(all_tracks_meta) if all_tracks_meta else 0))
             
             if not all_tracks_meta:
-                Printf.warning(f"No tracks found for Spotify playlist {playlist_id}. Skipping download.")
+                logger.warning(f"No tracks found for Spotify playlist {playlist_id}. Skipping download.")
                 QtCore.QMetaObject.invokeMethod(self, "job_finished", Qt.ConnectionType.QueuedConnection)
                 return
 
@@ -239,7 +243,7 @@ class TaskQueueManager(QObject):
                     # MODIFIED: Emit jobFinished for the linking sub-task
                     self.jobFinished.emit(str(playlist_id))
                     
-                    Printf.info("Pre-download linking finished. Gathering all linked tracks for download.")
+                    logger.info("Pre-download linking finished. Gathering all linked tracks for download.")
                     final_download_list = list(linked_tracks_for_download)
                     newly_linked_links = self.main_view.link_persistence_manager.get_links_for_playlist(playlist_id)
                     newly_linked_tracks = newly_linked_links.get("tracks", {})
@@ -260,7 +264,7 @@ class TaskQueueManager(QObject):
                 self.main_view.startLinkingWorker(unlinked_tracks_for_worker, on_finish_callback=on_linking_done)
 
             else:
-                Printf.info("All tracks are already linked. Starting download.")
+                logger.info("All tracks are already linked. Starting download.")
                 self._start_download(linked_tracks_for_download, playlist_data, quality)
 
         threading.Thread(target=pre_download_thread, daemon=True).start()
@@ -273,7 +277,7 @@ class TaskQueueManager(QObject):
         playlist_id = getattr(playlist_obj, 'uuid', None)
 
         if not playlist_obj or not playlist_id:
-            Printf.err("Cannot download Tidal playlist: Invalid playlist object.")
+            logger.error("Cannot download Tidal playlist: Invalid playlist object.")
             self.job_finished()
             return
 
@@ -291,7 +295,7 @@ class TaskQueueManager(QObject):
     def _start_download(self, tracks: List[Track], playlist_context: Union[Playlist, Dict[str, Any]], quality: Optional[AudioQuality]):
         """Starts the DownloadWorker with the prepared list of tracks."""
         if not tracks:
-            Printf.warning("No tracks to download.")
+            logger.warning("No tracks to download.")
             self.job_finished()
             return
 

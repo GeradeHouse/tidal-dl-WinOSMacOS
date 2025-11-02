@@ -42,6 +42,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+# Set up GUI logging with INFO level for this module (download operations need visibility)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 
 class DownloadWorker(QObject):
     """Worker to handle downloads in a separate QThread."""
@@ -83,15 +87,15 @@ class DownloadWorker(QObject):
             for track_item in self.items_to_download:
                 # Pause/Stop handling
                 if self.main_view.stop_event.is_set():
-                    Printf.info("Stop request detected. Aborting download queue.")
+                    logger.info("Stop request detected. Aborting download queue.")
                     break
                 if self.main_view.download_paused:
-                    Printf.info("Download queue paused. Waiting for resume signal...")
+                    logger.info("Download queue paused. Waiting for resume signal...")
                     self.actuallyPaused.emit()
                     self.main_view.pause_event.wait()
-                    Printf.info("Download queue resumed.")
+                    logger.info("Download queue resumed.")
                     if self.main_view.stop_event.is_set():
-                        Printf.info(
+                        logger.info(
                             "Stop request detected after pause. Aborting download queue."
                         )
                         break
@@ -204,7 +208,7 @@ class DownloadWorker(QObject):
 
         except Exception as e:
             logger.error("[DownloadWorker] Exception caught in run()", exc_info=True)
-            Printf.err(f"Error in download thread: {traceback.format_exc()}")
+            logger.error(f"Error in download thread: {traceback.format_exc()}")
             self.allFinished.emit("Download Error", False, str(e), "")
 
 
@@ -561,13 +565,13 @@ class DownloadHandler(QObject):
             self.main_view.download_paused = False
             self.btn_pause_resume.setText("Pause")
             self.main_view.pause_event.set()
-            Printf.info("Resume requested.")
+            logger.info("Resume requested.")
         else:
             self.main_view.download_paused = True
             self.btn_pause_resume.setText("Pausing...")
             self.btn_pause_resume.setEnabled(False)
             self.main_view.pause_event.clear()
-            Printf.info("Pause requested. Download will pause after current track.")
+            logger.info("Pause requested. Download will pause after current track.")
 
     def onStopClicked(self):
         if not self.main_view.download_active:
@@ -579,13 +583,13 @@ class DownloadHandler(QObject):
             self.btn_stop.setText("Cancelling...")
             self.btn_stop.setEnabled(False)
             self.btn_pause_resume.setEnabled(False)
-            Printf.info("Immediate cancellation requested.")
+            logger.info("Immediate cancellation requested.")
         else:
             self.main_view.stop_requested = True
             self.main_view.stop_event.set()
             self.btn_stop.setText("Stopping...")
             self.btn_pause_resume.setEnabled(False)
-            Printf.info("Stop requested. Finishing current track...")
+            logger.info("Stop requested. Finishing current track...")
 
     @pyqtSlot(str, bool, str, str)
     def downloadEnd(self, title: str, result: bool, msg: str, path: Optional[str] = None):

@@ -18,6 +18,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (path operations)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 # Define public API for the module
 __all__ = [
     "getLogPath",

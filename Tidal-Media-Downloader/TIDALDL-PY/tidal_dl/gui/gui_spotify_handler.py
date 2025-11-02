@@ -21,6 +21,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (Spotify operations need visibility)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 
 class SpotifyGuiHandler(QObject):
     def __init__(self, main_view: "MainView", spotify_api: SpotifyAPI):
@@ -36,7 +40,7 @@ class SpotifyGuiHandler(QObject):
             self.main_view.s_spotifyLoginFinished.emit(False)
             return
 
-        Printf.info("Spotify login initiated...")
+        logger.info("Spotify login initiated...")
 
         def _spotify_auth_thread(initial_check_cache_only: bool):
             auth_result: Union[bool, str] = False
@@ -73,7 +77,7 @@ class SpotifyGuiHandler(QObject):
                 False,
             )
             if was_user_triggered:
-                Printf.info(
+                logger.info(
                     "Spotify Client ID and Secret are missing. Please configure them in Settings."
                 )
                 if self.main_view.navigation_handler:
@@ -121,21 +125,21 @@ class SpotifyGuiHandler(QObject):
         )
 
         if auth_result is True:
-            Printf.success("Spotify login successful!")
+            logger.info("Spotify login successful!")
             self.fetchSpotifyPlaylists()
         elif isinstance(auth_result, str):
-            Printf.warning(f"Spotify login failed. Reason: {auth_result}.")
+            logger.warning(f"Spotify login failed. Reason: {auth_result}.")
         else:
             Printf.warning(
                 "Spotify login failed. Please check credentials or network connection."
             )
 
     def refreshSpotifyPlaylists(self):
-        Printf.info("Refreshing Spotify playlists...")
+        logger.info("Refreshing Spotify playlists...")
         self.fetchSpotifyPlaylists()
 
     def fetchSpotifyPlaylists(self):
-        Printf.info("Fetching Spotify playlists...")
+        logger.info("Fetching Spotify playlists...")
 
         def _spotify_playlist_thread():
             fetched_playlists: Optional[list] = None
@@ -152,7 +156,7 @@ class SpotifyGuiHandler(QObject):
         thread.start()
 
     def fetchSpotifyTracks(self, playlist_id: str):
-        Printf.info(f"Fetching tracks for Spotify playlist ID: {playlist_id}")
+        logger.info(f"Fetching tracks for Spotify playlist ID: {playlist_id}")
         # Show loading row in table
         table_widget = self.main_view.tableWidget
         table_widget.clearRows()

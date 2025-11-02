@@ -39,6 +39,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (linking operations need visibility)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 
 class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
     """
@@ -616,7 +620,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             self.table_handler.update_linking_status(
                 row_index=row_index, status="error", status_text=f"Error: {error_message}", error_message=error_message
             )
-            Printf.err(f"Linking error for row {row_index + 1}: {error_message}")
+            logger.error(f"Linking error for row {row_index + 1}: {error_message}")
         except Exception as e:
             logger.error(
                 f"Error updating linking error status for row {row_index}: {e}",

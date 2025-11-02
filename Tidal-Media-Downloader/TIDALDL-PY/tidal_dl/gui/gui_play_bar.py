@@ -19,6 +19,10 @@ from .. import paths  # For icon loading
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (play bar operations)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 class PlayBarWidget(QWidget):
     """
     UI for the bottom play bar.

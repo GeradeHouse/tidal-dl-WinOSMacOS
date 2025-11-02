@@ -29,6 +29,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (more verbose GUI output for downloads)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 def load_initial_settings(self: "SettingsPage"):
     """
     Populates all UI controls with current values from the global SETTINGS object.
@@ -586,7 +590,7 @@ def _handle_audio_quality_changed(self: "SettingsPage", index: int):
             SETTINGS.audioQuality = selected_quality
             SETTINGS.save()
             logger.info(f"Default audio quality set to {selected_quality.name}")
-            Printf.info(f"Default audio quality set to {selected_quality.name}")  # type: ignore
+            logger.info(f"Default audio quality set to {selected_quality.name}")  # type: ignore
     else:
         logger.error(
             f"Invalid data type retrieved from audio quality combobox at index {index}: {type(selected_quality)}"

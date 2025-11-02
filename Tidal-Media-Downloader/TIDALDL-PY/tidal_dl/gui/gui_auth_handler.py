@@ -26,6 +26,10 @@ from .. import paths  # --- MODIFICATION: Import paths here ---
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
 
+# Set up GUI logging with INFO level for this module (auth operations need visibility)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 
 # --- Worker for TIDAL Web Login ---
 class TidalWebLoginWorker(QObject):
@@ -172,11 +176,11 @@ class AuthHandler(QObject):
             logger.info(
                 "TIDAL token invalid or missing/expired. Initiating web login flow."
             )
-            Printf.info("TIDAL login required. Please follow the instructions...")
+            logger.info("TIDAL login required. Please follow the instructions...")
             self.start_tidal_web_login()
         else:
             logger.info("TIDAL token loaded successfully from config.")
-            Printf.success("TIDAL login successful.")
+            logger.info("TIDAL login successful.")
             self.tidalLoginSuccess.emit()  # Notify successful login
 
         # --- Check Spotify Auto-Login ---
@@ -305,7 +309,7 @@ class AuthHandler(QObject):
         self._last_spotify_trigger_was_interactive = (
             not check_cache_only
         )  # True if user-triggered
-        Printf.info("Attempting Spotify login...")
+        logger.info("Attempting Spotify login...")
 
         self._thread = QThread()
         self.worker = SpotifyAuthWorker(self.spotify_api, check_cache_only)

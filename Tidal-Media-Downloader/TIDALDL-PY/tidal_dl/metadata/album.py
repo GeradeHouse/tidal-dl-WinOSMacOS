@@ -14,6 +14,10 @@ COPYRIGHT = "\u00a9"
 
 logger = logging.getLogger("streamrip")
 
+# Set up GUI logging with DEBUG level for this module (metadata operations)
+from ..gui.gui_logging import setup_gui_logger
+setup_gui_logger("streamrip", logging.DEBUG)
+
 
 genre_clean = re.compile(r"([^\u2192\/]+)")
 

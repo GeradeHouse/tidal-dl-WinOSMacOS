@@ -29,6 +29,10 @@ from PyQt6.QtGui import (
 
 logger = logging.getLogger(__name__)
 
+# Set up GUI logging with INFO level for this module (dialog operations)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 
 class StyledWidget(QWidget):
     """A QWidget that ensures its stylesheet background is painted correctly, especially on macOS."""

@@ -85,6 +85,10 @@ from ..printf import Printf  # Import Printf for formatDuration
 # --- Setup Logging ---
 logger = logging.getLogger(__name__)
 logger.setLevel(
+
+# Set up GUI logging with INFO level for this module (table operations need visibility)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
     logging.WARNING
 )  # Set specific level for this module
 

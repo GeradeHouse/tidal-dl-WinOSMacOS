@@ -30,6 +30,10 @@ from ..settings import SETTINGS
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (utility operations)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 # ########## GUI INITIALIZATION CHECK ##########
 
 

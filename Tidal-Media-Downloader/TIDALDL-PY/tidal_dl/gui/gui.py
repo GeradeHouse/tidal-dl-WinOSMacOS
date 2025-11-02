@@ -71,12 +71,17 @@ from .gui_utils import show_info_message, enableGui, EmittingStream, append_text
 from .gui_resize_handler import ResizeHandler
 from .gui_event_handlers import MainViewEventHandlers
 from .task_queue_manager import TaskQueueManager # Import the new manager
+from .gui_logging import setup_gui_logger, get_gui_manager
 
 if TYPE_CHECKING:
     from .gui_table_handler import TableHandler
 
 logger_gui = logging.getLogger(__name__)
 logger_gui.setLevel(logging.WARNING)
+
+# Set up GUI logging with INFO level for this module (GUI core operations)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
 
 
 class MainView(QWidget):
@@ -184,13 +189,17 @@ class MainView(QWidget):
         gui_log_handler = logging.StreamHandler(self.stdout_stream)
         gui_log_handler.setLevel(logging.INFO)  # Set the level for the GUI log
         
+        # Configure GUI handler with the new module-specific filtering system
+        gui_manager = get_gui_manager()
+        gui_manager.configure_gui_handler(gui_log_handler)
+        
         # Optional: Add a simple formatter for a cleaner look in the GUI
         formatter = logging.Formatter('%(levelname)s: %(message)s')
         gui_log_handler.setFormatter(formatter)
         
         # Add this new handler to the root logger
         logging.getLogger().addHandler(gui_log_handler)
-        logger_gui.info("GUI log handler configured.")
+        logger_gui.info("GUI log handler configured with module-specific filtering.")
         # --- END NEW SECTION ---
 
         self.settingsPage.audio_combo = self.c_combTQuality
@@ -455,13 +464,13 @@ class MainView(QWidget):
         )
         self.search_handler.searchFailed.connect(self.table_handler.show_error_message)
         self.search_handler.searchFailed.connect(
-            lambda msg: Printf.info(f"Search Error: {msg}")
+            lambda msg: logger.info(f"Search Error: {msg}")
         )
         self.tree_handler.tidalPlaylistSelected.connect(
-            lambda pl: Printf.info(f"Selected Tidal Playlist: {pl.title}")
+            lambda pl: logger.info(f"Selected Tidal Playlist: {pl.title}")
         )
         self.tree_handler.spotifyPlaylistSelected.connect(
-            lambda pl_data: Printf.info(
+            lambda pl_data: logger.info(
                 f"Selected Spotify Playlist: {pl_data['data']['name']}"
             )
         )

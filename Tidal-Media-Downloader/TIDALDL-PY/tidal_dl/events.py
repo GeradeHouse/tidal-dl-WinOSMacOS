@@ -29,6 +29,10 @@ from .model import Album, Track, Artist, Playlist, Mix
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (event operations)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 
 class DummyMainView:
     """
@@ -60,9 +64,9 @@ START DOWNLOAD
 
 
 def start_album(obj: Album):
-    Printf.album(obj)
+    logger.info(f"Album: {obj.title} (ID: {obj.id}, Tracks: {obj.numberOfTracks}, Videos: {obj.numberOfVideos})")
     if obj.id is None:
-        Printf.err("Album has no ID.")
+        logger.error("Album has no ID.")
         return
     tracks, _ = TIDAL_API.getItems(str(obj.id), Type.Album)
     if SETTINGS.saveAlbumInfo:
@@ -76,7 +80,7 @@ def start_album(obj: Album):
 
 def start_track(obj: Track):
     if obj.album is None or obj.album.id is None:
-        Printf.err("Track's album has no ID.")
+        logger.error("Track's album has no ID.")
         return
     album = TIDAL_API.getAlbum(str(obj.album.id))
     if SETTINGS.saveCovers:
@@ -88,18 +92,18 @@ def start_track(obj: Track):
 
 def start_artist(obj: Artist):
     if obj.id is None:
-        Printf.err("Artist has no ID.")
+        logger.error("Artist has no ID.")
         return
     albums = TIDAL_API.getArtistAlbums(str(obj.id), SETTINGS.includeEP)
-    Printf.artist(obj, len(albums))
+    logger.info(f"Artist: {obj.name} (ID: {obj.id}, Album count: {len(albums)})")
     for item in albums:
         start_album(item)
 
 
 def start_playlist(obj: Playlist):
-    Printf.playlist(obj)
+    logger.info(f"Playlist: {obj.title} (UUID: {obj.uuid}, Tracks: {obj.numberOfTracks}, Videos: {obj.numberOfVideos})")
     if obj.uuid is None:
-        Printf.err("Playlist has no UUID.")
+        logger.error("Playlist has no UUID.")
         return
     tracks, _ = TIDAL_API.getItems(str(obj.uuid), Type.Playlist)
     downloadTracks(
@@ -111,7 +115,7 @@ def start_playlist(obj: Playlist):
 
 
 def start_mix(obj: Mix):
-    Printf.mix(obj)
+    logger.info(f"Mix: ID={obj.id}, Track count={len(obj.tracks) if hasattr(obj, 'tracks') and isinstance(obj.tracks, list) else 0}")
     downloadTracks(
         cast(List[Track], obj.tracks),
         dummy_view,
@@ -122,7 +126,7 @@ def start_mix(obj: Mix):
 def start_file(string: str):
     txt = aigpy.file.getContent(string)
     if aigpy.string.isNull(txt):
-        Printf.err("Nothing can read!")
+        logger.error("Nothing can read!")
         return
     array = txt.split("\n")
     for item in array:
@@ -150,7 +154,7 @@ def _dispatch_start(etype: Type, obj: Any):
 
 def start(string: str):
     if aigpy.string.isNull(string):
-        Printf.err("Please enter something.")
+        logger.error("Please enter something.")
         return
 
     strings = string.split(" ")
@@ -164,13 +168,13 @@ def start(string: str):
         try:
             etype, obj = TIDAL_API.getByString(item)
         except Exception as e:
-            Printf.err(str(e) + " [" + item + "]")
+            logger.error(str(e) + " [" + item + "]")
             return
 
         try:
             _dispatch_start(etype, obj)
         except Exception as e:
-            Printf.err(str(e))
+            logger.error(str(e))
 
 
 """
@@ -181,65 +185,27 @@ CHANGE SETTINGS
 
 
 def changePathSettings():
-    Printf.settings()
-    SETTINGS.downloadPath = Printf.enterPath(
-        settings.LANG.CHANGE_DOWNLOAD_PATH,  # type: ignore
-        settings.LANG.MSG_PATH_ERR,  # type: ignore
-        "0",
-        SETTINGS.downloadPath,
-    )
-    SETTINGS.albumFolderFormat = Printf.enterFormat(
-        settings.LANG.CHANGE_ALBUM_FOLDER_FORMAT,  # type: ignore
-        SETTINGS.albumFolderFormat,
-        SETTINGS.getDefaultPathFormat(Type.Album),
-    )
-    SETTINGS.playlistFolderFormat = Printf.enterFormat(
-        settings.LANG.CHANGE_PLAYLIST_FOLDER_FORMAT,  # type: ignore
-        SETTINGS.playlistFolderFormat,
-        SETTINGS.getDefaultPathFormat(Type.Playlist),
-    )
-    SETTINGS.trackFileFormat = Printf.enterFormat(
-        settings.LANG.CHANGE_TRACK_FILE_FORMAT,  # type: ignore
-        SETTINGS.trackFileFormat,
-        SETTINGS.getDefaultPathFormat(Type.Track),
-    )
-    SETTINGS.save()
+    """
+    Removed: CLI-only path settings function.
+    GUI handles path settings through the settings interface.
+    """
+    logger.info("Path settings configuration is handled by the GUI settings interface.")
 
 
 def changeQualitySettings():
-    Printf.settings()
-    SETTINGS.audioQuality = AudioQuality(
-        int(
-            Printf.enterLimit(
-                settings.LANG.CHANGE_AUDIO_QUALITY,  # type: ignore
-                settings.LANG.MSG_INPUT_ERR,  # type: ignore
-                ["0", "1", "2", "3", "4"],
-            )
-        )
-    )
-    SETTINGS.save()
+    """
+    Removed: CLI-only quality settings function.
+    GUI handles audio quality selection through the settings interface.
+    """
+    logger.info("Audio quality settings are handled by the GUI settings interface.")
 
 
 def changeSettings():
-    Printf.settings()
-    SETTINGS.showProgress = Printf.enterBool(settings.LANG.CHANGE_SHOW_PROGRESS)  # type: ignore
-    SETTINGS.showTrackInfo = Printf.enterBool(settings.LANG.CHANGE_SHOW_TRACKINFO)  # type: ignore
-    SETTINGS.checkExist = Printf.enterBool(settings.LANG.CHANGE_CHECK_EXIST)  # type: ignore
-    SETTINGS.includeEP = Printf.enterBool(settings.LANG.CHANGE_INCLUDE_EP)  # type: ignore
-    SETTINGS.saveCovers = Printf.enterBool(settings.LANG.CHANGE_SAVE_COVERS)  # type: ignore
-    SETTINGS.saveAlbumInfo = Printf.enterBool(settings.LANG.CHANGE_SAVE_ALBUM_INFO)  # type: ignore
-    SETTINGS.lyricFile = Printf.enterBool(settings.LANG.CHANGE_ADD_LRC_FILE)  # type: ignore
-    SETTINGS.multiThread = Printf.enterBool(settings.LANG.CHANGE_MULITHREAD_DOWNLOAD)  # type: ignore
-    SETTINGS.usePlaylistFolder = Printf.enterBool(settings.LANG.SETTING_USE_PLAYLIST_FOLDER + "('0'-No,'1'-Yes):")  # type: ignore
-    SETTINGS.downloadDelay = Printf.enterBool(settings.LANG.CHANGE_USE_DOWNLOAD_DELAY)  # type: ignore
-    SETTINGS.language = Printf.enter(
-        settings.LANG.CHANGE_LANGUAGE
-        + "("
-        + settings.LANG.getLangChoicePrint()
-        + "):"
-    )  # type: ignore
-    settings.LANG.setLang(SETTINGS.language)  # type: ignore
-    SETTINGS.save()
+    """
+    Removed: CLI-only settings function.
+    GUI handles all settings through the settings interface.
+    """
+    logger.info("General settings configuration is handled by the GUI settings interface.")
 
 
 def changeApiKey():
@@ -247,18 +213,12 @@ def changeApiKey():
     item = cast(Dict[str, str], apiKey.getItem(SETTINGS.apiKeyIndex))
     ver = apiKey.getVersion()
 
-    Printf.info(
+    logger.info(
         f'Current APIKeys: {str(SETTINGS.apiKeyIndex)} {item["platform"]}-{item["formats"]}'
     )
-    Printf.info(f"Current Version: {str(ver)}")
-    Printf.apikeys(apiKey.getItems())
-    index = int(Printf.enterLimit("APIKEY index:", settings.LANG.MSG_INPUT_ERR, apiKey.getLimitIndexs()))  # type: ignore
-
-    if index != SETTINGS.apiKeyIndex:
-        SETTINGS.apiKeyIndex = index
-        SETTINGS.save()
-        TIDAL_API.apiKey = cast(Dict[str, str], apiKey.getItem(index))
-        return True
+    logger.info(f"Current Version: {str(ver)}")
+    logger.info(f"Available API Keys: {len(apiKey.getItems())} keys")
+    logger.info("API key selection is handled by the GUI settings interface.")
     return False
 
 
@@ -307,7 +267,7 @@ def getLoginUrl():
         url = TIDAL_API.getDeviceCode()
         return url
     except Exception as e:
-        Printf.err(f"Could not retrieve login URL: {str(e)}")
+        logger.error(f"Could not retrieve login URL: {str(e)}")
         return None
 
 
@@ -345,7 +305,7 @@ def pollForToken():
 
         raise Exception(settings.LANG.AUTH_TIMEOUT)  # type: ignore
     except Exception as e:
-        Printf.err(f"Authentication polling failed: {str(e)}")
+        logger.error(f"Authentication polling failed: {str(e)}")
         return False
 
 
@@ -370,7 +330,7 @@ def loginByWeb():
         return pollForToken()
 
     except Exception as e:
-        Printf.err(f"Login failed: {str(e)}")
+        logger.error(f"Login failed: {str(e)}")
         return False
 
 
@@ -380,7 +340,7 @@ def loginByConfig():
             return False
 
         if TIDAL_API.verifyAccessToken(TOKEN.accessToken):
-            Printf.info(
+            logger.info(
                 settings.LANG.MSG_VALID_ACCESSTOKEN.format(  # type: ignore
                     __displayTime__(int(TOKEN.expiresAfter - time.time()))
                 )
@@ -391,7 +351,7 @@ def loginByConfig():
             TIDAL_API.key.accessToken = TOKEN.accessToken
             return True
 
-        Printf.info(settings.LANG.MSG_INVALID_ACCESSTOKEN)  # type: ignore
+        logger.info(settings.LANG.MSG_INVALID_ACCESSTOKEN)  # type: ignore
         if TOKEN.refreshToken and TIDAL_API.refreshAccessToken(TOKEN.refreshToken):
             Printf.success(
                 settings.LANG.MSG_VALID_ACCESSTOKEN.format(  # type: ignore
@@ -416,24 +376,9 @@ def loginByConfig():
 
 
 def loginByAccessToken():
-    try:
-        print("-------------AccessToken---------------")
-        token = Printf.enter("accessToken('0' go back):")
-        if token == "0":
-            return
-        TIDAL_API.loginByAccessToken(token, TOKEN.userid)
-    except Exception as e:
-        Printf.err(str(e))
-        return
-
-    print("-------------RefreshToken---------------")
-    refreshToken = Printf.enter("refreshToken('0' to skip):")
-    if refreshToken == "0":
-        refreshToken = TOKEN.refreshToken
-
-    # FIX: Suppress Pylance error due to incorrect type inference on TOKEN
-    TOKEN.accessToken = token  # type: ignore
-    TOKEN.refreshToken = refreshToken  # type: ignore
-    TOKEN.expiresAfter = 0
-    TOKEN.countryCode = TIDAL_API.key.countryCode
-    TOKEN.save()
+    """
+    Removed: CLI-only manual token entry function.
+    GUI handles authentication via web-based flow and GUI dialogs.
+    """
+    logger.warning("CLI manual token entry is not available in GUI mode.")
+    return False

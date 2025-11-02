@@ -29,6 +29,10 @@ __all__ = [
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (auth operations need visibility)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 
 def initialize_and_login():
     """
@@ -58,7 +62,7 @@ def initialize_and_login():
     )
 
     if not loginByConfig():
-        Printf.info("Could not log in with stored credentials.")
+        logger.info("Could not log in with stored credentials.")
 
 
 def loginByConfig():
@@ -79,20 +83,20 @@ def loginByConfig():
 
     if time.time() > expires_after:
         if TOKEN.refreshToken:
-            Printf.info("Access token has expired, attempting to refresh...")
+            logger.info("Access token has expired, attempting to refresh...")
             try:
                 # The TIDAL_API.apiKey should already be set by initialize_and_login
                 if TIDAL_API.refreshAccessToken(TOKEN.refreshToken):
                     # --- MODIFICATION START: Use the new save function ---
                     saveToken()
             
-                    Printf.success("Token refreshed successfully.")
+                    logger.info("Token refreshed successfully.")
                     return True
                 else:
-                    Printf.err("Failed to refresh token.")
+                    logger.error("Failed to refresh token.")
                     return False
             except Exception as e:
-                Printf.err(f"An error occurred during token refresh: {e}")
+                logger.error(f"An error occurred during token refresh: {e}")
                 return False
         else:
             Printf.warning(
@@ -102,10 +106,10 @@ def loginByConfig():
 
     try:
         TIDAL_API.loginByAccessToken(TOKEN.accessToken, TOKEN.userid)
-        Printf.success("Login successful using stored credentials.")
+        logger.info("Login successful using stored credentials.")
         return True
     except Exception as e:
-        Printf.err(f"Login with stored token failed: {e}")
+        logger.error(f"Login with stored token failed: {e}")
         return False
 
 
@@ -128,16 +132,16 @@ def getLoginUrl():
         if key.get('valid') != 'True':
             continue
 
-        Printf.info(f"Attempting login with API key: {key.get('platform', 'Unknown')}...")
+        logger.info(f"Attempting login with API key: {key.get('platform', 'Unknown')}...")
         TIDAL_API.apiKey = key
 
         try:
             login_url = TIDAL_API.getDeviceCode()
             
-            Printf.success(f"Successfully using API key: {key.get('platform', 'Unknown')}")
+            logger.info(f"Successfully using API key: {key.get('platform', 'Unknown')}")
             
             if index != SETTINGS.apiKeyIndex:
-                Printf.info(f"Updating preferred API key to index {index}.")
+                logger.info(f"Updating preferred API key to index {index}.")
                 SETTINGS.apiKeyIndex = index
                 SETTINGS.save()
                 
@@ -145,7 +149,7 @@ def getLoginUrl():
             
         except Exception as e:
             logger.warning(f"API key '{key.get('platform', 'Unknown')}' failed: {e}")
-            Printf.warning(f"API key '{key.get('platform', 'Unknown')}' failed. Trying next...")
+            logger.warning(f"API key '{key.get('platform', 'Unknown')}' failed. Trying next...")
             continue
 
     raise RuntimeError("None of the available API keys were able to successfully authenticate. Please check your API key definitions.")
@@ -177,18 +181,18 @@ def saveToken():
         logger.info("TIDAL token data saved successfully.")
     except Exception as e:
         logger.error(f"Failed to save TIDAL token: {e}", exc_info=True)
-        Printf.err(f"Could not save login session: {e}")
+        logger.error(f"Could not save login session: {e}")
 
 
 def loginByWeb():
     """
     Initiates a web-based login flow. (Primarily for CLI)
     """
-    Printf.info("Starting web login...")
+    logger.info("Starting web login...")
     try:
         url = getLoginUrl()
-        Printf.info(f"Please visit this URL in your browser to log in:\n{url}")
-        Printf.info("You have 5 minutes to complete the login.")
+        logger.info(f"Please visit this URL in your browser to log in:\n{url}")
+        logger.info("You have 5 minutes to complete the login.")
 
         timeout = TIDAL_API.key.authCheckTimeout
         interval = TIDAL_API.key.authCheckInterval
@@ -202,7 +206,7 @@ def loginByWeb():
             interval = 5
 
         if timeout <= 0:
-            Printf.err("Device authorization did not initialize. This may indicate a problem with all available API keys.")
+            logger.error("Device authorization did not initialize. This may indicate a problem with all available API keys.")
             return False
 
         start_time = time.time()
@@ -211,55 +215,37 @@ def loginByWeb():
             try:
                 status = pollForToken()
             except Exception as e:
-                Printf.err(f"TIDAL auth status error: {e}")
+                logger.error(f"TIDAL auth status error: {e}")
                 return False
 
             if status == "SUCCESS":
                 # --- MODIFICATION START: Use the new save function ---
                 saveToken()
         
-                Printf.success("Login successful!")
+                logger.info("Login successful!")
                 return True
             elif status == "PENDING":
                 time.sleep(max(1, interval))
             elif status == "SLOW_DOWN":
                 interval += 5
-                Printf.warning(f"Polling too frequently. Slowing down to {interval}s.")
+                logger.warning(f"Polling too frequently. Slowing down to {interval}s.")
                 time.sleep(interval)
             else:
-                Printf.err(f"Login failed with status: {status}")
+                logger.error(f"Login failed with status: {status}")
                 return False
 
-        Printf.err("Login timed out.")
+        logger.error("Login timed out.")
         return False
 
     except Exception as e:
-        Printf.err(f"An error occurred during web login: {e}")
+        logger.error(f"An error occurred during web login: {e}")
         return False
 
 
 def loginByAccessToken():
     """
-    Allows the user to log in using a manually provided access token.
+    Removed: CLI-only function for manual token entry.
+    GUI handles authentication via web-based flow and GUI dialogs.
     """
-    Printf.info(
-        "Enter your access token. You can get it from https://listen.tidal.com/v1/oauth2/token"
-    )
-    token = Printf.enter("accessToken:")
-    if not token:
-        Printf.warning("No access token entered.")
-        return False
-
-    try:
-        TIDAL_API.loginByAccessToken(token)
-        # --- MODIFICATION START: Use the new save function ---
-        # Manually set expiresAfter and refreshToken as they are unknown here
-        TIDAL_API.key.refreshToken = None
-        TIDAL_API.key.expiresIn = 0
-        saveToken()
-
-        Printf.success("Login successful!")
-        return True
-    except Exception as e:
-        Printf.err(f"Login by access token failed: {e}")
-        return False
+    logger.warning("CLI token input is not available in GUI mode.")
+    return False

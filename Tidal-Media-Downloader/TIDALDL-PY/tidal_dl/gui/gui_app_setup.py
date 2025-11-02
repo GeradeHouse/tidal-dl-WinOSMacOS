@@ -28,8 +28,12 @@ from ..logging_config import setup_logging as setup_logging_file
 if TYPE_CHECKING:
     from .gui import MainView
 
-# Initialize logger at the module level to prevent "possibly unbound" errors
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)  # Set specific level for this module
+
+# Set up GUI logging with INFO level for this module (more verbose GUI output for downloads)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
 
 # --- Global Exception Handling ---
 
@@ -141,6 +145,10 @@ def setup_logging(log_level: int = logging.INFO) -> None:
     global logger
     setup_logging_file()
     logger = logging.getLogger(__name__)
+    
+    # Set up GUI logging with INFO level for this module (app setup operations need visibility)
+    from .gui_logging import setup_gui_logger
+    setup_gui_logger(__name__, logging.INFO)
     logger.info("GUI logging configured.")
 
 

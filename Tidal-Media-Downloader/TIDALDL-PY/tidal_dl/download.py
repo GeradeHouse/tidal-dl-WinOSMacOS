@@ -59,6 +59,10 @@ from .metadata.tagger import tag_file
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
+# Set up GUI logging with INFO level for this module (more verbose GUI output for downloads)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 # Forward declaration for type hinting MainView without circular import
 from typing import TYPE_CHECKING
 
@@ -237,7 +241,7 @@ def __setMetaData__(
 
     except Exception as e:
         logger.error(f"Failed to tag file '{os.path.basename(filepath)}' using streamrip engine: {e}", exc_info=True)
-        Printf.err(f"Failed to write metadata for '{track.title}': {e}")
+        logger.error(f"Failed to write metadata for '{track.title}': {e}")
     finally:
         # Clean up the temporary cover file
         if cover_path and os.path.exists(cover_path):
@@ -486,7 +490,8 @@ def downloadTrack(
         aigpy.path.mkdirs(os.path.dirname(path))
 
         if SETTINGS.showTrackInfo and not SETTINGS.multiThread:
-            Printf.track(cast(Track, track), stream)
+            # Convert to logger.info() with structured track information
+            logger.info(f"Track: {track.title} (ID: {track.id}, Quality: {Printf.map_track_quality(track)})")
         if userProgress:
             userProgress.updateStream(stream)
 
@@ -501,7 +506,7 @@ def downloadTrack(
         ### END DASH INTEGRATION ###
 
         if __isSkip__(path, url_list[0]):
-            Printf.success(f"{os.path.basename(path)} (skip:already exists!)")
+            logger.info(f"{os.path.basename(path)} (skip:already exists!)")
             return True, ""
 
         actual_download_part_path = path + ".part"
@@ -514,14 +519,14 @@ def downloadTrack(
         check, err = tool.start(False)
 
         if not check:
-            Printf.err(f"DL Track '{track.title}' failed: {err or ''}")
+            logger.error(f"DL Track '{track.title}' failed: {err or ''}")
             return False, str(err or "")
 
         __encrypted__(stream, actual_download_part_path, path)
 
         if requested_mp3 and path.lower().endswith((".m4a", ".mp4", ".mov", ".flac")):
             logger.info(f"Converting '{track.title}' to MP3 (320kbps)...")
-            Printf.info(f"Converting '{track.title}' to MP3...")
+            logger.info(f"Converting '{track.title}' to MP3...")
             mp3_path = path.rsplit('.', 1)[0] + '.mp3'
             try:
                 with AudioFileClip(path) as audio_clip:
@@ -529,7 +534,7 @@ def downloadTrack(
                 os.remove(path)
                 path = mp3_path
             except Exception as e:
-                Printf.err(f"Failed to convert '{track.title}' to MP3: {e}")
+                logger.error(f"Failed to convert '{track.title}' to MP3: {e}")
 
         if path.lower().endswith((".mp4", ".mov")) and stream.codec and 'flac' in stream.codec.lower():
             logger.info(f"Detected FLAC in MP4 container for '{track.title}'. Extracting...")
@@ -540,7 +545,7 @@ def downloadTrack(
                 os.remove(path)
                 path = demuxed_path
             except Exception as e:
-                Printf.err(f"Demuxing of FLAC stream failed: {e}")
+                logger.error(f"Demuxing of FLAC stream failed: {e}")
                 return False, str(e)
 
         contributors = None
@@ -561,11 +566,11 @@ def downloadTrack(
                 logger.debug(f"No lyrics available: {ex}")
 
         __setMetaData__(cast(Track, track), album, path, contributors, lyrics)
-        Printf.success(track.title or f"Track {track.id}")
+        logger.info(track.title or f"Track {track.id}")
         return True, ""
 
     except Exception as e:
-        Printf.err(f"DL Track '{getattr(track, 'title', 'Unknown')}' failed: {e}")
+        logger.error(f"DL Track '{getattr(track, 'title', 'Unknown')}' failed: {e}")
         logger.error(f"Exception in downloadTrack for '{getattr(track, 'title', 'Unknown')}': {e}", exc_info=True)
         return False, str(e)
     finally:
@@ -692,14 +697,14 @@ def downloadTracks(
                 f"[Thread] Loop {index+1}/{len(tracks)}: Checking stop_event (is_set={main_view_instance.stop_event.is_set()})"
             )
             if main_view_instance.stop_event.is_set():
-                Printf.info("Stop request detected. Aborting download queue.")
+                logger.info("Stop request detected. Aborting download queue.")
                 break  # Exit the loop
 
             logger.debug(
                 f"[Thread] Loop {index+1}/{len(tracks)}: Checking download_paused (is {main_view_instance.download_paused})"
             )
             if main_view_instance.download_paused:
-                Printf.info(
+                logger.info(
                     "Download queue paused. Waiting for resume signal..."
                 )  # Updated log
                 logger.debug(
@@ -713,13 +718,13 @@ def downloadTracks(
                 logger.debug(
                     f"[Thread] Loop {index+1}/{len(tracks)}: Returned from pause_event.wait() (event is_set={main_view_instance.pause_event.is_set()})"
                 )
-                Printf.info("Download queue resumed.")  # Updated log
+                logger.info("Download queue resumed.")  # Updated log
                 # Re-check stop after pause
                 logger.debug(
                     f"[Thread] Loop {index+1}/{len(tracks)}: Re-checking stop_event after pause (is_set={main_view_instance.stop_event.is_set()})"
                 )
                 if main_view_instance.stop_event.is_set():
-                    Printf.info(
+                    logger.info(
                         "Stop request detected after pause. Aborting download queue."
                     )
                     break

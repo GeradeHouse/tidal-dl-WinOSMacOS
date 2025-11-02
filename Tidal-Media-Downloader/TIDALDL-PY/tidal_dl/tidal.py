@@ -38,7 +38,16 @@ import logging
 # Create a logger instance for this module
 logger = logging.getLogger(__name__)
 logger.setLevel(
+
+# Set up GUI logging with INFO level for this module (API operations)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
     logging.ERROR
+)
+
+# Set up GUI logging with INFO level for this module (API operations)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
 )  # Set specific level for this module to only receive warnings
 
 from PIL import Image

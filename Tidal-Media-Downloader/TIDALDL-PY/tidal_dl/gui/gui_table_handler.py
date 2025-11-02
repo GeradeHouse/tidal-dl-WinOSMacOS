@@ -42,6 +42,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
 
+# Set up GUI logging with INFO level for this module (table operations need visibility)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 MANUAL_LINK_REQUIRED_ROLE = Qt.ItemDataRole.UserRole + 100
 
 
@@ -238,7 +242,7 @@ class TableHandler(QObject):
                 playlist_id
             )
 
-        Printf.info(
+        logger.info(
             f"Populating table with {len(results_array)} items of type {result_type.name}..."
         )
 
@@ -367,7 +371,7 @@ class TableHandler(QObject):
 
         table.adjustColumnWidths()
         table.update()
-        Printf.success(f"Table populated with {table.rowCount()} items.")
+        logger.info(f"Table populated with {table.rowCount()} items.")
         if self.download_handler:
             self.download_handler._update_download_button_text()
 

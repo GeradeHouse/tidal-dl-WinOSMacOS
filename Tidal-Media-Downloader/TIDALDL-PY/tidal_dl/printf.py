@@ -7,8 +7,12 @@
 @Modified by: GeradeHouse
 @Version :   3.0
 @Contact :   yaronhuang@foxmail.com
-@Desc    :   This module is used to print information to the console. And it also provides some utility functions for formatting and displaying data.
-Quality mapping and track quality analysis are included.
+@Desc    :   Core utility module providing GUI formatting functions for the Tidal Media Downloader.
+This module contains essential utility functions for:
+- Quality mapping and track quality analysis
+- Duration formatting for display
+- Table creation utilities for GUI components
+The module has been cleaned up to remove legacy CLI-only code and now focuses solely on GUI utilities.
 """
 
 from . import settings
@@ -22,7 +26,7 @@ import logging
 import prettytable
 from .model import Track
 from typing import Optional, List, Dict, Any
-
+import logging
 
 from . import apiKey
 
@@ -32,23 +36,16 @@ from .lang.language import *
 from .enums import AudioQuality
 
 
-VERSION = "2022.10.31.1"
-__LOGO__ = rf"""
- /$$$$$$$$ /$$       /$$           /$$               /$$ /$$
-|__  $$__/|__/      | $$          | $$              | $$| $$
-   | $$    /$$  /$$$$$$$  /$$$$$$ | $$          /$$$$$$$| $$
-   | $$   | $$ /$$__  $$ |____  $$| $$ /$$$$$$ /$$__  $$| $$
-   | $$   | $$| $$  | $$  /$$$$$$$| $$|______/| $$  | $$| $$
-   | $$   | $$| $$  | $$ /$$__  $$| $$        | $$  | $$| $$
-   | $$   | $$|  $$$$$$$|  $$$$$$$| $$        |  $$$$$$$| $$
-   |__/   |__/ \_______/ \_______/|__/         \_______/|__/
 
-        https://github.com/GeradeHouse/Tidal-Media-Downloader
-
-                         {VERSION}
-"""
 
 print_mutex = threading.Lock()
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)  # Set specific level for this module
+
+# Set up GUI logging with INFO level for this module (more verbose GUI output for downloads)
+from tidal_dl.gui.gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
 
 
 class Printf(object):
@@ -177,10 +174,7 @@ class Printf(object):
                 return q  # Return original string if it's not a valid enum name
         return quality_map.get(q, "Unknown")
 
-    @staticmethod
-    def logo():
-        print(__LOGO__)
-        logger.info(__LOGO__)
+    
 
     @staticmethod
     def __gettable__(columns, rows):
@@ -191,122 +185,13 @@ class Printf(object):
             tb.add_row(item)
         return tb
 
-    @staticmethod
-    def usage():
-        print("=============TIDAL-DL HELP==============")
-        tb = Printf.__gettable__(
-            ["OPTION", "DESC"],
-            [
-                ["-h or --help", "show help-message"],
-                ["-v or --version", "show version"],
-                ["-g or --gui", "show simple-gui"],
-                ["-o or --output", "download path"],
-                ["-l or --link", "url/id/filePath"],
-                [
-                    "-q or --quality",
-                    "track quality('Low','Normal','FLAC (CD)','FLAC (Hi‑Res)','Highest Available')",
-                ],
-            ],
-        )
-        print(tb)
+    
 
-    @staticmethod
-    def checkVersion():
-        onlineVer = aigpy.pip.getLastVersion("tidal-dl")
-        if onlineVer is not None:
-            icmp = aigpy.system.cmpVersion(onlineVer, VERSION)
-            if icmp > 0:
-                Printf.info(f"{settings.LANG.PRINT_LATEST_VERSION} {onlineVer}")
+    
 
-    @staticmethod
-    def settings():
-        from .settings import SETTINGS, LANG
+    
 
-        data = SETTINGS
-        tb = Printf.__gettable__(
-            [settings.LANG.SETTING, settings.LANG.VALUE],
-            [
-                # settings - path and format
-                [settings.LANG.SETTING_PATH, getProfilePath()],
-                [settings.LANG.SETTING_DOWNLOAD_PATH, data.downloadPath],
-                [settings.LANG.SETTING_ALBUM_FOLDER_FORMAT, data.albumFolderFormat],
-                [
-                    settings.LANG.SETTING_PLAYLIST_FOLDER_FORMAT,
-                    data.playlistFolderFormat,
-                ],
-                [settings.LANG.SETTING_TRACK_FILE_FORMAT, data.trackFileFormat],
-                # settings - quality
-                [settings.LANG.SETTING_AUDIO_QUALITY, data.audioQuality.name],
-                # settings - else
-                [settings.LANG.SETTING_USE_PLAYLIST_FOLDER, data.usePlaylistFolder],
-                [settings.LANG.SETTING_CHECK_EXIST, data.checkExist],
-                [settings.LANG.SETTING_SHOW_PROGRESS, data.showProgress],
-                [settings.LANG.SETTING_SHOW_TRACKINFO, data.showTrackInfo],
-                [settings.LANG.SETTING_SAVE_ALBUMINFO, data.saveAlbumInfo],
-                [settings.LANG.SETTING_SAVE_COVERS, data.saveCovers],
-                [settings.LANG.SETTING_INCLUDE_EP, data.includeEP],
-                [
-                    settings.LANG.SETTING_LANGUAGE,
-                    settings.LANG.getLangName(data.language),
-                ],
-                [settings.LANG.SETTING_ADD_LRC_FILE, data.lyricFile],
-                [settings.LANG.SETTING_MULITHREAD_DOWNLOAD, data.multiThread],
-                [
-                    settings.LANG.SETTING_APIKEY,
-                    f"[{data.apiKeyIndex}]{apiKey.getItem(data.apiKeyIndex).get('formats', '')}",
-                ],
-                [settings.LANG.SETTING_DOWNLOAD_DELAY, data.downloadDelay],
-            ],
-        )
-        print(tb)
-
-    @staticmethod
-    def choices():
-        print("====================================================")
-        tb = Printf.__gettable__(
-            [settings.LANG.CHOICE, settings.LANG.FUNCTION],
-            [
-                [
-                    aigpy.cmd.green(f"{settings.LANG.CHOICE_ENTER} '0':"),
-                    settings.LANG.CHOICE_EXIT,
-                ],
-                [
-                    aigpy.cmd.green(f"{settings.LANG.CHOICE_ENTER} '1':"),
-                    settings.LANG.CHOICE_LOGIN,
-                ],
-                [
-                    aigpy.cmd.green(f"{settings.LANG.CHOICE_ENTER} '2':"),
-                    settings.LANG.CHOICE_LOGOUT,
-                ],
-                [
-                    aigpy.cmd.green(f"{settings.LANG.CHOICE_ENTER} '3':"),
-                    settings.LANG.CHOICE_SET_ACCESS_TOKEN,
-                ],
-                [
-                    aigpy.cmd.green(f"{settings.LANG.CHOICE_ENTER} '4':"),
-                    settings.LANG.CHOICE_SETTINGS + "-Path",
-                ],
-                [
-                    aigpy.cmd.green(f"{settings.LANG.CHOICE_ENTER} '5':"),
-                    settings.LANG.CHOICE_SETTINGS + "-Quality",
-                ],
-                [
-                    aigpy.cmd.green(f"{settings.LANG.CHOICE_ENTER} '6':"),
-                    settings.LANG.CHOICE_SETTINGS + "-Else",
-                ],
-                [
-                    aigpy.cmd.green(f"{settings.LANG.CHOICE_ENTER} '7':"),
-                    settings.LANG.CHOICE_APIKEY,
-                ],
-                [
-                    aigpy.cmd.green(settings.LANG.CHOICE_ENTER_URLID),
-                    settings.LANG.CHOICE_DOWNLOAD_BY_URL,
-                ],
-            ],
-        )
-        tb.set_style(prettytable.PLAIN_COLUMNS)
-        print(tb)
-        print("====================================================")
+    
 
     @staticmethod
     def enter(string: str) -> str:

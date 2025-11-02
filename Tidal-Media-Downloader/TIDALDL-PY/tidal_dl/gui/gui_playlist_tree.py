@@ -35,6 +35,10 @@ from .. import paths
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+# Set up GUI logging with INFO level for this module (playlist operations need visibility)
+from .gui_logging import setup_gui_logger
+setup_gui_logger(__name__, logging.INFO)
+
 
 # --- Custom Widget for Left Panel Background (Moved from gui.py) ---
 class LeftPanelWidget(QWidget):
