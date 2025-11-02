@@ -84,13 +84,20 @@ from ..printf import Printf  # Import Printf for formatDuration
 
 # --- Setup Logging ---
 logger = logging.getLogger(__name__)
-logger.setLevel(
+logger.setLevel(logging.WARNING)  # Set specific level for this module
 
-# Set up GUI logging with INFO level for this module (table operations need visibility)
-from .gui_logging import setup_gui_logger
-setup_gui_logger(__name__, logging.INFO)
-    logging.WARNING
-)  # Set specific level for this module
+# Set up GUI logging with INFO level for this modul- LAZY LOADED
+def _setup_gui_logging():
+    """Lazy-load GUI logging setup to avoid circular imports."""
+    try:
+        from .gui_logging import setup_gui_logger
+        setup_gui_logger(__name__, logging.INFO)
+    except ImportError:
+        # GUI logging not available during non-GUI operations (e.g., headless downloads)
+        pass
+
+# Initialize GUI logging lazily
+_setup_gui_logging()
 
 # The SelectableLabel and ColumnWidget classes have been replaced by a QTableWidget–based implementation.
 # The new SplitterTable class below implements a spreadsheet–like widget that supports row selection

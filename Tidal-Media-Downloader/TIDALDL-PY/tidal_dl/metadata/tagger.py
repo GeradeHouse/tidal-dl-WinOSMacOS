@@ -415,6 +415,7 @@ class Container(Enum):
 
 
 async def tag_file(path: str, meta: TrackMetadata, cover_path: str | None):
+    """Async function to tag audio files with metadata and cover art."""
     ext = path.split(".")[-1].lower()
     if ext == "flac":
         container = Container.FLAC
@@ -432,5 +433,6 @@ async def tag_file(path: str, meta: TrackMetadata, cover_path: str | None):
     if cover_path is not None:
         await container.embed_cover(audio, cover_path)
     container.save_audio(audio, path)
+    return None  # Explicitly return None to satisfy type checker
 
 # --- END OF FILE tagger.py ---

@@ -73,12 +73,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Set specific level for this module
 
-# Set up GUI logging with INFO level for this module (more verbose GUI output for downloads)
-from tidal_dl.gui.gui_logging import setup_gui_logger
-setup_gui_logger(__name__, logging.INFO)
+# Set up GUI logging with INFO level for this module
+def _setup_gui_logging():
+    """Lazy-load GUI logging setup to avoid circular imports."""
+    try:
+        from .gui_logging import setup_gui_logger
+        setup_gui_logger(__name__, logging.INFO)
+    except ImportError:
+        # GUI logging not available during non-GUI operations (e.g., headless downloads)
+        pass
 
-# --- Font Size Configuration for Playlist Items ---
-
+# Initialize GUI logging lazily
+_setup_gui_logging()
 
 # --- Custom Delegate for Playlist Tree Items ---
 class PlaylistDelegate(QtWidgets.QStyledItemDelegate):

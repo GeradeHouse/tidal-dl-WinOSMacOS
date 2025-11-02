@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.WARNING)
 
 # Set up GUI logging with INFO level for this module (download operations need visibility)
 from .gui_logging import setup_gui_logger

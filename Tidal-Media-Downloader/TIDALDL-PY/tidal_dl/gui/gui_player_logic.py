@@ -3,7 +3,7 @@
 import logging
 import time
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QUrl
-from tidal_dl.tidal import TidalAPI, AudioQuality
+from ..tidal import TidalAPI, AudioQuality
 from typing import Optional, Dict, Any
 
 # --- START: New Imports for ffpyplayer ---

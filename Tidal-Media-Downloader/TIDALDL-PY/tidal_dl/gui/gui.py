@@ -464,13 +464,13 @@ class MainView(QWidget):
         )
         self.search_handler.searchFailed.connect(self.table_handler.show_error_message)
         self.search_handler.searchFailed.connect(
-            lambda msg: logger.info(f"Search Error: {msg}")
+            lambda msg: logger_gui.info(f"Search Error: {msg}")
         )
         self.tree_handler.tidalPlaylistSelected.connect(
-            lambda pl: logger.info(f"Selected Tidal Playlist: {pl.title}")
+            lambda pl: logger_gui.info(f"Selected Tidal Playlist: {pl.title}")
         )
         self.tree_handler.spotifyPlaylistSelected.connect(
-            lambda pl_data: logger.info(
+            lambda pl_data: logger_gui.info(
                 f"Selected Spotify Playlist: {pl_data['data']['name']}"
             )
         )

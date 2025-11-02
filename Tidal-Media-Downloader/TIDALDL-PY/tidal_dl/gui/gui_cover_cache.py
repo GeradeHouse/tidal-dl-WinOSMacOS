@@ -25,11 +25,21 @@ from ..model import Track, Album
 from ..settings import SETTINGS
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.ERROR)
+logger.setLevel(logging.WARNING)
 
 # Set up GUI logging with INFO level for this module (more verbose GUI output for downloads)
-from tidal_dl.gui.gui_logging import setup_gui_logger
-setup_gui_logger(__name__, logging.INFO)
+# Set up GUI logging with INFO level for this modul- LAZY LOADED
+def _setup_gui_logging():
+    """Lazy-load GUI logging setup to avoid circular imports."""
+    try:
+        from .gui_logging import setup_gui_logger
+        setup_gui_logger(__name__, logging.INFO)
+    except ImportError:
+        # GUI logging not available during non-GUI operations (e.g., headless downloads)
+        pass
+
+# Initialize GUI logging lazily
+_setup_gui_logging()
 
 CACHE_FILE_NAME = "cover_cache.pkl"
 

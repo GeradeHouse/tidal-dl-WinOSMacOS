@@ -30,8 +30,18 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (event operations)
-from tidal_dl.gui.gui_logging import setup_gui_logger
-setup_gui_logger(__name__, logging.INFO)
+# Set up GUI logging with INFO level for this modul- LAZY LOADED
+def _setup_gui_logging():
+    """Lazy-load GUI logging setup to avoid circular imports."""
+    try:
+        from .gui.gui_logging import setup_gui_logger
+        setup_gui_logger(__name__, logging.INFO)
+    except ImportError:
+        # GUI logging not available during non-GUI operations (e.g., headless downloads)
+        pass
+
+# Initialize GUI logging lazily
+_setup_gui_logging()
 
 
 class DummyMainView:
