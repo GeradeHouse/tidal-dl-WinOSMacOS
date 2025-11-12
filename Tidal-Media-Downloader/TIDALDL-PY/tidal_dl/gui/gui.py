@@ -3,17 +3,15 @@
 import logging
 import sys
 import threading
-from typing import Optional, List, Any, Dict, Union, cast, TYPE_CHECKING, Callable # MODIFIED: Added Callable
+from typing import Optional, List, Any, Dict, Union, Callable, TYPE_CHECKING
 
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QLineEdit,
     QPushButton,
     QComboBox,
     QScrollArea,
-    QTreeWidget,
     QTextEdit,
     QLabel,
     QStackedWidget,
@@ -24,12 +22,11 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt,
-    QSize,
     pyqtSignal,
-    QRect,
-    QPoint,
     QThread,
     pyqtSlot,
+    QSize,
+    QPoint,
     QEvent,
     QRectF,
 )
@@ -41,7 +38,7 @@ from PyQt6.QtGui import (
     QMouseEvent,
     QPaintEvent,
     QResizeEvent,
-    QIcon,
+    QPainterPath,
 )
 from PyQt6 import QtWidgets, QtGui
 
@@ -75,6 +72,10 @@ from .gui_logging import setup_gui_logger, get_gui_manager
 
 if TYPE_CHECKING:
     from .gui_table_handler import TableHandler
+
+# FIX: Move imports from local (__init__) to module level for PyInstaller compatibility
+from .gui_playlist_tree_handler import PlaylistTreeHandler
+from .gui_table_handler import TableHandler
 
 logger_gui = logging.getLogger(__name__)
 logger_gui.setLevel(logging.WARNING)
@@ -140,16 +141,28 @@ class MainView(QWidget):
 
         self.initView()
 
-        from .gui_playlist_tree_handler import PlaylistTreeHandler
-        from .gui_table_handler import TableHandler # Import here
+        # FIX: Remove local imports since they're now at module level
         self.auth_handler = AuthHandler(self.spotify_api, parent=self)
         self.settingsPage = SettingsPage(auth_handler=self.auth_handler, parent=self)
+        
+        # Initialize the Task Queue Manager first
+        self.task_queue_manager = TaskQueueManager(self)
+        
+        # Create PlaylistTreeHandler first (before TableHandler to avoid circular dependency)
         self.tree_handler = PlaylistTreeHandler(
             self.playlist_tree_widget, self.cover_cache, parent=self
         )
+        self.tree_handler.set_task_queue_manager(self.task_queue_manager)
+        
+        # Create TableHandler with None for linking_handler initially
         self.table_handler = TableHandler(
             self.tableWidget, self.link_persistence_manager, None, parent=self
         )
+        
+        # Inject table_handler reference into playlist tree handler to avoid circular access
+        self.tree_handler.set_table_handler(self.table_handler)
+        
+        # Create LinkingGuiHandler and set it on both handlers
         self.linking_gui_handler = LinkingGuiHandler(
             TIDAL_API,
             self.table_handler,
@@ -158,6 +171,10 @@ class MainView(QWidget):
             parent=self,
         )
         self.table_handler.set_linking_handler(self.linking_gui_handler)
+        
+        # Now set linking handler on playlist tree handler
+        self.tree_handler.set_linking_handler(self.linking_gui_handler)
+        
         self.search_handler = SearchHandler(parent=self)
         self.download_handler = DownloadHandler(
             main_view=self,
@@ -171,10 +188,6 @@ class MainView(QWidget):
             self.stackedLayout, self.mainPage, self.settingsPage, parent=self
         )
         self.resize_handler = ResizeHandler(self, self.title_bar)
-        
-        # Initialize the Task Queue Manager
-        self.task_queue_manager = TaskQueueManager(self)
-        self.tree_handler.set_task_queue_manager(self.task_queue_manager)
 
 
         # --- Redirect stdout to the log widget ---
@@ -725,10 +738,17 @@ class MainView(QWidget):
     def _trigger_search(self, query: str):
         self.search_handler.perform_search(query)
 
-    @pyqtSlot(list)
-    def startLinkingWorker(self, tracks_to_link_data: list, on_finish_callback: Optional[Callable] = None): # MODIFIED: Added callback parameter
+    @pyqtSlot(list, str, object)  # tracks_to_link_data, playlist_id, on_finish_callback
+    def startLinkingWorker(self, tracks_to_link_data: list, playlist_id: Optional[str] = None, on_finish_callback: Optional[Callable] = None):
         if not tracks_to_link_data or self.linking_active:
             return
+        
+        # CRITICAL FIX: Set processing playlist ID if provided by TaskQueueManager
+        if playlist_id:
+            self.linking_gui_handler._current_processing_playlist_id = playlist_id
+            self.linking_gui_handler._processed_counters[playlist_id] = 0
+            logger_gui.debug(f"🔴🔴🔴 SETTING: Stored processing playlist ID in startLinkingWorker: {playlist_id}")
+        
         self.linking_active = True
         self.linking_stop_event.clear()
         self.c_btnLinkTracks.setText("Stop Linking")

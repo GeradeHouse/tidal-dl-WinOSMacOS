@@ -8,22 +8,21 @@
 @Contact :   gerade.house@gmail.com
 @Desc    :   Handles the setup, initialization, and global exception handling for the GUI application.
 """
-import sys
-import os
 import logging
-import traceback
+import os
+import sys
 import time
-from typing import Optional, Any, cast, TYPE_CHECKING
+import traceback
+from typing import TYPE_CHECKING, Any, Optional, cast
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, pyqtSlot, Qt
+from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtGui import QIcon
 
-# Import project components
-from ..paths import getProfilePath, getSettingsFilePath, getTokenPath, resource_path
-from ..settings import SETTINGS
 from ..login import TOKEN, initialize_and_login
 from ..logging_config import setup_logging as setup_logging_file
+from ..paths import getProfilePath, getSettingsFilePath, getTokenPath, resource_path
+from ..settings import SETTINGS
 
 if TYPE_CHECKING:
     from .gui import MainView
@@ -57,6 +56,40 @@ def show_critical_error_dialog(
     msg_box.setDetailedText(detailed_text)
     msg_box.setWindowTitle("Critical Error")
     msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+    
+    # FIX: Apply dark theme styling to the message box
+    msg_box.setStyleSheet("""
+        QMessageBox {
+            background-color: #1e1e1e;
+        }
+        QMessageBox QLabel {
+            color: #ffffff;
+            background-color: transparent;
+        }
+        QMessageBox QPushButton {
+            background-color: #2d2d31;
+            color: #ffffff;
+            border: 1px solid #444;
+            border-radius: 3px;
+            padding: 5px 15px;
+            min-width: 80px;
+        }
+        QMessageBox QPushButton:hover {
+            background-color: #3a3a3f;
+        }
+        QMessageBox QPushButton:pressed {
+            background-color: #242429;
+        }
+        QMessageBox QScrollArea {
+            background-color: #2d2d31;
+        }
+        QMessageBox QTextEdit {
+            background-color: #2d2d31;
+            color: #ffffff;
+            border: 1px solid #444;
+        }
+    """)
+    
     msg_box.exec()
 
 

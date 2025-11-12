@@ -1,33 +1,21 @@
-#!/usr/bin/env python
-# -*- encoding: utf-8 -*-
-"""
-@File    :   linking.py
-@Time    :   2025/04/10
-@Author  :   GeradeHouse
-@Version :   1.0
-@Desc    :   Logic for linking Spotify tracks to Tidal tracks
-"""
-
 import logging
-from typing import List, Optional, cast, Tuple, Dict, Any, Union
-import threading
 import re
+import threading
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
-# Import Qt components needed for the handler
+import aigpy
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
+
+from .enums import Type
+from .model import Artist, SearchResult, Track
+from .tidal import TidalAPI
+from tidal_dl.gui.gui_logging import setup_gui_logger
+
+# Set up GUI logging with ERROR level for this module
+setup_gui_logger(__name__, logging.ERROR)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
-
-# Set up GUI logging with ERROR level for this module
-from tidal_dl.gui.gui_logging import setup_gui_logger
-setup_gui_logger(__name__, logging.ERROR)
-
-from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot  # Added for LinkingWorker
-
-# Import project components
-from .model import Track, SearchResult, Artist
-from .enums import Type
-from .tidal import TidalAPI
 
 # Assuming aigpy is available
 try:
@@ -37,15 +25,9 @@ except ImportError:
         "aigpy.modelHelper could not be imported. Model casting might fail."
     )
 
-    # MODIFIED: Changed parameter name from 'model_type' to 'model' to fix Pylance warning
     def aigpy_dictToModel(indict: Any, model: Any) -> Any:
         return model  # Fallback for aigpy function
 
-
-# Forward declaration for type hinting MainView without circular import
-
-
-# Helper function to normalize titles (Removed duplicate definition)
 def normalize_title(title: Optional[str]) -> str:
     if not title:
         return ""

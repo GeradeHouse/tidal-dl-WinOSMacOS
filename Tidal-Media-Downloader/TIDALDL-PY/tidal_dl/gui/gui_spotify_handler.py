@@ -4,16 +4,12 @@ from typing import TYPE_CHECKING, Any, Optional, List, Dict, Union
 
 from PyQt6 import QtWidgets, QtCore
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, Qt
-from PyQt6.QtGui import QPixmap, QIcon, QFont
-from PyQt6.QtWidgets import QTreeWidgetItem, QMessageBox
 
 from ..spotify import SpotifyAPI
 from ..printf import Printf
 from ..tidal import Type, Track, TIDAL_API
-from .gui_utils import format_duration_ms
 from .gui_custom_dialog import ModernDarkDialog
 from .. import paths
-from ..persistence import LinkPersistenceManager
 
 if TYPE_CHECKING:
     from .gui import MainView

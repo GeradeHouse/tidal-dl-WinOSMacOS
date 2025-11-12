@@ -3,7 +3,6 @@
 import logging
 import os
 from typing import Optional, Callable
-from .. import paths
 
 from PyQt6.QtWidgets import (
     QDialog,
@@ -11,8 +10,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSizePolicy,
-    QSpacerItem,
     QWidget,
     QStyleOption,
     QStyle,

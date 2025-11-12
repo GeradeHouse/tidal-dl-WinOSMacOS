@@ -153,9 +153,20 @@ class TaskQueueManager(QObject):
             self.job_finished()
             return
 
+        # DEBUG: Track playlist data
+        logger.debug(f"🔴🔴🔴 TASK_QUEUE: Starting link job for playlist {playlist_id}")
+        logger.debug(f"🔴🔴🔴 TASK_QUEUE: Playlist data: {playlist_data}")
+
         # Fetch tracks in a separate thread
         def fetch_tracks_thread():
+            logger.debug(f"🔴🔴🔴 TASK_QUEUE: Fetching tracks for playlist {playlist_id}")
             tracks = self.main_view.spotify_api.get_playlist_tracks(playlist_id)
+            logger.debug(f"🔴🔴🔴 TASK_QUEUE: Fetched tracks: {len(tracks) if tracks else 0} tracks")
+            if tracks:
+                logger.debug(f"🔴🔴🔴 TASK_QUEUE: First track sample: {tracks[0] if tracks else 'None'}")
+            else:
+                logger.warning(f"🔴🔴🔴 TASK_QUEUE: No tracks found for playlist {playlist_id}")
+            
             # MODIFIED: Emit jobStarted signal from the main thread
             QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
                                             QtCore.Q_ARG(str, playlist_id),
@@ -179,7 +190,7 @@ class TaskQueueManager(QObject):
         for i, track_meta in enumerate(tracks):
             tracks_to_link_data.append((i, track_meta))
         
-        self.main_view.startLinkingWorker(tracks_to_link_data, on_finish_callback=self.job_finished)
+        self.main_view.startLinkingWorker(tracks_to_link_data, playlist_id, self.job_finished)
 
 
     def _execute_spotify_download_job(self, job: Dict[str, Any]):
@@ -261,7 +272,7 @@ class TaskQueueManager(QObject):
                     
                     self._start_download(final_download_list, playlist_data, quality)
 
-                self.main_view.startLinkingWorker(unlinked_tracks_for_worker, on_finish_callback=on_linking_done)
+                self.main_view.startLinkingWorker(unlinked_tracks_for_worker, playlist_id, on_linking_done)
 
             else:
                 logger.info("All tracks are already linked. Starting download.")

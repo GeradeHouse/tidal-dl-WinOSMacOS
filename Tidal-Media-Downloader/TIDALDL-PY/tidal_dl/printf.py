@@ -17,22 +17,14 @@ The module has been cleaned up to remove legacy CLI-only code and now focuses so
 
 from . import settings
 
-from pickle import GLOBAL
 import threading
 import aigpy
 
-aigpy.cmd.init(autoreset=True)  # Attempt to explicitly enable/initialize color output
+aigpy.cmd.init(autoreset=True)
 import logging
 import prettytable
-from .model import Track
-from typing import Optional, List, Dict, Any
-import logging
-
-from . import apiKey
-
-from .model import *
-from .paths import getProfilePath
-from .lang.language import *
+from .model import Track, Album, Artist, Playlist, Mix, StreamUrl
+from typing import Optional, List, Dict
 from .enums import AudioQuality
 
 

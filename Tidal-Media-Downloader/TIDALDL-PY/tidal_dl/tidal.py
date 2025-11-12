@@ -11,29 +11,49 @@ print("[DEBUG] Importing in tidal_dl/tidal.py")
 @Desc    :   tidal api
 """
 # @Modified by: GeradeHouse
+import base64
+import binascii
+import json
+import logging
+import os
 import random
 import re
+import requests
 import time
-import json
-import base64
-import binascii  # Added to handle binascii.Error
+import urllib3
+from io import BytesIO
+
+import aigpy
+from PIL import Image
 from typing import (
-    List,
     Any,
-    Union,
     cast,
-    Tuple,
     Dict,
+    List,
+    Literal,
     Optional,
     overload,
-    Literal,
+    Tuple,
+    Union,
 )
 from xml.etree import ElementTree as ET
 
-import os  # Needed for env overrides
-from . import apiKey  # Use the central table
-
-import logging
+from . import apiKey
+from .enums import AudioQuality, Type
+from .format import getAlbumPath, getTrackPath
+from .model import (
+    Album,
+    Artist,
+    Lyrics,
+    LoginKey,
+    Mix,
+    Playlist,
+    SearchResult,
+    StreamRespond,
+    StreamUrl,
+    Track,
+)
+from .settings import SETTINGS
 
 # Create a logger instance for this module
 logger = logging.getLogger(__name__)
@@ -52,44 +72,8 @@ def _setup_gui_logging():
 # Initialize GUI logging lazily
 _setup_gui_logging()
 
-from PIL import Image
-
-# import io # Removed unused import
-from io import BytesIO  # Explicit import for BytesIO
-
-import requests
-import urllib3  # Import urllib3 directly
-
-# Attempt to import aigpy directly, assuming it's installed or available
-try:
-    import aigpy
-except ImportError:
-    logger.error(
-        "Could not import the 'aigpy' library. Please ensure it is installed (`pip install aigpy`)."
-    )
-    raise
-
-from .model import (
-    Lyrics,
-    Mix,
-    SearchResult,
-    StreamUrl,
-    StreamRespond,
-    LoginKey,
-    Artist,
-    Album,
-    Track,
-    Playlist,
-)
-
-print("[DEBUG] tidal.py: about to import SETTINGS from .settings")
-from .settings import SETTINGS
-
-print("[DEBUG] tidal.py: successfully imported SETTINGS from .settings")
-from .enums import AudioQuality, Type
-from .format import getAlbumPath, getTrackPath
-
-
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # SSL Warnings | retry number
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 

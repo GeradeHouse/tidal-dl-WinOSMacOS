@@ -1,8 +1,7 @@
 # tidal_dl/gui/gui_player_logic.py
 
 import logging
-import time
-from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QUrl
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 from ..tidal import TidalAPI, AudioQuality
 from typing import Optional, Dict, Any
 

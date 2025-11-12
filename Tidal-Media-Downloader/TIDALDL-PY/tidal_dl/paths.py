@@ -1,18 +1,6 @@
-#!/usr/bin/env python
-# -*- encoding: utf-8 -*-
-"""
-@File    :  paths.py
-@Date    :  2022/06/10
-@Author  :  Yaronzz
-@Modified by: GeradeHouse
-@Version :  1.0
-@Contact :  yaronhuang@foxmail.com
-@Desc    :  Manages base application paths for config, tokens, and logs.
-@Modified by: Roo
-"""
+import logging
 import os
 import sys
-import logging
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -40,9 +28,6 @@ __all__ = [
     "get_user_download_path",
     "resource_path",
 ]
-
-# --- Helper Functions ---
-
 
 def _create_directory_if_not_exists(path: str) -> bool:
     """
@@ -76,10 +61,6 @@ def _create_directory_if_not_exists(path: str) -> bool:
     else:
         logger.debug(f"Directory '{path}' already exists.")
     return True
-
-
-# --- Base Directory and File Path Functions ---
-
 
 def __getBaseDirectory__():
     """
@@ -134,20 +115,17 @@ def __getBaseDirectory__():
     logger.debug(f"Running in development mode. Using current directory: {dev_dir}")
     return dev_dir
 
-
 def getLogPath():
     """Returns the full path for the log file."""
     path = os.path.join(__getBaseDirectory__(), ".tidal-dl.log")
     logger.debug(f"getLogPath() -> '{path}'")
     return path
 
-
 def getTokenPath():
     """Returns the full path for the token file."""
     path = os.path.join(__getBaseDirectory__(), ".tidal-dl.token.json")
     logger.debug(f"getTokenPath() -> '{path}'")
     return path
-
 
 def getProfilePath():
     """Returns the base directory used for profile files (settings, token, logs)."""
@@ -156,13 +134,11 @@ def getProfilePath():
     logger.debug(f"getProfilePath() -> '{path}'")
     return path
 
-
 def getSettingsFilePath():
     """Returns the full path to the settings file."""
     path = os.path.join(__getBaseDirectory__(), ".tidal-dl.json")
     logger.debug(f"getSettingsFilePath() -> '{path}'")
     return path
-
 
 def get_user_download_path(path_from_settings: str) -> str:
     """
@@ -193,10 +169,6 @@ def get_user_download_path(path_from_settings: str) -> str:
         f"directory to '{resolved_path}'."
     )
     return resolved_path
-
-
-# --- Resource Path Function (for bundled assets) ---
-
 
 def resource_path(relative_path: str) -> str:
     """

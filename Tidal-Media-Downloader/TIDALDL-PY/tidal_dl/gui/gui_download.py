@@ -239,7 +239,10 @@ class DownloadHandler(QObject):
         self.active_downloads: Dict[str, Dict[str, Any]] = {}
         self.download_thread: Optional[QThread] = None
         self.download_worker: Optional[DownloadWorker] = None
-        self._processed_count = 0 # MODIFIED: Add counter
+        # FIXED: Per-playlist counters to prevent cross-contamination
+        self._processed_counters: Dict[str, int] = {}
+        # CRITICAL FIX: Track which playlist is being processed
+        self._current_processing_playlist_id: Optional[str] = None
 
         table_widget = getattr(self.main_view, "tableWidget", None)
         if table_widget:
@@ -473,7 +476,18 @@ class DownloadHandler(QObject):
         quality_arg_str: Optional[str]
     ):
         self.main_view.download_active = True
-        self._processed_count = 0 # MODIFIED: Reset counter
+        # CRITICAL FIX: Store the playlist ID when download starts, before user can click other playlists
+        playlist_id = None
+        if isinstance(playlist_context, Playlist):
+            playlist_id = playlist_context.uuid
+        elif isinstance(playlist_context, dict) and playlist_context.get("type") == "spotify":
+            playlist_id = playlist_context.get("data", {}).get("id")
+        
+        self._current_processing_playlist_id = playlist_id
+        if playlist_id:
+            self._processed_counters[playlist_id] = 0
+            logger.debug(f"🔴🔴🔴 DOWNLOAD: Set _current_processing_playlist_id = {playlist_id}")
+        
         self.main_view.stop_event.clear()
         self.main_view.pause_event.set()
         self.main_view.download_paused = False
@@ -545,17 +559,19 @@ class DownloadHandler(QObject):
                 state["error"] = error_msg
         self.main_view.table_handler.mark_track_completed(track_id, ok, error_msg)
 
-        # MODIFIED: Increment counter and emit progress
-        self._processed_count += 1
-        playlist_context = state.get("playlist_context") if state else None
-        playlist_id = None
-        if isinstance(playlist_context, Playlist):
-            playlist_id = playlist_context.uuid
-        elif isinstance(playlist_context, dict): # Spotify playlist
-            playlist_id = playlist_context.get("data", {}).get("id")
+        # MODIFIED: Increment counter and emit progress  
+        # CRITICAL FIX: Use stored processing ID, not current selection which may have changed
+        processing_playlist_id = self._current_processing_playlist_id
         
-        if playlist_id:
-            self.downloadProgress.emit(str(playlist_id), self._processed_count)
+        if processing_playlist_id:
+            current_count = self._processed_counters.get(processing_playlist_id, 0) + 1
+            self._processed_counters[processing_playlist_id] = current_count
+            logger.error(f"🔴🔴🔴 DOWNLOAD: Emitting downloadProgress for processing playlist {processing_playlist_id} count {current_count}")
+            self.downloadProgress.emit(str(processing_playlist_id), current_count)
+        else:
+            # CRITICAL FIX: No fallback - this prevents cross-contamination
+            logger.error(f"🔴🔴🔴 DOWNLOAD CRITICAL: No processing playlist ID available - not emitting progress signal")
+            logger.error(f"🔴🔴🔴 DOWNLOAD SKIPPING: Track {track_id} finished but no valid processing playlist ID")
 
     def onPauseResumeClicked(self):
         if not self.main_view.download_active:
@@ -601,6 +617,12 @@ class DownloadHandler(QObject):
         self.main_view.download_paused = False
         self.main_view.stop_requested = False
         self.main_view.cancel_requested = False
+        
+        # CRITICAL FIX: Clean up the processing playlist ID
+        if self._current_processing_playlist_id:
+            logger.debug(f"🔴🔴🔴 DOWNLOAD: Cleaning up processing playlist ID: {self._current_processing_playlist_id}")
+            self._current_processing_playlist_id = None
+        
         self.download_thread = None
         self.download_worker = None
         self.active_downloads.clear()

@@ -9,16 +9,14 @@
 @Contact :   yaronhuang@foxmail.com
 @Desc    :
 """
-import json
-import os
-import aigpy
 import base64
+import json
 from typing import Optional, Union
 
-from .lang.language import *
+import aigpy
+
 from . import enums
-
-
+from .lang.language import getLang
 class Settings(aigpy.model.ModelBase):
     checkExist = True
     includeEP = True
@@ -131,12 +129,13 @@ class Settings(aigpy.model.ModelBase):
 
         from .lang.language import getLang
 
-        global LANG
         if not isinstance(self.language, str) or self.language.lower() not in [
             "english",
             "dutch",
         ]:
             self.language = "English"
+        
+        global LANG
         LANG = getLang(self.language.lower())
 
         # If the file was missing or corrupt, save the now-initialized and path-corrected settings

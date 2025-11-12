@@ -147,3 +147,6 @@ Tidal-Media-Downloader/.tidal-dl.token.json
 Tidal-Media-Downloader/*.xcf
 Tidal-Media-Downloader/test.py
 Tidal-Media-Downloader/.github/workflows/continuous-integration-workflow copy.yml
+docker-compose.yml
+.kilocodemodes
+.kilocode/mcp.json
