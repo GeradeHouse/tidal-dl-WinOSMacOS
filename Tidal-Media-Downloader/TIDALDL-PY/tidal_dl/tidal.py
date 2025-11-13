@@ -38,10 +38,10 @@ from typing import (
 )
 from xml.etree import ElementTree as ET
 
-from . import apiKey
-from .enums import AudioQuality, Type
-from .format import getAlbumPath, getTrackPath
-from .model import (
+from tidal_dl import apiKey
+from tidal_dl.enums import AudioQuality, Type
+from tidal_dl.format import getAlbumPath, getTrackPath
+from tidal_dl.model import (
     Album,
     Artist,
     Lyrics,
@@ -53,7 +53,7 @@ from .model import (
     StreamUrl,
     Track,
 )
-from .settings import SETTINGS
+from tidal_dl.settings import SETTINGS
 
 # Create a logger instance for this module
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ logger.setLevel(logging.ERROR)  # Set specific level for this module
 def _setup_gui_logging():
     """Lazy-load GUI logging setup to avoid circular imports."""
     try:
-        from .gui.gui_logging import setup_gui_logger
+        from tidal_dl.gui.gui_logging import setup_gui_logger
         setup_gui_logger(__name__, logging.INFO)
     except ImportError:
         # GUI logging not available during non-GUI operations (e.g., headless downloads)
@@ -1280,9 +1280,9 @@ def start_type(s_type: Type, item: Any):
     For simplicity, this function calls the 'start' function from the download module.
     """
     try:
-        from .download import start as start_download  # type: ignore[attr-defined]
+        from tidal_dl.download import start as start_download  # type: ignore[attr-defined]
     except ImportError as e:
-        logger.error(f"Failed to import start function from .download: {e}")
+        logger.error(f"Failed to import start function from tidal_dl.download: {e}")
         raise e
 
     start_download(item)

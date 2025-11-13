@@ -22,25 +22,25 @@ from PyQt6.QtCore import (
     QItemSelection,
     QItemSelectionModel,
 )  # Added Qt, QItemSelection, QItemSelectionModel
-from ..model import Track, Playlist  # Keep Track import, add Playlist
-from ..tidal import TidalAPI  # Keep TidalAPI
-from ..printf import Printf
-from ..persistence import LinkPersistenceManager  # Keep persistence
-from .gui_utils import show_info_message  # Utility for showing messages
-from .. import paths
+from tidal_dl.model import Track, Playlist  # Keep Track import, add Playlist
+from tidal_dl.tidal import TidalAPI  # Keep TidalAPI
+from tidal_dl.printf import Printf
+from tidal_dl.persistence import LinkPersistenceManager  # Keep persistence
+from tidal_dl.gui.gui_utils import show_info_message  # Utility for showing messages
+from tidal_dl import paths
 
 if TYPE_CHECKING:
-    from .gui import MainView  # Add MainView hint
-    from .gui_table_handler import TableHandler  # Add TableHandler hint
+    from tidal_dl.gui.gui import MainView  # Add MainView hint
+    from tidal_dl.gui.gui_table_handler import TableHandler  # Add TableHandler hint
 
     # Add SplitterTable import for type hinting
-    from .gui_table import SplitterTable
+    from tidal_dl.gui.gui_table import SplitterTable
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (linking operations need visibility)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 

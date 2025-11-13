@@ -8,18 +8,19 @@ from typing import TYPE_CHECKING, List, Dict, Any, Optional, Union, cast
 from PyQt6 import QtCore
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, Qt
 
-from ..tidal import Playlist, AudioQuality, Track, TIDAL_API, Type
-from ..printf import Printf
+# Local imports
+from tidal_dl.tidal import Playlist, AudioQuality, Track, TIDAL_API, Type
+from tidal_dl.printf import Printf
 import aigpy
 
 if TYPE_CHECKING:
-    from .gui import MainView
+    from tidal_dl.gui.gui import MainView
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (task operations need visibility)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 class TaskQueueManager(QObject):

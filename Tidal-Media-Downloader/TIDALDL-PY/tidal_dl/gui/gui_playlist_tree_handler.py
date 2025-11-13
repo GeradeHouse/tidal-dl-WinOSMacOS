@@ -53,20 +53,20 @@ from PyQt6.QtWidgets import (
 )
 
 # Import project components
-from ..tidal import TIDAL_API, Type, Playlist, AudioQuality, Track
-from ..printf import Printf
-from .gui_cover_cache import CoverArtWorker, CoverCache
-from ..settings import SETTINGS
+from tidal_dl.tidal import TIDAL_API, Type, Playlist, AudioQuality, Track
+from tidal_dl.printf import Printf
+from tidal_dl.gui.gui_cover_cache import CoverArtWorker, CoverCache
+from tidal_dl.settings import SETTINGS
 
-from .gui_playlist_tree import PlaylistTreeWidget
-from .gui_linking_handler import LinkingGuiHandler
-from .gui_playlist_item_widget import PlaylistItemProgressWidget
+from tidal_dl.gui.gui_playlist_tree import PlaylistTreeWidget
+from tidal_dl.gui.gui_linking_handler import LinkingGuiHandler
+from tidal_dl.gui.gui_playlist_item_widget import PlaylistItemProgressWidget
 
 if TYPE_CHECKING:
-    from .gui import MainView
-    from .gui_download import DownloadHandler  # Import Download Handler
-    from .task_queue_manager import TaskQueueManager # Import the new manager
-    from .gui_table_handler import TableHandler  # Import TableHandler to avoid circular dependency
+    from tidal_dl.gui.gui import MainView
+    from tidal_dl.gui.gui_download import DownloadHandler
+    from tidal_dl.gui.task_queue_manager import TaskQueueManager
+    from tidal_dl.gui.gui_table_handler import TableHandler
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Set specific level for this module
@@ -75,7 +75,7 @@ logger.setLevel(logging.DEBUG)  # Set specific level for this module
 def _setup_gui_logging():
     """Lazy-load GUI logging setup to avoid circular imports."""
     try:
-        from .gui_logging import setup_gui_logger
+        from tidal_dl.gui.gui_logging import setup_gui_logger
         setup_gui_logger(__name__, logging.INFO)
     except ImportError:
         # GUI logging not available during non-GUI operations (e.g., headless downloads)

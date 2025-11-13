@@ -5,20 +5,20 @@ from typing import TYPE_CHECKING, Any, Optional, List, Dict, Union
 from PyQt6 import QtWidgets, QtCore
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, Qt
 
-from ..spotify import SpotifyAPI
-from ..printf import Printf
-from ..tidal import Type, Track, TIDAL_API
-from .gui_custom_dialog import ModernDarkDialog
-from .. import paths
+from tidal_dl.spotify import SpotifyAPI
+from tidal_dl.printf import Printf
+from tidal_dl.tidal import Type, Track, TIDAL_API
+from tidal_dl.gui.gui_custom_dialog import ModernDarkDialog
+from tidal_dl import paths
 
 if TYPE_CHECKING:
-    from .gui import MainView
+    from tidal_dl.gui.gui import MainView
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (Spotify operations need visibility)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 
@@ -29,7 +29,7 @@ class SpotifyGuiHandler(QObject):
         self.spotify_api = spotify_api
 
     def loginSpotify(self, check_cache_only: bool = False):
-        from ..settings import SETTINGS
+        from tidal_dl.settings import SETTINGS
 
         if not SETTINGS.autoSpotifyLogin and check_cache_only:
             logger.info("Spotify auto-login is disabled. Skipping silent check.")

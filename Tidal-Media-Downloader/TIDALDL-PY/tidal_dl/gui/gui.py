@@ -42,46 +42,46 @@ from PyQt6.QtGui import (
 )
 from PyQt6 import QtWidgets, QtGui
 
-from .gui_play_bar import PlayBarWidget
-from .gui_player_logic import PlayerLogic
-from ..tidal import Track, Playlist, AudioQuality, Type, TIDAL_API
-from ..printf import Printf
-from .. import paths
-from ..settings import SETTINGS
-from ..linking import LinkingWorker
-from ..persistence import LinkPersistenceManager
-from .gui_cover_cache import CoverCache
-from ..spotify import SpotifyAPI
+from tidal_dl.gui.gui_play_bar import PlayBarWidget
+from tidal_dl.gui.gui_player_logic import PlayerLogic
+from tidal_dl.tidal import Track, Playlist, AudioQuality, Type, TIDAL_API
+from tidal_dl.printf import Printf
+from tidal_dl import paths
+from tidal_dl.settings import SETTINGS
+from tidal_dl.linking import LinkingWorker
+from tidal_dl.persistence import LinkPersistenceManager
+from tidal_dl.gui.gui_cover_cache import CoverCache
+from tidal_dl.spotify import SpotifyAPI
 
-from .gui_settings import SettingsPage
-from .gui_table import SplitterTable
-from .gui_title_bar import CustomTitleBar
-from .gui_auth_handler import AuthHandler
-from .gui_search_handler import SearchHandler
-from .gui_download import DownloadHandler
-from .gui_linking_handler import LinkingGuiHandler
-from .gui_spotify_handler import SpotifyGuiHandler
-from .gui_navigation import NavigationHandler
-from .gui_search import SearchBarWidget
-from .gui_playlist_tree import PlaylistTreeWidget
-from .gui_utils import show_info_message, enableGui, EmittingStream, append_text_to_output
-from .gui_resize_handler import ResizeHandler
-from .gui_event_handlers import MainViewEventHandlers
-from .task_queue_manager import TaskQueueManager # Import the new manager
-from .gui_logging import setup_gui_logger, get_gui_manager
+from tidal_dl.gui.gui_settings import SettingsPage
+from tidal_dl.gui.gui_table import SplitterTable
+from tidal_dl.gui.gui_title_bar import CustomTitleBar
+from tidal_dl.gui.gui_auth_handler import AuthHandler
+from tidal_dl.gui.gui_search_handler import SearchHandler
+from tidal_dl.gui.gui_download import DownloadHandler
+from tidal_dl.gui.gui_linking_handler import LinkingGuiHandler
+from tidal_dl.gui.gui_spotify_handler import SpotifyGuiHandler
+from tidal_dl.gui.gui_navigation import NavigationHandler
+from tidal_dl.gui.gui_search import SearchBarWidget
+from tidal_dl.gui.gui_playlist_tree import PlaylistTreeWidget
+from tidal_dl.gui.gui_utils import show_info_message, enableGui, EmittingStream, append_text_to_output
+from tidal_dl.gui.gui_resize_handler import ResizeHandler
+from tidal_dl.gui.gui_event_handlers import MainViewEventHandlers
+from tidal_dl.gui.task_queue_manager import TaskQueueManager # Import the new manager
+from tidal_dl.gui.gui_logging import setup_gui_logger, get_gui_manager
 
 if TYPE_CHECKING:
-    from .gui_table_handler import TableHandler
+    from tidal_dl.gui.gui_table_handler import TableHandler
 
 # FIX: Move imports from local (__init__) to module level for PyInstaller compatibility
-from .gui_playlist_tree_handler import PlaylistTreeHandler
-from .gui_table_handler import TableHandler
+from tidal_dl.gui.gui_playlist_tree_handler import PlaylistTreeHandler
+from tidal_dl.gui.gui_table_handler import TableHandler
 
 logger_gui = logging.getLogger(__name__)
 logger_gui.setLevel(logging.WARNING)
 
 # Set up GUI logging with INFO level for this module (GUI core operations)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 
@@ -659,7 +659,7 @@ class MainView(QWidget):
     @pyqtSlot(int)
     def on_font_size_changed(self, size: int):
         """Reapplies the global stylesheet with the new font size."""
-        from . import gui_app_setup
+        from tidal_dl.gui import gui_app_setup
         app = QApplication.instance()
         if app and isinstance(app, QApplication):
             logger_gui.info(f"Applying new font size from settings: {size}pt")
@@ -829,7 +829,7 @@ class MainView(QWidget):
 
 def main():
     """The main entry point for the GUI application."""
-    from . import gui_app_setup
+    from tidal_dl.gui import gui_app_setup
 
     gui_app_setup.initialize_settings_and_token()
     gui_app_setup.setup_global_exception_handler()

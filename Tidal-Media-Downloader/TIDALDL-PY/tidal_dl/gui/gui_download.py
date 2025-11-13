@@ -24,26 +24,26 @@ from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QThread, pyqtSlot
 from PyQt6.QtWidgets import QMenu, QTableWidgetItem, QMessageBox
 from PyQt6.QtGui import QAction
 
-from .gui_table import SplitterTable
-from ..printf import Printf
-from ..tidal import TIDAL_API, AudioQuality, Track, Album, Playlist, Artist
-from ..download import downloadTrack as core_downloadTrack
-from ..format import getAlbumPath, getPlaylistPath, getTrackPath
-from ..model import StreamUrl
-from ..settings import SETTINGS
-from .gui_utils import show_info_message, show_in_folder
-from .gui_custom_dialog import ModernDarkDialog
-from ..paths import resource_path
+from tidal_dl.gui.gui_table import SplitterTable
+from tidal_dl.printf import Printf
+from tidal_dl.tidal import TIDAL_API, AudioQuality, Track, Album, Playlist, Artist
+from tidal_dl.download import downloadTrack as core_downloadTrack
+from tidal_dl.format import getAlbumPath, getPlaylistPath, getTrackPath
+from tidal_dl.model import StreamUrl
+from tidal_dl.settings import SETTINGS
+from tidal_dl.gui.gui_utils import show_info_message, show_in_folder
+from tidal_dl.gui.gui_custom_dialog import ModernDarkDialog
+from tidal_dl.paths import resource_path
 
 if TYPE_CHECKING:
-    from .gui import MainView
+    from tidal_dl.gui.gui import MainView
 
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
 
 # Set up GUI logging with INFO level for this module (download operations need visibility)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 

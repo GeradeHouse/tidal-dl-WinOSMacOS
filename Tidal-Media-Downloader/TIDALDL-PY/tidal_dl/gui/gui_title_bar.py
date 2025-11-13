@@ -26,13 +26,13 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QPoint, QSize, pyqtSignal, QEvent, QObject
 from PyQt6.QtGui import QMouseEvent, QIcon, QPixmap, QCursor  # Add QCursor
 from typing import cast  # Add cast
-from .. import paths  # For resolving icon paths
+from tidal_dl import paths  # For resolving icon paths
 import os
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (title bar operations)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 

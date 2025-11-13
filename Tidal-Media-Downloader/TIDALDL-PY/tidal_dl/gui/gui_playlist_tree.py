@@ -30,13 +30,13 @@ from PyQt6.QtWidgets import (
     QLineEdit,  # <-- Add QLineEdit
 )
 
-from .. import paths
+from tidal_dl import paths
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 # Set up GUI logging with INFO level for this module (playlist operations need visibility)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 

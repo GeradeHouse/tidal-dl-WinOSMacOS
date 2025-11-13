@@ -70,10 +70,10 @@ from PyQt6.QtWidgets import (
 import aigpy
 
 # Local application imports
-from ..model import Track
-from ..printf import Printf
+from tidal_dl.model import Track
+from tidal_dl.printf import Printf
 
-# from ..tidal import TIDAL_API # TIDAL_API is not used directly in this file
+# from tidal_dl.tidal import TIDAL_API # TIDAL_API is not used directly in this file
 
 # --- Setup Logging ---
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ logger.setLevel(logging.WARNING)  # Set specific level for this module
 def _setup_gui_logging():
     """Lazy-load GUI logging setup to avoid circular imports."""
     try:
-        from .gui_logging import setup_gui_logger
+        from tidal_dl.gui.gui_logging import setup_gui_logger
         setup_gui_logger(__name__, logging.INFO)
     except ImportError:
         # GUI logging not available during non-GUI operations (e.g., headless downloads)

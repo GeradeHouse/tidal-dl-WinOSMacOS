@@ -2,7 +2,7 @@
 
 import logging
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer
-from ..tidal import TidalAPI, AudioQuality
+from tidal_dl.tidal import TidalAPI, AudioQuality
 from typing import Optional, Dict, Any
 
 # --- START: New Imports for ffpyplayer ---
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (player logic operations)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 class PlayerLogic(QObject):

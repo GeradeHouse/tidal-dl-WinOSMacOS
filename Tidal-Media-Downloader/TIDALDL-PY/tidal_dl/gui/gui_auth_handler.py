@@ -15,19 +15,19 @@ import time
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QDateTime, QThread
 
 # Import project components
-from ..login import initialize_and_login, getLoginUrl, pollForToken, saveToken
-from ..settings import SETTINGS
-from ..tidal import TIDAL_API
-from ..spotify import SpotifyAPI
-from ..printf import Printf
-from .gui_utils import show_info_message
-from .. import paths  # --- MODIFICATION: Import paths here ---
+from tidal_dl.login import initialize_and_login, getLoginUrl, pollForToken, saveToken
+from tidal_dl.settings import SETTINGS
+from tidal_dl.tidal import TIDAL_API
+from tidal_dl.spotify import SpotifyAPI
+from tidal_dl.printf import Printf
+from tidal_dl.gui.gui_utils import show_info_message
+from tidal_dl import paths  # --- MODIFICATION: Import paths here ---
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
 
 # Set up GUI logging with INFO level for this module (auth operations need visibility)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 
@@ -165,7 +165,7 @@ class AuthHandler(QObject):
         initialize_and_login()
         logger.debug("[AuthHandler] initialize_and_login() finished.")
 
-        from ..login import loginByConfig
+        from tidal_dl.login import loginByConfig
 
         logger.info("Checking initial login status...")
 

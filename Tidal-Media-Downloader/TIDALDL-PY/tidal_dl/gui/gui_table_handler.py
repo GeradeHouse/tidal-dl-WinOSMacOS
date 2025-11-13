@@ -17,11 +17,11 @@ from PyQt6 import QtCore, QtWidgets, QtGui
 from PyQt6.QtCore import QTimer, QObject, pyqtSlot, Qt, QPoint, pyqtSignal
 from PyQt6.QtWidgets import QTableWidgetItem, QProgressBar, QMenu
 
-from .gui_table import SplitterTable
-from ..tidal import Type, Track, Playlist, TIDAL_API
-from ..printf import Printf
-from .gui_utils import format_duration_ms
-from ..persistence import LinkPersistenceManager
+from tidal_dl.gui.gui_table import SplitterTable
+from tidal_dl.tidal import Type, Track, Playlist, TIDAL_API
+from tidal_dl.printf import Printf
+from tidal_dl.gui.gui_utils import format_duration_ms
+from tidal_dl.persistence import LinkPersistenceManager
 
 # Robust import alias for aigpy dictToModel
 try:
@@ -34,16 +34,16 @@ except Exception:  # pragma: no cover - environment dependent
 
 
 if TYPE_CHECKING:
-    from .gui import MainView
-    from .gui_download import DownloadHandler
-    from .gui_linking_handler import LinkingGuiHandler
+    from tidal_dl.gui.gui import MainView
+    from tidal_dl.gui.gui_download import DownloadHandler
+    from tidal_dl.gui.gui_linking_handler import LinkingGuiHandler
 
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
 
 # Set up GUI logging with INFO level for this module (table operations need visibility)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 MANUAL_LINK_REQUIRED_ROLE = Qt.ItemDataRole.UserRole + 100

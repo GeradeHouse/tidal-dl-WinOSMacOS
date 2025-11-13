@@ -210,6 +210,7 @@ catch {
 # Base arguments
 $pyinstallerArgs = @(
     # "--debug", "all", # Debug output PyiFrozenfinder logs ( Uncomment for debugging )
+    "--debug", "imports", # <-- UNCOMMENT AND CHANGE THIS LINE for import debugging
     "--noconfirm",    # Overwrite output directory without asking
     "-D",             # One-directory bundle
     $MainScript,

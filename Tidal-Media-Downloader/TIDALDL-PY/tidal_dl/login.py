@@ -9,12 +9,12 @@
 """
 import logging
 import time
-from .tidal import TIDAL_API
-from .settings import SETTINGS, TOKEN
-from .paths import getSettingsFilePath, getTokenPath
-from .printf import Printf
-from . import apiKey
-from .logging_config import setup_logging
+from tidal_dl.tidal import TIDAL_API
+from tidal_dl.settings import SETTINGS, TOKEN
+from tidal_dl.paths import getSettingsFilePath, getTokenPath
+from tidal_dl.printf import Printf
+from tidal_dl import apiKey
+from tidal_dl.logging_config import setup_logging
 
 __all__ = [
     "initialize_and_login",
@@ -34,7 +34,7 @@ logger.setLevel(logging.ERROR)  # Set specific level for this module
 def _setup_gui_logging():
     """Lazy-load GUI logging setup to avoid circular imports."""
     try:
-        from .gui.gui_logging import setup_gui_logger
+        from tidal_dl.gui.gui_logging import setup_gui_logger
         setup_gui_logger(__name__, logging.INFO)
     except ImportError:
         # GUI logging not available during non-GUI operations (e.g., headless downloads)
