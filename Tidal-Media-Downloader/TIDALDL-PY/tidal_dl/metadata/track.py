@@ -12,7 +12,7 @@ from .util import safe_get, typed
 logger = logging.getLogger("streamrip")
 
 # Set up GUI logging with DEBUG level for this module (metadata operations)
-from ..gui.gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger("streamrip", logging.DEBUG)
 
 

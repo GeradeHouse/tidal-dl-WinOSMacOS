@@ -3,6 +3,46 @@ print("[DEBUG] Importing in main.py")
 import os
 import sys
 print("[DEBUG] Finished importing os, sys in main.py")
+
+# --- START: PYINSTALLER RUNTIME DEBUGGING ---
+def print_pyinstaller_debug_info():
+    print("\n--- PYINSTALLER RUNTIME DEBUG ---")
+    print(f"Python Executable: {sys.executable}")
+    print(f"sys.frozen: {getattr(sys, 'frozen', 'Not frozen')}")
+    
+    # In a PyInstaller bundle, _MEIPASS is the temp directory where files are unpacked
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        print(f"sys._MEIPASS (Bundle Root): {meipass}")
+        print("--- Contents of _MEIPASS/tidal_dl/gui ---")
+        gui_path = os.path.join(meipass, 'tidal_dl', 'gui')
+        if os.path.exists(gui_path):
+            try:
+                # List all files in the bundled gui directory
+                for filename in sorted(os.listdir(gui_path)):
+                    print(f"  - {filename}")
+            except Exception as e:
+                print(f"  - Could not list directory contents: {e}")
+        else:
+            print("  - tidal_dl/gui directory NOT FOUND in bundle.")
+    
+    print("--- sys.path ---")
+    for p in sys.path:
+        print(f"  - {p}")
+    
+    print("--- Manual Import Test ---")
+    try:
+        # Attempt to import the problematic module directly
+        import tidal_dl.gui.gui_playlist_item_widget
+        print("  - SUCCESS: Manually imported tidal_dl.gui.gui_playlist_item_widget")
+    except ImportError as e:
+        print(f"  - FAILED to manually import: {e}")
+    except Exception as e:
+        print(f"  - FAILED with unexpected error: {e}")
+    print("--- END PYINSTALLER RUNTIME DEBUG ---\n")
+# --- END: PYINSTALLER RUNTIME DEBUGGING ---
+
+
 # --- START: Add FFmpeg Configuration for MoviePy ---
 # This must be done before any part of the app that might use moviepy.
 try:
@@ -34,6 +74,9 @@ except ImportError:
 # --- End Splash Screen Integration ---
 
 def main():
+    # Call the debug info function at the very start
+    print_pyinstaller_debug_info()
+
     # Add package path for tidal_dl so it can be imported correctly.
     base_dir = os.path.dirname(os.path.abspath(__file__))
     package_path = os.path.join(base_dir, "TIDALDL-PY")

@@ -552,6 +552,7 @@ class PlaylistTreeHandler(QObject):
             self.tidal_root_item.setText(0, f"Tidal Playlists ({playlist_count})")
 
         if playlists:
+            widget_count = 0
             for playlist_summary in playlists:
                 item = QTreeWidgetItem(self.tidal_root_item)
                 playlist_name = getattr(playlist_summary, "title", "Untitled Playlist")
@@ -568,6 +569,19 @@ class PlaylistTreeHandler(QObject):
                 self.tree_widget.setItemWidget(item, 0, widget)
                 self.id_to_item[str(playlist_uuid)] = item
                 self.item_widgets[str(playlist_uuid)] = widget
+                widget_count += 1
+                
+                # Force widget layout update after setting as item widget
+                widget.updateGeometry()
+                try:
+                    layout = widget.layout()
+                    if layout is not None:
+                        layout.invalidate()
+                        layout.activate()
+                except (AttributeError, RuntimeError):
+                    # Layout might not be available during initial widget setup
+                    # but we still need to trigger layout recalculation through updateGeometry()
+                    pass
                 
                 # Connect geometry signal to resize handler
                 widget.geometryRequest.connect(partial(self._on_widget_geometry_request, str(playlist_uuid)))
@@ -624,6 +638,9 @@ class PlaylistTreeHandler(QObject):
                         item_id=playlist_uuid,
                         image_url=None,
                     )
+            
+            if widget_count > 0:
+                logger.debug(f"🎯 WIDGETS: Created {widget_count} TIDAL playlist widgets")
 
         logger.info("TIDAL playlists refreshed.")
         self._apply_playlist_filter()
@@ -640,6 +657,7 @@ class PlaylistTreeHandler(QObject):
             self.spotify_root_item.setHidden(False)
 
             folder_items: Dict[str, QTreeWidgetItem] = {}
+            widget_count = 0
 
             for p_data in playlists:
                 if not (isinstance(p_data, dict) and "name" in p_data and "id" in p_data):
@@ -696,6 +714,29 @@ class PlaylistTreeHandler(QObject):
                 self.tree_widget.setItemWidget(item, 0, widget)
                 self.id_to_item[str(playlist_id)] = item
                 self.item_widgets[str(playlist_id)] = widget
+                widget_count += 1
+
+                # Force widget layout update after setting as item widget
+                widget.updateGeometry()
+                try:
+                    layout = widget.layout()
+                    if layout is not None:
+                        layout.invalidate()
+                        layout.activate()
+                except (AttributeError, RuntimeError):
+                    # Layout might not be available during initial widget setup
+                    # but we still need to trigger layout recalculation through updateGeometry()
+                    pass
+                
+                # Update item size hint and force tree widget refresh
+                item.setSizeHint(0, widget.sizeHint())
+                try:
+                    viewport = self.tree_widget.viewport()
+                    if viewport is not None:
+                        viewport.update()
+                except (AttributeError, RuntimeError):
+                    # Viewport might not be available during initial setup
+                    pass
 
                 # Connect geometry signal to resize handler
                 widget.geometryRequest.connect(partial(self._on_widget_geometry_request, str(playlist_id)))
@@ -787,6 +828,14 @@ class PlaylistTreeHandler(QObject):
     def onPlaylistItemClicked(self, item: QTreeWidgetItem, column: int) -> None:
         if not item or not item.data(0, Qt.ItemDataRole.UserRole):
             return
+
+        logger.debug(f"🎯🎯🎯 CLICK: Playlist item clicked: '{self._get_name_from_item(item)}'")
+        logger.debug(f"🎯🎯🎯 CLICK: Item data type: {type(item.data(0, Qt.ItemDataRole.UserRole))}")
+        logger.debug(f"🎯🎯🎯 CLICK: Item flags: {item.flags()}")
+        logger.debug(f"🎯🎯🎯 CLICK: Item is hidden: {item.isHidden()}")
+        logger.debug(f"🎯🎯🎯 CLICK: Item parent: {item.parent()}")
+        parent = item.parent()
+        logger.debug(f"🎯🎯🎯 CLICK: Item index: {parent.indexOfChild(item) if parent else 'No parent'}")
 
         item_data = item.data(0, Qt.ItemDataRole.UserRole)
 

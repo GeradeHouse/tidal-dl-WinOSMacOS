@@ -31,7 +31,7 @@ from PyQt6.QtCore import (
 # Import project components
 # from .gui_table import SplitterTable # Removed unused import
 # Import necessary models and API
-from ..tidal import (
+from tidal_dl.tidal import (
     Type,
     Track,
     Album,
@@ -42,14 +42,14 @@ from ..tidal import (
 )  # Keep models, add SearchResult
 
 # from ..tidal import AudioQuality # Removed unused import
-from ..printf import Printf
+from tidal_dl.printf import Printf
 
 # from .gui_utils import format_duration_ms # Removed unused import
 # from ..persistence import LinkPersistenceManager # Removed unused import
 
 # Forward declaration for type hinting
 if TYPE_CHECKING:
-    from .gui import MainView
+    from tidal_dl.gui.gui import MainView
 
     # from .gui_download import DownloadHandler # Removed unused import
     # from .gui_linking_handler import LinkingGuiHandler # Removed unused import
@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (search operations need visibility)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 

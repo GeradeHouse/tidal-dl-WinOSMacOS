@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
 
 # Set up GUI logging with INFO level for this module (auth operations need visibility)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 
@@ -164,7 +164,7 @@ class AuthHandler(QObject):
         initialize_and_login()
         logger.debug("[AuthHandler] initialize_and_login() finished.")
 
-        from ..login import loginByConfig
+        from tidal_dl.login import loginByConfig
 
         logger.info("Checking initial login status...")
 

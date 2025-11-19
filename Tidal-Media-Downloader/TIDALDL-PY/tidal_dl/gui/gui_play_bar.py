@@ -14,13 +14,13 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QPoint
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QPaintEvent
 
-from .. import paths  # For icon loading
+from tidal_dl import paths  # For icon loading
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (play bar operations)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 class PlayBarWidget(QWidget):

@@ -27,7 +27,7 @@ from .. import paths
 from .gui_custom_dialog import CustomQMessageBox
 
 if TYPE_CHECKING:
-    from .gui_settings import SettingsPage
+    from tidal_dl.gui.gui_settings import SettingsPage
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
@@ -37,7 +37,7 @@ logger.setLevel(logging.ERROR)  # Set specific level for this module
 def _setup_gui_logging():
     """Lazy-load GUI logging setup to avoid circular imports."""
     try:
-        from .gui_logging import setup_gui_logger
+        from tidal_dl.gui.gui_logging import setup_gui_logger
         setup_gui_logger(__name__, logging.INFO)
     except ImportError:
         # GUI logging not available during non-GUI operations (e.g., headless downloads)
@@ -222,7 +222,7 @@ def update_account_button(self: "SettingsPage"):
     "Disconnect" (when logged in).
     """
     assert self.btnAccount is not None
-    from ..events import loginByConfig
+    from tidal_dl.events import loginByConfig
 
     if loginByConfig():
         username = TOKEN.userid or "Account"
@@ -243,7 +243,7 @@ def toggle_account(self: "SettingsPage"):
     The login process uses a device code authentication flow where the user is
     presented with a URL to visit and a code to enter on the Tidal website.
     """
-    from ..events import loginByConfig
+    from tidal_dl.events import loginByConfig
 
     if not loginByConfig():
         # Not logged in: delegate to the AuthHandler to start the web login flow.

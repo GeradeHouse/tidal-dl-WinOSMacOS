@@ -38,30 +38,24 @@ Usage example:
 import os
 import logging
 from typing import List, Dict, Optional, Any
-from functools import partial  # Import partial for button connections
+from functools import partial
 
 # Third-party imports
 from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtCore import (
     Qt,
-    QRect,
-    QPoint,
-    QEvent,
-    QTimer,
     pyqtSignal,
     QItemSelection,
     QItemSelectionModel,
-    QSize,
     pyqtSlot,
 )
 from PyQt6.QtGui import (
     QMouseEvent,
     QKeyEvent,
-    QPaintEvent,
     QColor,
     QPalette,
     QFont,
-)  # Added QFont
+)
 from PyQt6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
@@ -72,15 +66,14 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
 )
-import aigpy  # type: ignore # Added for dictToModel
+import aigpy
 
 # Local application imports
-from ..model import Track, Album, Playlist, Artist  # Added missing models used later
-from ..printf import Printf  # Import Printf for formatDuration
+from tidal_dl.model import Track
+from tidal_dl.printf import Printf
 
-# from ..tidal import TIDAL_API # TIDAL_API is not used directly in this file
+# from tidal_dl.tidal import TIDAL_API # TIDAL_API is not used directly in this file
 
 # --- Setup Logging ---
 logger = logging.getLogger(__name__)
@@ -90,7 +83,7 @@ logger.setLevel(logging.WARNING)  # Set specific level for this module
 def _setup_gui_logging():
     """Lazy-load GUI logging setup to avoid circular imports."""
     try:
-        from .gui_logging import setup_gui_logger
+        from tidal_dl.gui.gui_logging import setup_gui_logger
         setup_gui_logger(__name__, logging.INFO)
     except ImportError:
         # GUI logging not available during non-GUI operations (e.g., headless downloads)
@@ -1125,10 +1118,6 @@ class SplitterTable(QtWidgets.QTableWidget):
         self._initial_widths_on_press = []
 
     # Removed eventFilter method as it's replaced by signal handling
-
-
-from typing import Optional
-from PyQt6 import QtWidgets, QtGui, QtCore
 
 
 class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):

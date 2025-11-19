@@ -10,14 +10,14 @@
 @Desc    :   Initialization of tidal_dl package
 """
 # Import necessary components for package-level access
-from .events import *
-from .settings import SETTINGS, TOKEN
-from .paths import getSettingsFilePath, getTokenPath
-from .printf import Printf
-from .tidal import TIDAL_API, AudioQuality, Type
-from .download import downloadTracks as start
-from . import apiKey
-from . import login
+from tidal_dl.events import *
+from tidal_dl.settings import SETTINGS, TOKEN
+from tidal_dl.paths import getSettingsFilePath, getTokenPath
+from tidal_dl.printf import Printf
+from tidal_dl.tidal import TIDAL_API, AudioQuality, Type
+from tidal_dl.download import downloadTracks as start
+from tidal_dl import apiKey
+from tidal_dl import login
 
 __all__ = [
     "SETTINGS",

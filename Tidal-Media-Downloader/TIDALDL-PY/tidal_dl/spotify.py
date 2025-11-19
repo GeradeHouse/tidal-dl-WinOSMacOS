@@ -14,8 +14,6 @@ import os
 import logging
 import time
 import requests
-import threading
-from io import BytesIO  # Needed for loading image data
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
@@ -78,26 +76,12 @@ logger.info(
 # --- End Monkey Patch ---
 
 # Import necessary components from the project
-from tidal_dl.settings import SETTINGS  # Import the singleton instance
-from tidal_dl.paths import getProfilePath  # Import function to get profile directory
-from tidal_dl.printf import Printf  # For logger/output
-import aigpy  # For directory creation
+from tidal_dl.settings import SETTINGS
+from tidal_dl.paths import getProfilePath
+import aigpy
 
-# Import Qt components needed for the handler
-from PyQt6 import QtWidgets, QtCore
-from PyQt6.QtGui import QPixmap, QIcon  # +++ Import QPixmap and QIcon +++
-from PyQt6.QtWidgets import QTreeWidgetItem
-
-from tidal_dl.tidal import TIDAL_API, Track  # +++ Import global TIDAL_API and Track +++
-from PyQt6.QtCore import (
-    QObject,
-    QRunnable,
-    pyqtSignal,
-    pyqtSlot,
-)  # +++ Import Qt threading components +++
-
-# Forward declaration for type hinting MainView without circular import
-from typing import Optional, List  # Keep Optional, List
+from tidal_dl.tidal import TIDAL_API, Track
+from typing import Optional
 
 # TODO: Define necessary scopes for reading playlists
 SPOTIFY_SCOPES = "playlist-read-private playlist-read-collaborative"

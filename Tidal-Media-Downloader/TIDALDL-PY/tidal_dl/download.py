@@ -1,5 +1,3 @@
-# --- START OF FILE download.py ---
-
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 """
@@ -10,51 +8,34 @@
 @Version :   1.0
 @Contact :   yaronhuang@foxmail.com
 @Desc    :   Core download module for Tidal Media Downloader.
-This module handles downloading and processing of Tidal media content including tracks,
-album covers, and album information. It supports various audio quality levels
-from standard to hi-res, handles proper metadata tagging, and manages decryption of
-protected content. Features include multi-threading capability, download progress tracking,
-pause/resume functionality, and format conversion (particularly for hi-res content delivered
-in MP4 containers). The module integrates with ffmpeg for media processing and uses
-mutagen for metadata validation. Error handling includes extensive logging for debugging
-and troubleshooting download issues.
 """
 
-# Import AudioFileClip from the correct path in moviepy 2.x
-# The old moviepy.editor module was removed in version 2.x
-from moviepy.audio.io.AudioFileClip import AudioFileClip
-
-from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Union, List, Dict, Any, cast
-import os
-import logging
-import tempfile
-
-# Removed sys import as it's no longer needed here
-# Removed ColorFormatter and logging setup - now handled in logging_config.py
-
-import traceback
-import subprocess
+import asyncio
 import json
-from .decryption import *
-from .printf import *
+import logging
+import os
+import subprocess
+import tempfile
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
-# Moved Track import to top level
-from .model import Track, Album, Playlist, Artist, StreamUrl
-from .tidal import *  # Imports TIDAL_API, SETTINGS, AudioQuality, VideoQuality, Type
-from .format import getTrackPath, getAlbumPath
-import aigpy  # Imports aigpy.path, aigpy.file, aigpy.net, aigpy.string, aigpy.tag, aigpy.m3u8, aigpy.download
-
-# Import mutagen for detailed file inspection.
+import aigpy
+from moviepy.audio.io.AudioFileClip import AudioFileClip
 from mutagen import File as MutagenFile
 
-# Add these imports for the new streamrip tagging engine
-import asyncio
-import tempfile
+from .decryption import *
+from .format import getAlbumPath, getTrackPath
 from .metadata.album import AlbumMetadata
 from .metadata.track import TrackMetadata
 from .metadata.tagger import tag_file
-# End of new imports
+from .model import Album, Artist, Playlist, StreamUrl, Track
+from .printf import *
+from .tidal import TIDAL_API, SETTINGS, AudioQuality, Type
+
+if TYPE_CHECKING:
+    from tidal_dl.gui.gui import MainView  # type: ignore
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
@@ -71,13 +52,6 @@ def _setup_gui_logging():
 
 # Initialize GUI logging lazily
 _setup_gui_logging()
-
-# Forward declaration for type hinting MainView without circular import
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    # Ensure MainView import is ONLY here
-    from tidal_dl.gui.gui import MainView  # type: ignore # Suppress Pylance warning about unknown import symbol
 
 
 def log_ffprobe_info(filepath: str, stage_name: str):

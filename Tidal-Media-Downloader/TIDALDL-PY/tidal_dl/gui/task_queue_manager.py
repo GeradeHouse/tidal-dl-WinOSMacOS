@@ -8,18 +8,19 @@ from typing import TYPE_CHECKING, List, Dict, Any, Optional, Union, cast
 from PyQt6 import QtCore
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, Qt
 
-from ..tidal import Playlist, AudioQuality, Track, TIDAL_API, Type
-from ..printf import Printf
+# Local imports
+from tidal_dl.tidal import Playlist, AudioQuality, Track, TIDAL_API, Type
+from tidal_dl.printf import Printf
 import aigpy
 
 if TYPE_CHECKING:
-    from .gui import MainView
+    from tidal_dl.gui.gui import MainView
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (task operations need visibility)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 class TaskQueueManager(QObject):
@@ -153,9 +154,20 @@ class TaskQueueManager(QObject):
             self.job_finished()
             return
 
+        # DEBUG: Track playlist data
+        logger.debug(f"🔴🔴🔴 TASK_QUEUE: Starting link job for playlist {playlist_id}")
+        logger.debug(f"🔴🔴🔴 TASK_QUEUE: Playlist data: {playlist_data}")
+
         # Fetch tracks in a separate thread
         def fetch_tracks_thread():
+            logger.debug(f"🔴🔴🔴 TASK_QUEUE: Fetching tracks for playlist {playlist_id}")
             tracks = self.main_view.spotify_api.get_playlist_tracks(playlist_id)
+            logger.debug(f"🔴🔴🔴 TASK_QUEUE: Fetched tracks: {len(tracks) if tracks else 0} tracks")
+            if tracks:
+                logger.debug(f"🔴🔴🔴 TASK_QUEUE: First track sample: {tracks[0] if tracks else 'None'}")
+            else:
+                logger.warning(f"🔴🔴🔴 TASK_QUEUE: No tracks found for playlist {playlist_id}")
+            
             # MODIFIED: Emit jobStarted signal from the main thread
             QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
                                             QtCore.Q_ARG(str, playlist_id),
@@ -179,7 +191,7 @@ class TaskQueueManager(QObject):
         for i, track_meta in enumerate(tracks):
             tracks_to_link_data.append((i, track_meta))
         
-        self.main_view.startLinkingWorker(tracks_to_link_data, on_finish_callback=self.job_finished)
+        self.main_view.startLinkingWorker(tracks_to_link_data, playlist_id, self.job_finished)
 
 
     def _execute_spotify_download_job(self, job: Dict[str, Any]):
@@ -261,7 +273,7 @@ class TaskQueueManager(QObject):
                     
                     self._start_download(final_download_list, playlist_data, quality)
 
-                self.main_view.startLinkingWorker(unlinked_tracks_for_worker, on_finish_callback=on_linking_done)
+                self.main_view.startLinkingWorker(unlinked_tracks_for_worker, playlist_id, on_linking_done)
 
             else:
                 logger.info("All tracks are already linked. Starting download.")

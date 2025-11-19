@@ -29,17 +29,17 @@ from ..persistence import LinkPersistenceManager  # Keep persistence
 from .gui_custom_dialog import CustomQMessageBox
 
 if TYPE_CHECKING:
-    from .gui import MainView  # Add MainView hint
-    from .gui_table_handler import TableHandler  # Add TableHandler hint
+    from tidal_dl.gui.gui import MainView  # Add MainView hint
+    from tidal_dl.gui.gui_table_handler import TableHandler  # Add TableHandler hint
 
     # Add SplitterTable import for type hinting
-    from .gui_table import SplitterTable
+    from tidal_dl.gui.gui_table import SplitterTable
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (linking operations need visibility)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 
@@ -50,7 +50,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
     """
 
     requestLinkingStart = pyqtSignal(
-        list, object # MODIFIED: Add callback
+        list, str, object  # MODIFIED: tracks_to_link_data, playlist_id, callback
     )
     manualLinkApplied = pyqtSignal(
         int
@@ -71,7 +71,10 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         self.persistence_manager = persistence_manager
         self.link_button = link_button
         self.main_view = parent  # Assuming parent is the MainView instance
-        self._processed_count = 0 # MODIFIED: Add counter
+        # FIXED: Per-playlist counters to prevent cross-contamination
+        self._processed_counters: Dict[str, int] = {}
+        # CRITICAL FIX: Track which playlist is being processed
+        self._current_processing_playlist_id: Optional[str] = None
         # Connect manual link application to sub-row collapse
         self.manualLinkApplied.connect(self.table_handler.collapse_sub_row)
 
@@ -350,8 +353,18 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         logger.debug(
             f"Emitting requestLinkingStart signal with {len(tracks_to_link_data)} tracks."
         )
-        self._processed_count = 0 # MODIFIED: Reset counter
-        self.requestLinkingStart.emit(tracks_to_link_data, None)
+        # CRITICAL FIX: Store the playlist ID when linking starts, before user can click other playlists
+        playlist_id = None
+        if self.main_view and isinstance(self.main_view.s_playlist_obj, dict):
+            playlist_id = self.main_view.s_playlist_obj.get("data", {}).get("id")
+            self._current_processing_playlist_id = playlist_id  # CRITICAL: Store it!
+            logger.debug(f"🔴🔴🔴 STORING: Set _current_processing_playlist_id = {playlist_id} for playlist '{self.main_view.s_playlist_obj.get('data', {}).get('name')}'")
+            logger.debug(f"🔴🔴🔴 STORING: Current main_view.s_playlist_obj = {self.main_view.s_playlist_obj}")
+            logger.debug(f"🔴🔴🔴 TRACKING: _current_processing_playlist_id now = {self._current_processing_playlist_id}")
+        
+        if playlist_id:
+            self._processed_counters[playlist_id] = 0
+        self.requestLinkingStart.emit(tracks_to_link_data, playlist_id, None)
 
     def linkAllSpotifyTracks(self) -> None:
         """Initiates the track linking process for ALL Spotify tracks currently in the table."""
@@ -399,8 +412,18 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         logger.debug(
             f"Emitting requestLinkingStart signal with {len(tracks_to_link_data)} tracks for 'Link All'."
         )
-        self._processed_count = 0 # MODIFIED: Reset counter
-        self.requestLinkingStart.emit(tracks_to_link_data, None)
+        # CRITICAL FIX: Store the playlist ID when linking starts, before user can click other playlists
+        playlist_id = None
+        if self.main_view and isinstance(self.main_view.s_playlist_obj, dict):
+            playlist_id = self.main_view.s_playlist_obj.get("data", {}).get("id")
+            self._current_processing_playlist_id = playlist_id  # CRITICAL: Store it!
+            logger.debug(f"🔴🔴🔴 STORING: Set _current_processing_playlist_id = {playlist_id} for playlist '{self.main_view.s_playlist_obj.get('data', {}).get('name')}'")
+            logger.debug(f"🔴🔴🔴 STORING: Current main_view.s_playlist_obj = {self.main_view.s_playlist_obj}")
+            logger.debug(f"🔴🔴🔴 TRACKING: _current_processing_playlist_id now = {self._current_processing_playlist_id}")
+        
+        if playlist_id:
+            self._processed_counters[playlist_id] = 0
+        self.requestLinkingStart.emit(tracks_to_link_data, playlist_id, None)
 
     @pyqtSlot()
     def _handle_link_button_click(self):
@@ -545,9 +568,9 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         # For "auto_linked", "found_uncertain", and "manual_linked" (handled elsewhere)
         should_persist = link_status in ["auto_linked", "found_uncertain"]
         
-        # MODIFIED: Correctly get playlist_id for persistence and progress signal
-        playlist_id = None
-        if self.main_view and isinstance(self.main_view.s_playlist_obj, dict):
+        # MODIFIED: Fix cross-contamination by using stored processing playlist ID
+        playlist_id = self._current_processing_playlist_id
+        if not playlist_id and self.main_view and isinstance(self.main_view.s_playlist_obj, dict):
             playlist_id = self.main_view.s_playlist_obj.get("data", {}).get("id")
 
         if (
@@ -598,10 +621,15 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 )
         # --- End Persist Link ---
 
-        # MODIFIED: Increment counter and emit progress
-        self._processed_count += 1
-        if playlist_id:
-            self.linkProgress.emit(str(playlist_id), self._processed_count)
+        # FIXED: Only use stored processing ID to prevent cross-contamination
+        processing_playlist_id = self._current_processing_playlist_id
+        
+        if processing_playlist_id:
+            current_count = self._processed_counters.get(processing_playlist_id, 0) + 1
+            self._processed_counters[processing_playlist_id] = current_count
+            self.linkProgress.emit(str(processing_playlist_id), current_count)
+        else:
+            logger.warning(f"🔴🔴🔴 CRITICAL: No processing playlist ID available - this indicates a setup issue")
 
     @pyqtSlot(int, str)
     def onLinkingError(self, row_index: int, error_message: str) -> None:
@@ -624,18 +652,26 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 exc_info=True,
             )
         
-        # MODIFIED: Increment counter and emit progress even on error
-        self._processed_count += 1
-        if self.main_view and isinstance(self.main_view.s_playlist_obj, dict):
-            playlist_id = self.main_view.s_playlist_obj.get("data", {}).get("id")
-            if playlist_id:
-                self.linkProgress.emit(str(playlist_id), self._processed_count)
+        # FIXED: Increment counter for this specific playlist and emit progress even on error
+        # CRITICAL FIX: Use stored processing ID, not current selection which may have changed
+        processing_playlist_id = self._current_processing_playlist_id
+        if processing_playlist_id:
+            current_count = self._processed_counters.get(processing_playlist_id, 0) + 1
+            self._processed_counters[processing_playlist_id] = current_count
+            logger.debug(f"🔴 CRITICAL FIX: Emitting progress for processing playlist {processing_playlist_id} count {current_count} (ERROR)")
+            self.linkProgress.emit(str(processing_playlist_id), current_count)
 
     @pyqtSlot()
     def onAllLinkingTasksFinished(self) -> None:
         """Slot called when the LinkingWorker has processed all tracks."""
         logger.info("All linking tasks finished.")
         logger.info("Finished linking process for all selected/queued tracks.")
+        
+        # CRITICAL FIX: Clean up the processing playlist ID
+        if self._current_processing_playlist_id:
+            logger.debug(f"🔴 CRITICAL FIX: Cleaning up processing playlist ID: {self._current_processing_playlist_id}")
+            self._current_processing_playlist_id = None
+        
         # Update button state after linking finishes
         self.update_link_button_state()  # This updates the "Link Tracks" button
 
@@ -659,6 +695,12 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         if self.main_view.linking_active:
             logger.info("Stop linking requested by user.")
             logger.info("Stop linking requested...")
+            
+            # CRITICAL FIX: Clean up the processing playlist ID
+            if self._current_processing_playlist_id:
+                logger.debug(f"🔴 CRITICAL FIX: Cleaning up processing playlist ID on stop: {self._current_processing_playlist_id}")
+                self._current_processing_playlist_id = None
+            
             self.main_view.linking_stop_event.set()  # Signal the worker thread
             self.link_button.setText("Stopping...")
             self.link_button.setEnabled(False)  # Disable button while stopping

@@ -20,7 +20,7 @@ from .track import TrackMetadata
 logger = logging.getLogger("streamrip")
 
 # Set up GUI logging with DEBUG level for this module (metadata operations)
-from ..gui.gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger("streamrip", logging.DEBUG)
 
 FLAC_MAX_BLOCKSIZE = 16777215  # 16.7 MB

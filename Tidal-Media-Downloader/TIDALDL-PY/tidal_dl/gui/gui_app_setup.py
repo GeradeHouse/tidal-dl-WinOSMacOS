@@ -8,15 +8,16 @@
 @Contact :   gerade.house@gmail.com
 @Desc    :   Handles the setup, initialization, and global exception handling for the GUI application.
 """
-import sys
-import os
 import logging
-import traceback
+import os
+import sys
 import time
-from typing import Optional, Any, cast, TYPE_CHECKING
+import traceback
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, pyqtSlot, Qt
+from PyQt6.QtWidgets import QApplication, QMessageBox
 from PyQt6.QtGui import QIcon
 
 # Import project components
@@ -27,7 +28,7 @@ from ..logging_config import setup_logging as setup_logging_file
 from .gui_custom_dialog import CustomQMessageBox
 
 if TYPE_CHECKING:
-    from .gui import MainView
+    from tidal_dl.gui.gui import MainView
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)  # Set specific level for this module
@@ -36,7 +37,7 @@ logger.setLevel(logging.WARNING)  # Set specific level for this module
 def _setup_gui_logging():
     """Lazy-load GUI logging setup to avoid circular imports."""
     try:
-        from .gui_logging import setup_gui_logger
+        from tidal_dl.gui.gui_logging import setup_gui_logger
         setup_gui_logger(__name__, logging.INFO)
     except ImportError:
         # GUI logging not available during non-GUI operations (e.g., headless downloads)
@@ -154,7 +155,7 @@ def setup_logging(log_level: int = logging.INFO) -> None:
     logger = logging.getLogger(__name__)
     
     # Set up GUI logging with INFO level for this module (app setup operations need visibility)
-    from .gui_logging import setup_gui_logger
+    from tidal_dl.gui.gui_logging import setup_gui_logger
     setup_gui_logger(__name__, logging.INFO)
     logger.info("GUI logging configured.")
 
@@ -394,7 +395,7 @@ class AppRunner:
                 "Application has not been set up. Call setup() before run()."
             )
 
-        from .gui import MainView
+        from tidal_dl.gui.gui import MainView
 
         self.main_view = MainView()
         self.main_view.show()

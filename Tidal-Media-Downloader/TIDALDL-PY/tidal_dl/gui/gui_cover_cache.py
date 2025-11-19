@@ -9,20 +9,19 @@
 @Desc    :   Cover art cache for the Tidal-DL GUI
 """
 
-import requests
 import logging
 import pickle
 import threading
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict, Optional
+
+import requests
+from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QObject, pyqtSignal, QRunnable
+from PyQt6.QtGui import QPixmap
 from requests.exceptions import RequestException
 
-from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, QByteArray, QBuffer, QIODevice
-from PyQt6.QtGui import QPixmap
-
-from .. import TIDAL_API
-from ..model import Track, Album
-from ..settings import SETTINGS
+from tidal_dl import TIDAL_API
+from tidal_dl.settings import SETTINGS
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
@@ -32,7 +31,7 @@ logger.setLevel(logging.WARNING)
 def _setup_gui_logging():
     """Lazy-load GUI logging setup to avoid circular imports."""
     try:
-        from .gui_logging import setup_gui_logger
+        from tidal_dl.gui.gui_logging import setup_gui_logger
         setup_gui_logger(__name__, logging.INFO)
     except ImportError:
         # GUI logging not available during non-GUI operations (e.g., headless downloads)

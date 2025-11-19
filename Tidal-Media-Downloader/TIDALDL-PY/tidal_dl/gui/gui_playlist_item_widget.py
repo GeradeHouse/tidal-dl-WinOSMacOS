@@ -3,12 +3,15 @@
 import logging
 from typing import Optional
 
+from PyQt6 import QtWidgets
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
     QProgressBar,
+    QSizePolicy,
+    QTreeWidget,
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QFont, QIcon, QPixmap
@@ -45,6 +48,10 @@ class PlaylistItemProgressWidget(QWidget):
         self.icon_label = QLabel()
         self.icon_label.setFixedSize(22, 22)
         self.icon_label.setScaledContents(True)
+        self.icon_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Fixed
+        )
         top_row_layout.addWidget(self.icon_label)
 
         # --- Playlist Name Label ---
@@ -52,6 +59,10 @@ class PlaylistItemProgressWidget(QWidget):
         font = self.name_label.font()
         font.setWeight(QFont.Weight.Medium)
         self.name_label.setFont(font)
+        self.name_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed
+        )
         top_row_layout.addWidget(self.name_label)
         top_row_layout.addStretch()
 
@@ -59,6 +70,10 @@ class PlaylistItemProgressWidget(QWidget):
 
         # --- Status Container Widget (to be shown/hidden) ---
         self.status_container = QWidget()
+        self.status_container.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Minimum
+        )
         self.status_layout = QVBoxLayout(self.status_container)
         self.status_layout.setContentsMargins(35, 2, 0, 0)
         self.status_layout.setSpacing(2)
@@ -69,6 +84,10 @@ class PlaylistItemProgressWidget(QWidget):
         font.setPointSize(font.pointSize() - 2)
         self.status_label.setFont(font)
         self.status_label.setStyleSheet("color: #bbb;")
+        self.status_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed
+        )
         self.status_layout.addWidget(self.status_label)
 
         # Progress Bar and Percentage Layout
@@ -78,6 +97,10 @@ class PlaylistItemProgressWidget(QWidget):
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed
+        )
         self.progress_bar.setStyleSheet("""
             QProgressBar {
                 border: 1px solid #555;
@@ -98,6 +121,10 @@ class PlaylistItemProgressWidget(QWidget):
         self.percentage_label.setFixedWidth(35)
         self.percentage_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.percentage_label.setStyleSheet("color: #bbb;")
+        self.percentage_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Fixed
+        )
         progress_layout.addWidget(self.percentage_label)
 
         self.status_layout.addLayout(progress_layout)

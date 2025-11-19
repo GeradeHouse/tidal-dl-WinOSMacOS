@@ -92,7 +92,7 @@
 
     // make Pylance index the local packages first
     "python.analysis.extraPaths": [
-      "Tidal-Media-Downloader/TIDALDL-PY/tidal_dl",
+      "Tidal-Media-Downloader/TIDALDL-PY",
       "AIGPY"
     ],
 

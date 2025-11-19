@@ -48,18 +48,18 @@ from PyQt6.QtWidgets import (
 from typing import Optional, TYPE_CHECKING
 
 # Import helper modules for UI setup and event handling
-from . import gui_settings_setup
-from . import gui_settings_handlers
-from .gui_settings_widgets import CollapsibleSection  # Backward compatibility re-export
+from tidal_dl.gui import gui_settings_setup
+from tidal_dl.gui import gui_settings_handlers
+from tidal_dl.gui.gui_settings_widgets import CollapsibleSection  # Backward compatibility re-export
 
 if TYPE_CHECKING:
-    from .gui_auth_handler import AuthHandler
+    from tidal_dl.gui.gui_auth_handler import AuthHandler
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (settings operations need visibility)
-from .gui_logging import setup_gui_logger
+from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 # Main Settings Page widget that contains all settings UI elements
