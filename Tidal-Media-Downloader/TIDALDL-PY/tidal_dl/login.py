@@ -23,21 +23,19 @@ __all__ = [
     "loginByAccessToken",
     "getLoginUrl",
     "pollForToken",
-    "saveToken",  # --- MODIFICATION: Expose the new save function ---
+    "saveToken",
 ]
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (auth operations need visibility)
-# Set up GUI logging with INFO level for this modul- LAZY LOADED
 def _setup_gui_logging():
     """Lazy-load GUI logging setup to avoid circular imports."""
     try:
         from .gui.gui_logging import setup_gui_logger
         setup_gui_logger(__name__, logging.INFO)
     except ImportError:
-        # GUI logging not available during non-GUI operations (e.g., headless downloads)
         pass
 
 # Initialize GUI logging lazily
@@ -75,15 +73,43 @@ def initialize_and_login():
         logger.info("Could not log in with stored credentials.")
 
 
+def saveToken():
+    """
+    Saves the current session data from TIDAL_API.key to the TOKEN object and file.
+    """
+    try:
+        if TIDAL_API.key.userId:
+            TOKEN.userid = TIDAL_API.key.userId
+        if TIDAL_API.key.countryCode:
+            TOKEN.countryCode = TIDAL_API.key.countryCode
+        if TIDAL_API.key.accessToken:
+            TOKEN.accessToken = TIDAL_API.key.accessToken
+        
+        # Critical: Only update refresh token if the API session has one.
+        # If TIDAL_API.key.refreshToken is None (e.g. after loginByAccessToken), 
+        # we keep the existing TOKEN.refreshToken.
+        if TIDAL_API.key.refreshToken:
+            TOKEN.refreshToken = TIDAL_API.key.refreshToken
+            
+        if TIDAL_API.key.expiresIn:
+            TOKEN.expiresAfter = int(time.time()) + int(TIDAL_API.key.expiresIn)
+            
+        TOKEN.apiKeyIndex = SETTINGS.apiKeyIndex
+        TOKEN.save()
+        logger.info("TIDAL token data saved successfully.")
+    except Exception as e:
+        logger.error(f"Failed to save TIDAL token: {e}", exc_info=True)
+        logger.error(f"Could not save login session: {e}")
+
+
 def loginByConfig():
     """
     Attempts to log in using the stored session and access token.
-    Refreshes the token if it has expired.
+    Refreshes the token if it has expired or if verification fails (e.g. 401).
     """
     if TOKEN.accessToken is None:
         return False
 
-    # --- MODIFICATION START: Ensure expiresAfter is a number ---
     expires_after = 0
     if TOKEN.expiresAfter is not None:
         try:
@@ -91,36 +117,44 @@ def loginByConfig():
         except (ValueError, TypeError):
             expires_after = 0
 
-    if time.time() > expires_after:
+    # Helper function to handle refresh logic
+    def attempt_refresh():
         if TOKEN.refreshToken:
-            logger.info("Access token has expired, attempting to refresh...")
+            logger.info("Attempting to refresh token...")
             try:
-                # The TIDAL_API.apiKey should already be set by initialize_and_login
+                # Ensure API key is set (should be from initialize_and_login)
                 if TIDAL_API.refreshAccessToken(TOKEN.refreshToken):
-                    # --- MODIFICATION START: Use the new save function ---
                     saveToken()
-            
                     logger.info("Token refreshed successfully.")
                     return True
                 else:
                     logger.error("Failed to refresh token.")
-                    return False
             except Exception as e:
                 logger.error(f"An error occurred during token refresh: {e}")
-                return False
         else:
-            Printf.warning(
-                "Access token has expired and no refresh token is available."
-            )
-            return False
+            logger.warning("No refresh token available to refresh expired/invalid session.")
+        return False
 
+    # 1. Check time-based expiration
+    if time.time() > expires_after:
+        logger.info("Access token has expired (local time check).")
+        return attempt_refresh()
+
+    # 2. Try to verify the token with the API
     try:
         TIDAL_API.loginByAccessToken(TOKEN.accessToken, TOKEN.userid)
+        
+        # Restore refresh token to runtime key if missing (loginByAccessToken clears it)
+        if not TIDAL_API.key.refreshToken and TOKEN.refreshToken:
+            TIDAL_API.key.refreshToken = TOKEN.refreshToken
+            
         logger.info("Login successful using stored credentials.")
         return True
     except Exception as e:
-        logger.error(f"Login with stored token failed: {e}")
-        return False
+        # 3. Verification failed (e.g. 401 Unauthorized), try refresh
+        logger.warning(f"Login with stored token failed verification: {e}")
+        logger.info("Token verification failed. Attempting refresh...")
+        return attempt_refresh()
 
 
 def getLoginUrl():
@@ -175,25 +209,6 @@ def pollForToken():
         raise e
 
 
-# --- MODIFICATION START: Create a dedicated save function ---
-def saveToken():
-    """
-    Saves the current session data from TIDAL_API.key to the TOKEN object and file.
-    """
-    try:
-        TOKEN.userid = TIDAL_API.key.userId
-        TOKEN.countryCode = TIDAL_API.key.countryCode
-        TOKEN.accessToken = TIDAL_API.key.accessToken
-        TOKEN.refreshToken = TIDAL_API.key.refreshToken
-        TOKEN.expiresAfter = int(time.time()) + TIDAL_API.key.expiresIn
-        TOKEN.apiKeyIndex = SETTINGS.apiKeyIndex
-        TOKEN.save()
-        logger.info("TIDAL token data saved successfully.")
-    except Exception as e:
-        logger.error(f"Failed to save TIDAL token: {e}", exc_info=True)
-        logger.error(f"Could not save login session: {e}")
-
-
 def loginByWeb():
     """
     Initiates a web-based login flow. (Primarily for CLI)
@@ -229,9 +244,7 @@ def loginByWeb():
                 return False
 
             if status == "SUCCESS":
-                # --- MODIFICATION START: Use the new save function ---
                 saveToken()
-        
                 logger.info("Login successful!")
                 return True
             elif status == "PENDING":

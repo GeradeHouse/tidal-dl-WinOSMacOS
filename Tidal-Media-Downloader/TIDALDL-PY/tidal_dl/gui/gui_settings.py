@@ -109,6 +109,13 @@ class SettingsPage(QtWidgets.QWidget):
         self.btnAccount: Optional[QPushButton] = None
         self.chk_tidal_start_collapsed: Optional[QCheckBox] = None
         self.cmbApiKeyIndex: Optional[QComboBox] = None
+        
+        # --- NEW: Manual Token Widgets ---
+        self.accessTokenInput: Optional[QLineEdit] = None
+        self.btnBrowseToken: Optional[QPushButton] = None
+        self.btnLoginToken: Optional[QPushButton] = None
+        # ---------------------------------
+
         self.downloadPathInput: Optional[QLineEdit] = None
         self.browseButton: Optional[QPushButton] = None
         self.downloadPathEdit: Optional[QLineEdit] = None
@@ -217,3 +224,14 @@ class SettingsPage(QtWidgets.QWidget):
     def _handle_audio_quality_changed(self, index: int):
         """Updates the global audio quality setting."""
         gui_settings_handlers._handle_audio_quality_changed(self, index)
+
+    # --- NEW SLOTS ---
+    @pyqtSlot()
+    def browseToken(self):
+        """Opens file dialog to select a token json file."""
+        gui_settings_handlers.browse_token_file(self)
+
+    @pyqtSlot()
+    def loginToken(self):
+        """Attempts to login using the manually entered token."""
+        gui_settings_handlers.login_with_token(self)

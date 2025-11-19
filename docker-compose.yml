@@ -1,0 +1,19 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant_tidal-dl-winosmacos
+    ports:
+      - "6300:6333" # Docker will map this to a random available port on your host machine
+    volumes:
+      - qdrant_storage_tidal-dl-winosmacos:/qdrant/storage
+    restart: unless-stopped
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+volumes:
+  qdrant_storage_tidal-dl-winosmacos:

@@ -562,7 +562,13 @@ class TidalAPI(object):
                 return False
 
             self.key.accessToken = access_token
-            self.key.expiresIn = (expires_in or 0) + int(time.time())
+            # Store duration, not timestamp, to be consistent with checkAuthStatus and saveToken
+            self.key.expiresIn = expires_in if expires_in is not None else 0
+            
+            # Capture new refresh token if provided (rolling tokens)
+            new_refresh_token = result.get("refresh_token")
+            if new_refresh_token:
+                self.key.refreshToken = new_refresh_token
 
             # Update the persistent session with the new Bearer token
             self.session.headers.update({"authorization": f"Bearer {self.key.accessToken}"})

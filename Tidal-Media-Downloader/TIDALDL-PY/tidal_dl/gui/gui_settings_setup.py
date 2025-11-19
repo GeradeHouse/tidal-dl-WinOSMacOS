@@ -135,6 +135,13 @@ def initialize_controls(self: "SettingsPage"):
     # API Controls
     self.cmbApiKeyIndex = QtWidgets.QComboBox()
 
+    # --- NEW: Manual Token Controls ---
+    self.accessTokenInput = QLineEdit()
+    self.accessTokenInput.setPlaceholderText("Paste Access Token or Browse .json file")
+    self.btnBrowseToken = QPushButton("Browse")
+    self.btnLoginToken = QPushButton("Login with Token")
+    # ----------------------------------
+
     # Download Location Controls
     self.downloadPathInput = QLineEdit()
     self.downloadPathInput.setPlaceholderText("Select download directory")
@@ -194,6 +201,9 @@ def create_tidal_section(self: "SettingsPage"):
     assert self.btnAccount is not None
     assert self.cmbApiKeyIndex is not None
     assert self.chk_tidal_start_collapsed is not None
+    assert self.accessTokenInput is not None
+    assert self.btnBrowseToken is not None
+    assert self.btnLoginToken is not None
     assert self.mainLayout is not None
 
     tidal_icon_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons", "icon-white-rgb.png"))
@@ -212,6 +222,24 @@ def create_tidal_section(self: "SettingsPage"):
         self.cmbApiKeyIndex.addItem(f"{entry['platform']}: {entry['formats']}", idx)
     account_layout.addRow("API Key Profile:", self.cmbApiKeyIndex)
     account_layout.addRow("Start with Tidal playlists collapsed:", self.chk_tidal_start_collapsed)
+
+    # --- NEW: Manual Token Entry Layout ---
+    token_layout = QHBoxLayout()
+    token_layout.addWidget(self.accessTokenInput)
+    token_layout.addWidget(self.btnBrowseToken)
+    
+    # Connect signals
+    self.btnBrowseToken.clicked.connect(self.browseToken)
+    self.btnLoginToken.clicked.connect(self.loginToken)
+
+    account_layout.addRow("Manual Token:", token_layout)
+    
+    # Add Login button on a separate row, aligned right or stretched
+    login_btn_layout = QHBoxLayout()
+    login_btn_layout.addStretch()
+    login_btn_layout.addWidget(self.btnLoginToken)
+    account_layout.addRow("", login_btn_layout)
+    # --------------------------------------
 
     account_section.addLayout(account_layout)
     self.mainLayout.addWidget(account_section)

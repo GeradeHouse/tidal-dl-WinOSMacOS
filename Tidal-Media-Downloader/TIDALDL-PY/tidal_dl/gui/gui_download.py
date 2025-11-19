@@ -21,7 +21,7 @@ from typing import cast, List, Optional, Union, Any, Dict, Tuple, TYPE_CHECKING
 
 from PyQt6 import QtWidgets
 from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QThread, pyqtSlot
-from PyQt6.QtWidgets import QMenu, QTableWidgetItem, QMessageBox
+from PyQt6.QtWidgets import QMenu, QTableWidgetItem
 from PyQt6.QtGui import QAction
 
 from .gui_table import SplitterTable
@@ -31,8 +31,8 @@ from ..download import downloadTrack as core_downloadTrack
 from ..format import getAlbumPath, getPlaylistPath, getTrackPath
 from ..model import StreamUrl
 from ..settings import SETTINGS
-from .gui_utils import show_info_message, show_in_folder
-from .gui_custom_dialog import ModernDarkDialog
+from .gui_utils import show_in_folder
+from .gui_custom_dialog import ModernDarkDialog, CustomQMessageBox
 from ..paths import resource_path
 
 if TYPE_CHECKING:
@@ -287,22 +287,20 @@ class DownloadHandler(QObject):
         self, tracks_with_rows: List[Tuple[int, Track]], quality_enum: AudioQuality
     ):
         if self.main_view.download_active:
-            show_info_message(
+            CustomQMessageBox.information(
                 self.main_view,
                 "Download In Progress",
-                "Another download is already in progress.",
-                "",
-                icon_path=resource_path("assets/icons/info_icon.png")
+                "Download Already Active",
+                "Another download is already in progress."
             )
             return
 
         if not tracks_with_rows:
-            show_info_message(
+            CustomQMessageBox.information(
                 self.main_view,
                 "Download Error",
-                "Could not retrieve track information for download.",
-                "Please select valid tracks.",
-                icon_path=resource_path("assets/icons/error_icon.png")
+                "Track Info Missing",
+                "Could not retrieve track information for download. Please select valid tracks."
             )
             return
 
@@ -402,9 +400,8 @@ class DownloadHandler(QObject):
         if button_text == "Download Selected":
             selected_rows_indices = table.getSelectedRows()
             if not selected_rows_indices:
-                show_info_message(
-                    self.main_view, "Selection Error", "Please select rows first.", "",
-                    icon_path=resource_path("assets/icons/info_icon.png")
+                CustomQMessageBox.information(
+                    self.main_view, "Selection Error", "No Selection", "Please select rows first."
                 )
                 return
             for row_index in selected_rows_indices:
@@ -425,39 +422,29 @@ class DownloadHandler(QObject):
                     unlinked_tracks_exist = True
 
             if is_spotify_playlist and unlinked_tracks_exist:
-                msgBox = QMessageBox(self.main_view)
-                msgBox.setWindowTitle("Unlinked Tracks Found")
-                msgBox.setText("Some tracks aren’t available for download.")
-                msgBox.setInformativeText(
+                if not CustomQMessageBox.question(
+                    self.main_view,
+                    "Unlinked Tracks Found",
+                    "Some tracks aren't available for download.",
                     "Would you like to download only the linked tracks?"
-                )
-                continueButton = msgBox.addButton(
-                    "Continue", QMessageBox.ButtonRole.YesRole
-                )
-                cancelButton = msgBox.addButton(
-                    "Cancel", QMessageBox.ButtonRole.RejectRole
-                )
-                msgBox.exec()
-                if msgBox.clickedButton() == cancelButton:
+                ):
                     return
 
         if not tracks_to_download:
-            show_info_message(
+            CustomQMessageBox.information(
                 self.main_view,
                 "Download Error",
-                "No downloadable tracks found in selection.",
-                "",
-                icon_path=resource_path("assets/icons/error_icon.png")
+                "No Tracks Found",
+                "No downloadable tracks found in selection."
             )
             return
 
         if self.main_view.download_active:
-            show_info_message(
+            CustomQMessageBox.information(
                 self.main_view,
                 "Download In Progress",
-                "A download is already in progress.",
-                "",
-                icon_path=resource_path("assets/icons/info_icon.png")
+                "Download Already Active",
+                "A download is already in progress."
             )
             return
         
@@ -622,18 +609,13 @@ class DownloadHandler(QObject):
         else:
             # If not part of a queue, show the dialog as before
             if result:
-                info_icon_path = resource_path("assets/icons/success_icon.png")
-                custom_dialog = ModernDarkDialog(
-                    title="Info",
-                    main_message="Download finished successfully.",
-                    informative_text=f"Saved to: {path if path else 'N/A'}",
-                    icon_path=info_icon_path,
-                    parent=self.main_view,
-                    show_folder_path=path,
-                    show_in_folder_func=show_in_folder,
+                CustomQMessageBox.information(
+                    self.main_view,
+                    "Download Complete",
+                    "Download finished successfully.",
+                    f"Saved to: {path if path else 'N/A'}"
                 )
-                custom_dialog.exec()
             elif title in ["Download Stopped", "Download Cancelled", "Download Error"]:
-                show_info_message(self.main_view, title, msg or f"Download failed: {msg}", "", icon_path=resource_path("assets/icons/error_icon.png"))
+                CustomQMessageBox.information(self.main_view, title, "Download Status", msg or f"Download failed: {msg}")
             else:
-                show_info_message(self.main_view, "Download Failed", f"Download failed: {msg}", "", icon_path=resource_path("assets/icons/error_icon.png"))
+                CustomQMessageBox.information(self.main_view, "Download Failed", "Download Error", f"Download failed: {msg}")

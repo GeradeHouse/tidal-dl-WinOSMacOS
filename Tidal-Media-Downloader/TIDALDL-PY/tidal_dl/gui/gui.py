@@ -67,7 +67,8 @@ from .gui_spotify_handler import SpotifyGuiHandler
 from .gui_navigation import NavigationHandler
 from .gui_search import SearchBarWidget
 from .gui_playlist_tree import PlaylistTreeWidget
-from .gui_utils import show_info_message, enableGui, EmittingStream, append_text_to_output
+from .gui_utils import enableGui, EmittingStream, append_text_to_output
+from .gui_custom_dialog import CustomQMessageBox
 from .gui_resize_handler import ResizeHandler
 from .gui_event_handlers import MainViewEventHandlers
 from .task_queue_manager import TaskQueueManager # Import the new manager
@@ -819,16 +820,12 @@ def main():
         message = "GUI dependencies (PyQt6) are not installed or found. Cannot start graphical interface."
         logger_gui.error(message)
         try:
-            from PyQt6.QtWidgets import QMessageBox
-
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Icon.Critical)
-            msg_box.setText("Missing Dependencies")
-            msg_box.setInformativeText(
+            CustomQMessageBox.critical(
+                None,
+                "Error",
+                "Missing Dependencies",
                 f"{message}\nPlease run 'pip install PyQt6' to fix."
             )
-            msg_box.setWindowTitle("Error")
-            msg_box.exec()
         except ImportError:
             print(message, file=sys.stderr)
             print(

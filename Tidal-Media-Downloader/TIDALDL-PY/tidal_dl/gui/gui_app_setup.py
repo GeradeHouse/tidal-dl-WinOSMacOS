@@ -15,7 +15,7 @@ import traceback
 import time
 from typing import Optional, Any, cast, TYPE_CHECKING
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QObject, pyqtSignal, QRunnable, QThreadPool, pyqtSlot, Qt
 from PyQt6.QtGui import QIcon
 
@@ -24,6 +24,7 @@ from ..paths import getProfilePath, getSettingsFilePath, getTokenPath, resource_
 from ..settings import SETTINGS
 from ..login import TOKEN, initialize_and_login
 from ..logging_config import setup_logging as setup_logging_file
+from .gui_custom_dialog import CustomQMessageBox
 
 if TYPE_CHECKING:
     from .gui import MainView
@@ -50,14 +51,11 @@ def show_critical_error_dialog(
     title: str, text: str, informative_text: str, detailed_text: str
 ) -> None:
     """Displays a critical error message box."""
-    msg_box = QMessageBox()
-    msg_box.setIcon(QMessageBox.Icon.Critical)
-    msg_box.setText(f"<b>{title}</b>")
-    msg_box.setInformativeText(text)
-    msg_box.setDetailedText(detailed_text)
-    msg_box.setWindowTitle("Critical Error")
-    msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
-    msg_box.exec()
+    # Remove HTML tags from text for main_message
+    clean_text = text.replace("<b>", "").replace("</b>", "")
+    CustomQMessageBox.critical(
+        None, "Critical Error", title, f"{clean_text}\n\n{informative_text}\n\nDetails:\n{detailed_text}"
+    )
 
 
 def global_exception_handler(exctype: Any, value: Any, tb: Any) -> None:

@@ -1,5 +1,3 @@
-# file: gui_settings_handlers.py
-
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 """
@@ -13,15 +11,20 @@
 
 import logging
 import os
-from typing import TYPE_CHECKING, Optional
+import json
+import base64
+from typing import TYPE_CHECKING, Optional, Any, cast
 
 from PyQt6 import QtWidgets
-from PyQt6.QtWidgets import QMessageBox, QFileDialog
+from PyQt6.QtWidgets import QFileDialog
 
 from ..enums import Type
 from ..printf import Printf
 from ..settings import SETTINGS, TOKEN
-from ..tidal import AudioQuality
+from ..tidal import AudioQuality, TIDAL_API
+from ..login import saveToken, loginByConfig
+from .. import paths
+from .gui_custom_dialog import CustomQMessageBox
 
 if TYPE_CHECKING:
     from .gui_settings import SettingsPage
@@ -205,8 +208,8 @@ def load_initial_settings(self: "SettingsPage"):
     except Exception as e:
         # Log error but don't crash - use defaults if settings can't be loaded
         logger.error(f"Error loading initial settings: {e}", exc_info=True)
-        QMessageBox.warning(
-            self, "Settings Load Error", f"Could not load all settings: {e}"
+        CustomQMessageBox.warning(
+            self, "Settings Load Error", "Load Error", f"Could not load all settings: {e}"
         )
 
 
@@ -248,7 +251,7 @@ def toggle_account(self: "SettingsPage"):
         if self.auth_handler:
             self.auth_handler.start_tidal_web_login()
         else:
-            QMessageBox.critical(
+            CustomQMessageBox.critical(
                 self, "Login Error", "Authentication handler is not available."
             )
     else:
@@ -264,8 +267,8 @@ def toggle_account(self: "SettingsPage"):
         TOKEN.save()  # Save the cleared credentials
         # --- End Correction ---
         # Show confirmation message to user
-        QtWidgets.QMessageBox.information(
-            self, "Logout", "You have been disconnected."
+        CustomQMessageBox.information(
+            self, "Logout", "Logout Complete", "You have been disconnected."
         )
 
     # Update the button text to reflect the new login state
@@ -425,7 +428,7 @@ def save_settings(self: "SettingsPage"):
             logger.info("Spotify credentials updated in settings.")
 
         # Show confirmation message to user
-        QMessageBox.information(
+        CustomQMessageBox.information(
             self, "Settings Saved", "Settings have been saved and applied."
         )
 
@@ -439,7 +442,7 @@ def save_settings(self: "SettingsPage"):
 
     except Exception as e:
         # Show error dialog if settings couldn't be saved
-        QMessageBox.critical(self, "Error", f"Error saving settings: {e}")
+        CustomQMessageBox.critical(self, "Error", f"Error saving settings: {e}")
 
 
 def toggle_spotify_help(self: "SettingsPage"):
@@ -448,7 +451,6 @@ def toggle_spotify_help(self: "SettingsPage"):
     assert self.scrollArea is not None
     assert self.spotify_section is not None
     assert self.lblSpotifyHelp is not None
-    assert self.mainLayout is not None
     assert self.btnSpotifyHelp is not None
 
     # Use the stored self.scrollArea instance
@@ -557,9 +559,13 @@ def toggle_path_format_help(self: "SettingsPage"):
     self.lblPathFormatHelp.setVisible(not current_visibility)
 
     if self.lblPathFormatHelp.isVisible():
-        self.btnPathFormatHelp.setText("Formatting Placeholders (Hide)")  # MODIFIED
+        self.btnPathFormatHelp.setText(
+            "Formatting Placeholders (Hide)"
+        )
     else:
-        self.btnPathFormatHelp.setText("Formatting Placeholders (Show)")  # MODIFIED
+        self.btnPathFormatHelp.setText(
+            "Formatting Placeholders (Show)"
+        )
 
     # If the section is currently expanded, tell it to update its content height.
     if self.paths_section and self.paths_section.is_expanded:
@@ -579,13 +585,16 @@ def toggle_path_format_help(self: "SettingsPage"):
 
         logger.debug(
             f"[togglePathFormatHelp] After toggle: lblPathFormatHelp.isVisible={self.lblPathFormatHelp.isVisible()}, "
-            f"paths_section.sizeHint={paths_section_size_hint_str}, "
+            f'paths_section.sizeHint={paths_section_size_hint_str}, '
             f"scroll_widget.sizeHint={scroll_widget_size_hint_str}"
         )
     else:
         logger.debug(
             f"[togglePathFormatHelp] After toggle: lblPathFormatHelp.isVisible={self.lblPathFormatHelp.isVisible()}, "
-            f'paths_section.sizeHint={self.paths_section.sizeHint() if self.paths_section else "N/A"}, '
+            f"scroll_widget.sizeHint=N/A (scrollArea is None)"
+        )
+        logger.debug(
+            f"[togglePathFormatHelp] After toggle: lblPathFormatHelp.isVisible=True, "
             f"scroll_widget.sizeHint=N/A (scrollArea is None)"
         )
 
@@ -604,4 +613,151 @@ def _handle_audio_quality_changed(self: "SettingsPage", index: int):
     else:
         logger.error(
             f"Invalid data type retrieved from audio quality combobox at index {index}: {type(selected_quality)}"
+        )
+
+
+# --- NEW: Manual Token Handlers ---
+
+def browse_token_file(self: "SettingsPage"):
+    """
+    Opens a file dialog to select a token JSON file and populates the input field with its content.
+    """
+    assert self.accessTokenInput is not None
+    
+    fname, _ = QFileDialog.getOpenFileName(
+        self, 
+        "Open Token File", 
+        "", 
+        "JSON Files (*.json);;All Files (*)"
+    )
+    
+    if fname:
+        try:
+            with open(fname, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            
+            # Just set the content directly. login_with_token will handle parsing.
+            self.accessTokenInput.setText(content)
+            
+        except Exception as e:
+            logger.error(f"Error reading token file: {e}")
+            CustomQMessageBox.critical(self, "Error", f"Failed to read file: {e}")
+
+
+def login_with_token(self: "SettingsPage"):
+    """
+    Parses the token input (Raw string, JSON, or Base64-encoded JSON),
+    updates the global TOKEN settings, and attempts to log in.
+    """
+    assert self.accessTokenInput is not None
+    
+    input_str = self.accessTokenInput.text().strip()
+    if not input_str:
+        CustomQMessageBox.warning(self, "Input Error", "Please enter a token string or browse for a file.")
+        return
+
+    # 1. Try to decode/parse the input into a dictionary
+    token_data = {}
+    
+    # Is it Base64 encoded JSON? (Standard .tidal-dl.token.json format)
+    try:
+        # Try decoding base64
+        decoded_bytes = base64.b64decode(input_str)
+        decoded_str = decoded_bytes.decode('utf-8')
+        # Try parsing result as JSON
+        json_data = json.loads(decoded_str)
+        if isinstance(json_data, dict):
+            token_data = json_data
+    except Exception:
+        # Not Base64 encoded JSON.
+        pass
+
+    # If not found yet, is it plain JSON?
+    if not token_data:
+        try:
+            json_data = json.loads(input_str)
+            if isinstance(json_data, dict):
+                token_data = json_data
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Update global TOKEN object
+    # Cast TOKEN to Any to avoid Pylance errors due to None initialization in settings.py
+    token_obj = cast(Any, TOKEN)
+
+    if token_data:
+        # We found structured data
+        logger.info("Parsed structured token data from input.")
+        
+        # Update fields if they exist in the data
+        if 'accessToken' in token_data:
+            token_obj.accessToken = token_data['accessToken']
+        if 'refreshToken' in token_data:
+            token_obj.refreshToken = token_data['refreshToken']
+        if 'userid' in token_data:
+            token_obj.userid = token_data['userid']
+        if 'countryCode' in token_data:
+            token_obj.countryCode = token_data['countryCode']
+        if 'expiresAfter' in token_data:
+            token_obj.expiresAfter = token_data['expiresAfter']
+            
+        # Also check for camelCase vs lowercase variations if needed, but standard is camelCase
+    else:
+        # Assume raw access token string
+        logger.info("Treating input as raw access token.")
+        token_obj.accessToken = input_str
+        # If raw token provided, we don't have a refresh token. 
+        # We shouldn't necessarily clear the existing one unless we want to force a clean state.
+        # But usually manual entry implies "use this specific credential".
+        # Let's keep it simple: just set access token.
+
+    # 3. Save to disk immediately to persist the manual entry
+    TOKEN.save()
+
+    # 4. Attempt login using the standard flow
+    # loginByConfig handles verification and refreshing (if refresh token exists)
+    try:
+        success = loginByConfig()
+        
+        if success:
+            update_account_button(self)
+            CustomQMessageBox.information(
+                self,
+                "Success",
+                "Login Successful",
+                "You are now connected to Tidal."
+            )
+            self.accessTokenInput.clear()
+        else:
+            # If login failed, it might be because the token is expired and no refresh token was provided/valid.
+            msg = "Login failed."
+            if token_data and not token_data.get('refreshToken'):
+                msg += "\nThe provided token file did not contain a refresh token, and the access token appears to be expired."
+            elif not token_data:
+                msg += "\nThe provided string was treated as an access token but was rejected."
+            
+            CustomQMessageBox.critical(
+                self,
+                "Login Failed",
+                "Authentication Failed",
+                msg
+            )
+            
+    except Exception as e:
+        logger.error(f"Error during manual token login: {e}", exc_info=True)
+        
+        # Use custom dialog for error
+        error_icon_path = ""
+        try:
+            error_icon_path = paths.resource_path("assets/icons/error.png")
+            if not os.path.exists(error_icon_path):
+                 error_icon_path = paths.resource_path("assets/icons/info_icon.png")
+        except Exception:
+            error_icon_path = ""
+            
+        CustomQMessageBox.critical(
+            self,
+            "Login Failed",
+            "Connection Error",
+            f"Error: {e}"
         )

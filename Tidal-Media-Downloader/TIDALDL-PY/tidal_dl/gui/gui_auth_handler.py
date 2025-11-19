@@ -20,8 +20,7 @@ from ..settings import SETTINGS
 from ..tidal import TIDAL_API
 from ..spotify import SpotifyAPI
 from ..printf import Printf
-from .gui_utils import show_info_message
-from .. import paths  # --- MODIFICATION: Import paths here ---
+from .gui_custom_dialog import CustomQMessageBox
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
@@ -221,17 +220,14 @@ class AuthHandler(QObject):
 
     def _on_tidal_url_received(self, login_url: str):
         """Handle the successful retrieval of the TIDAL login URL."""
-        icon_path = paths.resource_path("assets/icons/info_icon.png")
         # --- MODIFICATION START ---
         # Ensure the href attribute contains the full, valid URL with the protocol.
         full_url = f"https://{login_url}"
-        show_info_message(
+        CustomQMessageBox.information(
             self._parent_widget,
             "TIDAL Login Required",
-            "Please visit the following URL in your browser to log in.",
-            f"URL: <a href='{full_url}'>{login_url}</a>\n\n"
-            f"You have 5 minutes to complete the login.",
-            icon_path=icon_path,
+            "Browser Login Required",
+            f"Please visit the following URL in your browser to log in.\n\nURL: <a href='{full_url}'>{login_url}</a>\n\nYou have 5 minutes to complete the login."
         )
         # --- MODIFICATION END ---
         # Start the dedicated polling worker in the background.
@@ -239,13 +235,11 @@ class AuthHandler(QObject):
 
     def _on_tidal_login_error(self, error_msg: str):
         """Handle errors during TIDAL login initiation."""
-        icon_path = paths.resource_path("assets/icons/info_icon.png")
-        show_info_message(
+        CustomQMessageBox.information(
             self._parent_widget,
             "TIDAL Login Error",
-            "An error occurred while trying to start the web login process.",
-            f"Details: {error_msg}",
-            icon_path=icon_path,
+            "Web Login Failed",
+            f"An error occurred while trying to start the web login process.\n\nDetails: {error_msg}"
         )
         self.tidalLoginFailure.emit(f"Error starting login: {error_msg}")
 
@@ -273,28 +267,25 @@ class AuthHandler(QObject):
 
     def _on_tidal_polling_finished(self, success: bool):
         """Handle the result of the token polling worker."""
-        icon_path = paths.resource_path("assets/icons/info_icon.png")
         if success:
             logger.info("TIDAL token polling successful!")
             # Save the token to file
             saveToken()
 
-            show_info_message(
+            CustomQMessageBox.information(
                 self._parent_widget,
                 "TIDAL Login Successful",
-                "You have successfully logged into TIDAL.",
-                "Ready to use the application.",
-                icon_path=icon_path,
+                "Login Completed",
+                "You have successfully logged into TIDAL.\n\nReady to use the application."
             )
             self.tidalLoginSuccess.emit()
         else:
             logger.error("TIDAL token polling failed or timed out.")
-            show_info_message(
+            CustomQMessageBox.information(
                 self._parent_widget,
                 "TIDAL Login Failed",
-                "The web login process failed or timed out after 5 minutes.",
-                "Please try logging in again.",
-                icon_path=icon_path,
+                "Authentication Failed",
+                "The web login process failed or timed out after 5 minutes.\n\nPlease try logging in again."
             )
             self.tidalLoginFailure.emit("Login failed or timed out.")
 

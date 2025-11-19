@@ -26,8 +26,7 @@ from ..model import Track, Playlist  # Keep Track import, add Playlist
 from ..tidal import TidalAPI  # Keep TidalAPI
 from ..printf import Printf
 from ..persistence import LinkPersistenceManager  # Keep persistence
-from .gui_utils import show_info_message  # Utility for showing messages
-from .. import paths
+from .gui_custom_dialog import CustomQMessageBox
 
 if TYPE_CHECKING:
     from .gui import MainView  # Add MainView hint
@@ -340,12 +339,11 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 )
 
         if not tracks_to_link_data:
-            show_info_message(
+            CustomQMessageBox.information(
                 self.main_view,
                 "Selection Error",
-                "No valid Spotify tracks were found in your selection.",
-                "Please ensure the selected tracks have complete metadata.",
-                icon_path=paths.resource_path("assets/icons/info_icon.png")
+                "No Valid Tracks",
+                "No valid Spotify tracks were found in your selection.\n\nPlease ensure the selected tracks have complete metadata."
             )
             return
 
@@ -390,12 +388,11 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                     )
 
         if not tracks_to_link_data:
-            show_info_message(
+            CustomQMessageBox.information(
                 self.main_view,
                 "No Tracks to Link",
-                "No Spotify tracks were found in the current table.",
-                "Please load a Spotify playlist to begin linking.",
-                icon_path=paths.resource_path("assets/icons/info_icon.png")
+                "No Spotify Tracks Found",
+                "No Spotify tracks were found in the current table.\n\nPlease load a Spotify playlist to begin linking."
             )
             return
 
@@ -818,7 +815,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
 
         if not playlist_id:
             logger.error("Cannot unlink tracks: could not determine playlist ID.")
-            show_info_message(self.main_view, "Error", "Could not determine the current playlist.", "", icon_path=paths.resource_path("assets/icons/error_icon.png"))
+            CustomQMessageBox.information(self.main_view, "Error", "Playlist Error", "Could not determine the current playlist.")
             return
 
         table = self.table_handler.table_widget

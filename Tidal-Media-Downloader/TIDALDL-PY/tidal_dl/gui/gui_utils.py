@@ -15,7 +15,7 @@ from typing import Optional
 import re
 
 from PyQt6.QtCore import QObject, pyqtSignal, Qt
-from PyQt6.QtWidgets import QMessageBox, QTreeWidgetItem, QTextEdit, QWidget, QLabel
+from PyQt6.QtWidgets import QTreeWidgetItem, QTextEdit, QWidget, QLabel
 from PyQt6.QtWidgets import QTreeWidgetItem
 from PyQt6.QtGui import QTextCursor
 from .gui_custom_dialog import ModernDarkDialog
@@ -117,30 +117,6 @@ def safeSetText(widget, text: str | None):
             f"Unexpected error in safeSetText for widget {type(widget)}: {e}",
             exc_info=True,
         )
-
-
-def show_info_message(
-    parent: Optional[QWidget],
-    title: str,
-    main_message: str,
-    informative_text: str,
-    icon_path: str,
-    show_folder_path: Optional[str] = None,
-):
-    """
-    Displays a custom informational dialog.
-    Links in the informative text are automatically clickable.
-    """
-    dialog = ModernDarkDialog(
-        title=title,
-        main_message=main_message,
-        informative_text=informative_text,
-        icon_path=icon_path,
-        parent=parent,
-        show_folder_path=show_folder_path,
-        show_in_folder_func=show_in_folder,
-    )
-    dialog.exec()
 
 
 def show_in_folder(path: str):
