@@ -40,6 +40,7 @@ Example:
 # ########## IMPORTS ##########
 import json
 import os
+import time
 from datetime import datetime, timezone
 import logging
 from typing import Dict, Optional, List, Any, cast  # Added cast for type narrowing
@@ -176,6 +177,8 @@ class LinkPersistenceManager:
         Ensures data is loaded before attempting to save. If `self.links_data` is
         None (meaning it was never loaded or loading failed), it attempts to load
         it first. If still None, saving fails.
+        
+        Includes a retry mechanism to handle transient file locks (e.g., OneDrive syncing).
 
         Returns:
             bool: True if saving was successful, False otherwise.
@@ -188,29 +191,41 @@ class LinkPersistenceManager:
         # Now self.links_data is guaranteed to be a Dict[str, Any]
         links_data_to_save = cast(Dict[str, Any], self.links_data)
 
-        # Block: Attempt to write the data to the JSON file.
-        try:
-            # Ensure the directory exists before writing.
-            os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-            # Open the file in write mode with UTF-8 encoding.
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                # Dump the current links data to the file.
-                json.dump(
-                    links_data_to_save,  # Use the guaranteed dict variable
-                    f,
-                    indent=4,  # Pretty-print with 4 spaces.
-                    ensure_ascii=False,  # Allow non-ASCII characters.
-                    sort_keys=False,  # Maintain insertion order where possible.
-                )
-            logger.debug(f"Successfully saved links to '{self.file_path}'.")
-            return True
-        # Handle potential file writing errors.
-        except IOError as e:
-            logger.error(f"Error saving links file '{self.file_path}': {str(e)}")
-            return False
-        except Exception as e:  # Catch unexpected errors during save
-            logger.error(f"An unexpected error occurred during save: {str(e)}")
-            return False
+        # Retry logic for file locking issues
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Ensure the directory exists before writing.
+                os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
+                # Open the file in write mode with UTF-8 encoding.
+                with open(self.file_path, "w", encoding="utf-8") as f:
+                    # Dump the current links data to the file.
+                    json.dump(
+                        links_data_to_save,  # Use the guaranteed dict variable
+                        f,
+                        indent=4,  # Pretty-print with 4 spaces.
+                        ensure_ascii=False,  # Allow non-ASCII characters.
+                        sort_keys=False,  # Maintain insertion order where possible.
+                    )
+                logger.debug(f"Successfully saved links to '{self.file_path}'.")
+                return True
+            
+            except IOError as e:
+                # Check if it's a permission error (often caused by file locking)
+                # Errno 13 is Permission denied
+                if attempt < max_retries - 1:
+                    logger.warning(f"Save attempt {attempt + 1} failed ({e}). Retrying in 0.2s...")
+                    time.sleep(0.2)
+                    continue
+                else:
+                    logger.error(f"Error saving links file '{self.file_path}' after {max_retries} attempts: {str(e)}")
+                    return False
+            
+            except Exception as e:  # Catch unexpected errors during save
+                logger.error(f"An unexpected error occurred during save: {str(e)}")
+                return False
+        
+        return False
 
     # --- Public Data Access and Modification Methods ---
 
@@ -249,6 +264,7 @@ class LinkPersistenceManager:
         spotify_track_details: Dict[str, Any],
         tidal_track_object: Optional[Track],
         candidates: Optional[List[Dict[str, Any]]] = None,
+        score: Optional[int] = None,
     ):
         """
         Adds a new track link or updates an existing one for a specific playlist.
@@ -266,6 +282,7 @@ class LinkPersistenceManager:
             candidates (Optional[List[Dict[str, Any]]]): A list of candidate match dictionaries,
                                                each containing 'tidal_track' (Track object),
                                                'score', and 'mismatch_reasons'. Defaults to None.
+            score (Optional[int]): The certainty score for the link. Defaults to None.
         """
         # Ensure data is loaded before modification.
         if self.links_data is None:
@@ -327,6 +344,7 @@ class LinkPersistenceManager:
             "spotify_track_details": spotify_track_details,
             "tidal_track_details": serialized_tidal_track,  # Store the serialized Tidal track
             "timestamp": self._get_current_timestamp(),
+            "score": score,  # Store the certainty score
         }
 
         # Store the Tidal track ID directly for easier access and fallback

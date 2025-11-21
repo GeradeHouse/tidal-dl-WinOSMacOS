@@ -28,7 +28,7 @@ from ..logging_config import setup_logging as setup_logging_file
 from .gui_custom_dialog import CustomQMessageBox
 
 if TYPE_CHECKING:
-    from tidal_dl.gui.gui import MainView
+    from tidal_dl.gui.gui_main import MainView
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)  # Set specific level for this module
@@ -395,7 +395,7 @@ class AppRunner:
                 "Application has not been set up. Call setup() before run()."
             )
 
-        from tidal_dl.gui.gui import MainView
+        from tidal_dl.gui.gui_main import MainView
 
         self.main_view = MainView()
         self.main_view.show()

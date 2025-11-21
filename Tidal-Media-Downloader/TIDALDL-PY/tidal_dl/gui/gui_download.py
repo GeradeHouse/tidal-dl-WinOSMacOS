@@ -36,7 +36,7 @@ from .gui_custom_dialog import ModernDarkDialog, CustomQMessageBox
 from ..paths import resource_path
 
 if TYPE_CHECKING:
-    from tidal_dl.gui.gui import MainView
+    from tidal_dl.gui.gui_main import MainView
 
 
 logger = logging.getLogger(__name__)
@@ -456,11 +456,12 @@ class DownloadHandler(QObject):
 
         self._start_download_thread(tracks_to_download, current_playlist_obj, quality_arg_str)
 
+    @pyqtSlot(object, object, object)
     def _start_download_thread(
         self,
-        tracks_to_start: List[Track],
-        playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
-        quality_arg_str: Optional[str]
+        tracks_to_start,
+        playlist_context,
+        quality_arg_str
     ):
         self.main_view.download_active = True
         # CRITICAL FIX: Store the playlist ID when download starts, before user can click other playlists
@@ -553,12 +554,12 @@ class DownloadHandler(QObject):
         if processing_playlist_id:
             current_count = self._processed_counters.get(processing_playlist_id, 0) + 1
             self._processed_counters[processing_playlist_id] = current_count
-            logger.error(f"🔴🔴🔴 DOWNLOAD: Emitting downloadProgress for processing playlist {processing_playlist_id} count {current_count}")
+            logger.debug(f"Emitting downloadProgress for processing playlist {processing_playlist_id} count {current_count}")
             self.downloadProgress.emit(str(processing_playlist_id), current_count)
         else:
             # CRITICAL FIX: No fallback - this prevents cross-contamination
-            logger.error(f"🔴🔴🔴 DOWNLOAD CRITICAL: No processing playlist ID available - not emitting progress signal")
-            logger.error(f"🔴🔴🔴 DOWNLOAD SKIPPING: Track {track_id} finished but no valid processing playlist ID")
+            logger.debug(f"DOWNLOAD CRITICAL: No processing playlist ID available - not emitting progress signal")
+            logger.debug(f"DOWNLOAD SKIPPING: Track {track_id} finished but no valid processing playlist ID")
 
     def onPauseResumeClicked(self):
         if not self.main_view.download_active:

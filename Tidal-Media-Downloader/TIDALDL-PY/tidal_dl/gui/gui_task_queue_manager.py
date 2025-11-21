@@ -1,4 +1,4 @@
-# tidal_dl/gui/task_queue_manager.py
+# tidal_dl/gui/gui_task_queue_manager.py
 
 import logging
 import threading
@@ -14,7 +14,7 @@ from tidal_dl.printf import Printf
 import aigpy
 
 if TYPE_CHECKING:
-    from tidal_dl.gui.gui import MainView
+    from tidal_dl.gui.gui_main import MainView
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # Set specific level for this module
@@ -25,7 +25,7 @@ setup_gui_logger(__name__, logging.INFO)
 
 class TaskQueueManager(QObject):
     """Manages a queue of linking and downloading jobs to run them sequentially."""
-    # MODIFIED: Add signals
+    # Signals
     jobStarted = pyqtSignal(str, str, int)  # playlist_id, action_type, total_items
     jobFinished = pyqtSignal(str)           # playlist_id
 
@@ -34,7 +34,7 @@ class TaskQueueManager(QObject):
         self.main_view = main_view
         self.task_queue = deque()
         self.is_running_task = False
-        self.current_job: Optional[Dict[str, Any]] = None # MODIFIED: Add current_job tracking
+        self.current_job: Optional[Dict[str, Any]] = None
 
     def add_spotify_link_job(self, spotify_playlists_data: List[Dict[str, Any]]):
         """Adds a job to link all tracks in the selected Spotify playlists."""
@@ -92,9 +92,8 @@ class TaskQueueManager(QObject):
             return
 
         self.is_running_task = True
-        self.current_job = self.task_queue.popleft() # MODIFIED: Store current job
+        self.current_job = self.task_queue.popleft()
         
-        # MODIFIED: Add check to satisfy Pylance
         if not self.current_job:
             self.is_running_task = False
             return
@@ -116,7 +115,6 @@ class TaskQueueManager(QObject):
     def job_finished(self):
         """Marks the current job as finished and processes the next one."""
         logger.info("Job finished.")
-        # MODIFIED: Emit jobFinished signal with playlist ID
         if self.current_job:
             job_type = self.current_job.get("type")
             playlist_id = None
@@ -154,21 +152,12 @@ class TaskQueueManager(QObject):
             self.job_finished()
             return
 
-        # DEBUG: Track playlist data
-        logger.debug(f"🔴🔴🔴 TASK_QUEUE: Starting link job for playlist {playlist_id}")
-        logger.debug(f"🔴🔴🔴 TASK_QUEUE: Playlist data: {playlist_data}")
-
         # Fetch tracks in a separate thread
         def fetch_tracks_thread():
-            logger.debug(f"🔴🔴🔴 TASK_QUEUE: Fetching tracks for playlist {playlist_id}")
+            logger.debug(f"TASK_QUEUE: Fetching tracks for playlist {playlist_id}")
             tracks = self.main_view.spotify_api.get_playlist_tracks(playlist_id)
-            logger.debug(f"🔴🔴🔴 TASK_QUEUE: Fetched tracks: {len(tracks) if tracks else 0} tracks")
-            if tracks:
-                logger.debug(f"🔴🔴🔴 TASK_QUEUE: First track sample: {tracks[0] if tracks else 'None'}")
-            else:
-                logger.warning(f"🔴🔴🔴 TASK_QUEUE: No tracks found for playlist {playlist_id}")
             
-            # MODIFIED: Emit jobStarted signal from the main thread
+            # Emit jobStarted signal from the main thread
             QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
                                             QtCore.Q_ARG(str, playlist_id),
                                             QtCore.Q_ARG(str, "Linking"),
@@ -207,7 +196,7 @@ class TaskQueueManager(QObject):
 
         def pre_download_thread():
             all_tracks_meta = self.main_view.spotify_api.get_playlist_tracks(playlist_id)
-            # MODIFIED: Emit jobStarted for the download action
+            # Emit jobStarted for the download action
             QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
                                             QtCore.Q_ARG(str, playlist_id),
                                             QtCore.Q_ARG(str, "Downloading"),
@@ -225,20 +214,39 @@ class TaskQueueManager(QObject):
 
             for i, meta in enumerate(all_tracks_meta):
                 spotify_id = meta.get("id")
-                if spotify_id in persisted_tracks and persisted_tracks[spotify_id].get("tidal_track_details"):
-                    track_dict = persisted_tracks[spotify_id]["tidal_track_details"]
-                    try:
-                        track_obj = aigpy.model.dictToModel(track_dict, Track())
-                        if track_obj:
-                            linked_tracks_for_download.append(track_obj)
-                    except Exception as e:
-                        logger.error(f"Failed to deserialize linked track {spotify_id}: {e}")
+                
+                if spotify_id in persisted_tracks:
+                    # Track exists in persistence
+                    link_info = persisted_tracks[spotify_id]
+                    details = link_info.get("tidal_track_details")
+                    score = link_info.get("score")
+
+                    if details:
+                        # Check if this is an uncertain match (Score > 1) that hasn't been manually confirmed.
+                        # Manually linked tracks have score=None (default in persistence).
+                        # Auto-linked uncertain ones have score > 1.
+                        if score is not None and isinstance(score, (int, float)) and score > 1:
+                            logger.info(f"Skipping track {spotify_id}: Manual review required (Score: {score}).")
+                            continue
+
+                        # It has valid link details and is confirmed/confident -> Add to download
+                        try:
+                            track_obj = aigpy.model.dictToModel(details, Track())
+                            if track_obj:
+                                linked_tracks_for_download.append(track_obj)
+                        except Exception as e:
+                            logger.error(f"Failed to deserialize linked track {spotify_id}: {e}")
+                    else:
+                        # It exists but has NO details (e.g. "Not Found" or "Manual Review" with no selection)
+                        # SKIP this track. Do NOT add to unlinked_tracks_for_worker.
+                        logger.debug(f"Skipping track {spotify_id} (Marked as Not Found/None Match in persistence).")
                 else:
+                    # Not in persistence at all -> Needs linking
                     unlinked_tracks_for_worker.append((i, meta))
             
             if unlinked_tracks_for_worker:
                 logger.info(f"Found {len(unlinked_tracks_for_worker)} unlinked tracks in playlist. Linking them first...")
-                # MODIFIED: Emit a separate jobStarted for the linking sub-task
+                # Emit a separate jobStarted for the linking sub-task
                 QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
                                                 QtCore.Q_ARG(str, playlist_id),
                                                 QtCore.Q_ARG(str, "Linking"),
@@ -252,7 +260,7 @@ class TaskQueueManager(QObject):
                         except TypeError:
                             pass
                     
-                    # MODIFIED: Emit jobFinished for the linking sub-task
+                    # Emit jobFinished for the linking sub-task
                     self.jobFinished.emit(str(playlist_id))
                     
                     logger.info("Pre-download linking finished. Gathering all linked tracks for download.")
@@ -262,21 +270,38 @@ class TaskQueueManager(QObject):
 
                     for _, meta in unlinked_tracks_for_worker:
                         spotify_id = meta.get("id")
-                        if spotify_id in newly_linked_tracks and newly_linked_tracks[spotify_id].get("tidal_track_details"):
-                            track_dict = newly_linked_tracks[spotify_id]["tidal_track_details"]
-                            try:
-                                track_obj = aigpy.model.dictToModel(track_dict, Track())
-                                if track_obj:
-                                    final_download_list.append(track_obj)
-                            except Exception as e:
-                                logger.error(f"Failed to deserialize newly linked track {spotify_id}: {e}")
+                        if spotify_id in newly_linked_tracks:
+                            link_info = newly_linked_tracks[spotify_id]
+                            details = link_info.get("tidal_track_details")
+                            score = link_info.get("score")
+                            
+                            # Apply same skipping logic for newly linked tracks
+                            if details:
+                                if score is not None and isinstance(score, (int, float)) and score > 1:
+                                    logger.info(f"Skipping newly linked track {spotify_id}: Manual review required (Score: {score}).")
+                                    continue
+
+                                try:
+                                    track_obj = aigpy.model.dictToModel(details, Track())
+                                    if track_obj:
+                                        final_download_list.append(track_obj)
+                                except Exception as e:
+                                    logger.error(f"Failed to deserialize newly linked track {spotify_id}: {e}")
                     
                     self._start_download(final_download_list, playlist_data, quality)
 
-                self.main_view.startLinkingWorker(unlinked_tracks_for_worker, playlist_id, on_linking_done)
+                # Use invokeMethod to call startLinkingWorker on the main thread
+                QtCore.QMetaObject.invokeMethod(
+                    self.main_view, 
+                    "startLinkingWorker", 
+                    Qt.ConnectionType.QueuedConnection,
+                    QtCore.Q_ARG(list, unlinked_tracks_for_worker),
+                    QtCore.Q_ARG(str, playlist_id),
+                    QtCore.Q_ARG(object, on_linking_done)
+                )
 
             else:
-                logger.info("All tracks are already linked. Starting download.")
+                logger.info("All tracks are already linked (or skipped). Starting download.")
                 self._start_download(linked_tracks_for_download, playlist_data, quality)
 
         threading.Thread(target=pre_download_thread, daemon=True).start()
@@ -295,7 +320,7 @@ class TaskQueueManager(QObject):
 
         def fetch_tracks_thread():
             tracks, _ = TIDAL_API.getItems(str(playlist_id), Type.Playlist)
-            # MODIFIED: Emit jobStarted signal
+            # Emit jobStarted signal
             QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
                                             QtCore.Q_ARG(str, str(playlist_id)),
                                             QtCore.Q_ARG(str, "Downloading"),
@@ -314,4 +339,12 @@ class TaskQueueManager(QObject):
         quality_str = Printf.map_quality(quality) if quality else None
 
         # The downloadEnd slot now calls job_finished, so we don't connect here.
-        self.main_view.download_handler._start_download_thread(tracks, playlist_context, quality_str)
+        # Use invokeMethod to ensure thread safety when calling GUI methods from background thread
+        QtCore.QMetaObject.invokeMethod(
+            self.main_view.download_handler,
+            "_start_download_thread",
+            Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(object, tracks),
+            QtCore.Q_ARG(object, playlist_context),
+            QtCore.Q_ARG(object, quality_str)
+        )

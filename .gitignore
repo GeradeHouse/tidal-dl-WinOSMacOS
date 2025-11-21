@@ -150,3 +150,9 @@ Tidal-Media-Downloader/.github/workflows/continuous-integration-workflow copy.ym
 docker-compose.yml
 .kilocodemodes
 .kilocode/mcp.json
+cover_cache.pkl
+.gitignore
+.spotify_token_cache.json
+.tidal-dl.json
+.tidal-dl.token.json
+spotify_to_tidal_links.json

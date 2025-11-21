@@ -270,9 +270,9 @@ class CustomQMessageBox:
         return path
 
     @staticmethod
-    def information(parent: Optional[QWidget], title: str, main_message: str, informative_text: str = ""):
+    def information(parent: Optional[QWidget], title: str, main_message: str, informative_text: str = "", icon_path: Optional[str] = None):
         """Displays an information dialog with an OK button."""
-        icon = CustomQMessageBox._get_icon("success.png")
+        icon = icon_path if icon_path else CustomQMessageBox._get_icon("success.png")
         dlg = ModernDarkDialog(
             title=title,
             main_message=main_message,
@@ -284,9 +284,9 @@ class CustomQMessageBox:
         dlg.exec()
 
     @staticmethod
-    def warning(parent: Optional[QWidget], title: str, main_message: str, informative_text: str = ""):
+    def warning(parent: Optional[QWidget], title: str, main_message: str, informative_text: str = "", icon_path: Optional[str] = None):
         """Displays a warning dialog with an OK button."""
-        icon = CustomQMessageBox._get_icon("info_icon.png") # Or warning.png if you have it
+        icon = icon_path if icon_path else CustomQMessageBox._get_icon("info_icon.png")
         dlg = ModernDarkDialog(
             title=title,
             main_message=main_message,
@@ -298,9 +298,9 @@ class CustomQMessageBox:
         dlg.exec()
 
     @staticmethod
-    def critical(parent: Optional[QWidget], title: str, main_message: str, informative_text: str = ""):
+    def critical(parent: Optional[QWidget], title: str, main_message: str, informative_text: str = "", icon_path: Optional[str] = None):
         """Displays a critical error dialog with an OK button."""
-        icon = CustomQMessageBox._get_icon("error.png")
+        icon = icon_path if icon_path else CustomQMessageBox._get_icon("error.png")
         dlg = ModernDarkDialog(
             title=title,
             main_message=main_message,
@@ -312,12 +312,12 @@ class CustomQMessageBox:
         dlg.exec()
 
     @staticmethod
-    def question(parent: Optional[QWidget], title: str, main_message: str, informative_text: str = "") -> bool:
+    def question(parent: Optional[QWidget], title: str, main_message: str, informative_text: str = "", icon_path: Optional[str] = None) -> bool:
         """
         Displays a question dialog with Yes/No buttons.
         Returns: True if 'Yes' was clicked, False otherwise.
         """
-        icon = CustomQMessageBox._get_icon("question.png") # Ensure you have a question.png or fallback
+        icon = icon_path if icon_path else CustomQMessageBox._get_icon("question.png")
         dlg = ModernDarkDialog(
             title=title,
             main_message=main_message,

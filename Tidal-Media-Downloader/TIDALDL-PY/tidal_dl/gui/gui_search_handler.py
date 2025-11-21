@@ -49,7 +49,7 @@ from tidal_dl.printf import Printf
 
 # Forward declaration for type hinting
 if TYPE_CHECKING:
-    from tidal_dl.gui.gui import MainView
+    from tidal_dl.gui.gui_main import MainView
 
     # from .gui_download import DownloadHandler # Removed unused import
     # from .gui_linking_handler import LinkingGuiHandler # Removed unused import

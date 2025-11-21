@@ -1,3 +1,5 @@
+# tidal_dl/download.py
+
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 """
@@ -35,7 +37,7 @@ from .printf import *
 from .tidal import TIDAL_API, SETTINGS, AudioQuality, Type
 
 if TYPE_CHECKING:
-    from tidal_dl.gui.gui import MainView  # type: ignore
+    from tidal_dl.gui.gui_main import MainView  # type: ignore
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
@@ -428,6 +430,41 @@ def downloadTrack(
             track, Track
         ), f"Validation failed, expected Track, got {type(track)}"
 
+        # --- Fix missing album artist ---
+        # The track.album object from search/track info might lack artist data.
+        # We check and fetch full album info if needed to ensure correct paths and tagging.
+        target_album = album if album else track.album
+        if target_album and getattr(target_album, 'id', None):
+            # Check if artist info is missing
+            # Note: model.py initializes artist=Artist(), so we check for name/id or if it's None
+            has_artist = False
+            
+            # Check 'artists' list
+            artists_list = getattr(target_album, 'artists', None)
+            if artists_list:
+                has_artist = True
+                
+            # Check 'artist' object
+            if not has_artist:
+                artist_obj = getattr(target_album, 'artist', None)
+                if artist_obj and getattr(artist_obj, 'name', None):
+                    has_artist = True
+            
+            if not has_artist:
+                logger.debug(f"Album metadata for '{getattr(target_album, 'title', 'Unknown')}' missing artist. Fetching full details...")
+                try:
+                    full_album = TIDAL_API.getAlbum(str(target_album.id))
+                    if full_album:
+                        if album:
+                            # We can't reassign the local 'album' variable to affect the caller, 
+                            # but we can use 'full_album' for local operations.
+                            album = full_album
+                        else:
+                            track.album = full_album
+                except Exception as e:
+                    logger.warning(f"Failed to fetch full album info: {e}")
+        # --- End Fix ---
+
         logger.debug(f"Starting downloadTrack for '{track.title}'")
 
         requested_mp3 = False
@@ -741,5 +778,3 @@ def downloadTracks(
                 downloadQuality,
             )  # Pass main_view_instance and playlist_context
         thread_pool.shutdown(wait=True)
-
-# --- END OF FILE download.py ---

@@ -53,7 +53,7 @@ from tidal_dl import paths
 from tidal_dl.gui.gui_cover_cache import CoverCache, CoverArtWorker
 
 if TYPE_CHECKING:
-    from tidal_dl.gui.gui import MainView
+    from tidal_dl.gui.gui_main import MainView
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module

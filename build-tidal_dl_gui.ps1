@@ -25,6 +25,11 @@ Switch-style way to request a windowed/GUI build. Equivalent to: -BuildType Wind
 .PARAMETER Console
 Switch-style way to request a console build. Equivalent to: -BuildType Console
 
+.PARAMETER BuildMode
+Determines how aggressively the build environment is cleaned and dependencies are reinstalled.
+'Full' (default) cleans all build artifacts and runs 'pip install -r requirements.txt'.
+'Fast' performs a lighter cleanup and skips reinstalling requirements to speed up iterative builds.
+
 .EXAMPLE
 .\build-tidal_dl_gui.ps1
 Builds the default 'Windowed' executable (if no switches/parameters are supplied,
@@ -45,6 +50,11 @@ Builds the 'Windowed' executable using the new switch-style invocation.
 .EXAMPLE
 .\build-tidal_dl_gui.ps1 -Console
 Builds the 'Console' executable using the new switch-style invocation.
+
+.EXAMPLE
+.\build-tidal_dl_gui.ps1 -Windowed -BuildMode Fast
+Builds the 'Windowed' executable using a faster, incremental build that keeps caches
+and skips reinstalling requirements.
 #>
 param(
     [Parameter(Mandatory=$false)]
@@ -55,7 +65,11 @@ param(
     [switch]$Windowed,
 
     [Parameter(Mandatory=$false)]
-    [switch]$Console
+    [switch]$Console,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("Full", "Fast")]
+    [string]$BuildMode = "Full"
 )
 
 # --- Resolve Build Type (new switch style takes precedence) ---
@@ -118,21 +132,26 @@ try {
 # --- Check and Install Requirements ---
 Write-Host "Checking if requirements are installed..." -ForegroundColor Yellow
 $RequirementsPath = Join-Path $PSScriptRoot "Tidal-Media-Downloader\TIDALDL-PY\requirements.txt"
-if (Test-Path $RequirementsPath) {
-    try {
-        & ".venv\Scripts\pip.exe" install -r $RequirementsPath
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "Failed to install requirements from $RequirementsPath."
+
+if ($BuildMode -eq "Full") {
+    if (Test-Path $RequirementsPath) {
+        try {
+            & ".venv\Scripts\pip.exe" install -r $RequirementsPath
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Failed to install requirements from $RequirementsPath."
+                exit 1
+            }
+            Write-Host "Requirements installed successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "Error installing requirements: $($_.Exception.Message)"
             exit 1
         }
-        Write-Host "Requirements installed successfully." -ForegroundColor Green
-    } catch {
-        Write-Error "Error installing requirements: $($_.Exception.Message)"
+    } else {
+        Write-Error "Requirements file not found at $RequirementsPath."
         exit 1
     }
 } else {
-    Write-Error "Requirements file not found at $RequirementsPath."
-    exit 1
+    Write-Host "Fast build: skipping 'pip install -r requirements.txt' (assuming venv is already set up)." -ForegroundColor Yellow
 }
 
 Write-Host "Using PyInstaller from: $PyInstallerPath" -ForegroundColor Green
@@ -164,34 +183,56 @@ $PostBuildTargetDir = "C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl-test"
 Write-Host "-------------------------------------" -ForegroundColor Cyan
 Write-Host "Starting Build for '$AppName'" -ForegroundColor Cyan
 Write-Host "Build Type: $BuildType" -ForegroundColor Cyan
+Write-Host "Build Mode: $BuildMode" -ForegroundColor Cyan
 Write-Host "Project Source: $ProjectSourceDir" -ForegroundColor Cyan
 Write-Host "-------------------------------------"
 
 # --- Cleanup ---
 Write-Host "Cleaning up previous build artifacts..." -ForegroundColor Yellow
-# Define paths to remove directly
-$DirectCleanupPaths = @(
-    Join-Path $ProjectSourceDir "dist"              # Removed comma
-    Join-Path $ProjectSourceDir "build"             # Removed comma
-    Join-Path $ProjectSourceDir "$AppName.spec"     # Removed comma
-    Join-Path $PackageDir "dist"                    # Removed comma
-    Join-Path $PackageDir "build"                   # Removed comma
-    Join-Path $PackageDir "MANIFEST.in"             # Removed comma
-)
 
-# Remove direct paths
-foreach ($path in $DirectCleanupPaths) {
-    if (Test-Path $path) {
-        Write-Host "Removing: $path"
-        Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+if ($BuildMode -eq "Full") {
+    Write-Host "Full build: removing dist, build, spec, MANIFEST.in and *.egg-info" -ForegroundColor Yellow
+
+    # Define paths to remove directly
+    $DirectCleanupPaths = @(
+        Join-Path $ProjectSourceDir "dist"              # Removed comma
+        Join-Path $ProjectSourceDir "build"             # Removed comma
+        Join-Path $ProjectSourceDir "$AppName.spec"     # Removed comma
+        Join-Path $PackageDir "dist"                    # Removed comma
+        Join-Path $PackageDir "build"                   # Removed comma
+        Join-Path $PackageDir "MANIFEST.in"             # Removed comma
+    )
+
+    # Remove direct paths
+    foreach ($path in $DirectCleanupPaths) {
+        if (Test-Path $path) {
+            Write-Host "Removing: $path"
+            Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Find and remove .egg-info directories using Get-ChildItem
+    $EggInfoPaths = Get-ChildItem -Path $PackageDir -Directory -Filter "*.egg-info" -ErrorAction SilentlyContinue
+    foreach ($eggPath in $EggInfoPaths) {
+        Write-Host "Removing: $($eggPath.FullName)"
+        Remove-Item -Path $eggPath.FullName -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+else {
+    Write-Host "Fast build: keeping 'build' and most caches for PyInstaller speedup." -ForegroundColor Yellow
 
-# Find and remove .egg-info directories using Get-ChildItem
-$EggInfoPaths = Get-ChildItem -Path $PackageDir -Directory -Filter "*.egg-info" -ErrorAction SilentlyContinue
-foreach ($eggPath in $EggInfoPaths) {
-    Write-Host "Removing: $($eggPath.FullName)"
-    Remove-Item -Path $eggPath.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    # In fast mode, only wipe the app's dist folder + spec file so we get a clean output
+    $FastCleanupPaths = @(
+        Join-Path $ProjectSourceDir "dist"
+        Join-Path $ProjectSourceDir "$AppName.spec"
+    )
+
+    foreach ($path in $FastCleanupPaths) {
+        if (Test-Path $path) {
+            Write-Host "Removing (fast mode): $path"
+            Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Write-Host "Cleanup complete." -ForegroundColor Green
@@ -210,7 +251,7 @@ catch {
 # Base arguments
 $pyinstallerArgs = @(
     # "--debug", "all", # Debug output PyiFrozenfinder logs ( Uncomment for debugging )
-    "--debug", "imports", # <-- UNCOMMENT AND CHANGE THIS LINE for import debugging
+    # "--debug", "imports", # <-- UNCOMMENT AND CHANGE THIS LINE for import debugging
     "--noconfirm",    # Overwrite output directory without asking
     "-D",             # One-directory bundle
     $MainScript,
@@ -247,7 +288,7 @@ if ($BuildType -eq "Windowed") {
 
 # --- Execute PyInstaller ---
 Write-Host "Running PyInstaller..." -ForegroundColor Yellow
-Write-Host "Command: $PyInstallerPath $($pyinstallerArgs -join ' ')" # Show the command being run
+Write-Host "Command: $PyInstallerPath $($pyinstallerArgs -join ' ')"
 
 try {
     # Use the call operator '&' with the full path and splatting '@' for the argument array
@@ -313,5 +354,6 @@ if (Test-Path $PostBuildFolder) {
 
 Write-Host "-------------------------------------" -ForegroundColor Cyan
 Write-Host "Build Script Finished." -ForegroundColor Cyan
+Write-Host "Build completed at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Cyan
 Write-Host "Artifacts are available (where present) at: $PostBuildTargetDir" -ForegroundColor Cyan
 Write-Host "-------------------------------------"

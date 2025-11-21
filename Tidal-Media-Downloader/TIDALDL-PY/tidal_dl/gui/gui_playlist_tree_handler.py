@@ -61,9 +61,9 @@ from tidal_dl.gui.gui_linking_handler import LinkingGuiHandler
 from tidal_dl.gui.gui_playlist_item_widget import PlaylistItemProgressWidget
 
 if TYPE_CHECKING:
-    from tidal_dl.gui.gui import MainView
+    from tidal_dl.gui.gui_main import MainView
     from tidal_dl.gui.gui_download import DownloadHandler
-    from tidal_dl.gui.task_queue_manager import TaskQueueManager
+    from tidal_dl.gui.gui_task_queue_manager import TaskQueueManager
     from tidal_dl.gui.gui_table_handler import TableHandler
 
 logger = logging.getLogger(__name__)
@@ -436,8 +436,16 @@ class PlaylistTreeHandler(QObject):
     def set_table_handler(self, handler: "TableHandler") -> None:
         self.table_handler = handler
 
-    def set_linking_handler(self, handler: LinkingGuiHandler) -> None:
+    def set_linking_handler(self, handler: "LinkingGuiHandler") -> None:
         self.linking_handler = handler
+        if self.linking_handler:
+            try:
+                self.linking_handler.linkingStarted.connect(self.on_job_started)
+                self.linking_handler.linkProgress.connect(self.on_job_progress)
+                self.linking_handler.linkingFinished.connect(self.on_job_finished)
+                self.linking_handler.playlistQueued.connect(self.set_playlist_queued)
+            except Exception as e:
+                logger.error(f"Error connecting linking handler signals: {e}")
 
     def _connect_tree_signals(self) -> None:
         self.tree_widget.itemClicked.connect(self.onPlaylistItemClicked)
@@ -1122,8 +1130,18 @@ class PlaylistTreeHandler(QObject):
                 
                 link_action = menu.addAction(f"Link All Tracks in Playlist{plural_s}")
                 if link_action:
+                    # Wrapper to update UI to "Queued" immediately before submitting job
+                    def queue_and_link(playlists_data):
+                        if not self.task_queue_manager:
+                            return
+                        for p in playlists_data:
+                            pid = p.get('data', {}).get('id')
+                            if pid:
+                                self.set_playlist_queued(pid)
+                        self.task_queue_manager.add_spotify_link_job(playlists_data)
+
                     link_action.triggered.connect(
-                        partial(self.task_queue_manager.add_spotify_link_job, spotify_playlists_data)
+                        partial(queue_and_link, spotify_playlists_data)
                     )
 
                 download_menu = menu.addMenu(f"Download Playlist{plural_s} As...")
@@ -1426,6 +1444,21 @@ class PlaylistTreeHandler(QObject):
                     widget.set_icon(original_data["icon"])
 
     @pyqtSlot(str)
+    def set_playlist_queued(self, playlist_id: str):
+        """Sets the playlist item status to 'Queued'."""
+        if playlist_id in self.item_widgets:
+            widget = self.item_widgets[playlist_id]
+            widget.set_queued()
+            
+            # Ensure item is visible
+            if playlist_id in self.id_to_item:
+                item = self.id_to_item[playlist_id]
+                parent = item.parent()
+                if parent and not parent.isExpanded():
+                    parent.setExpanded(True)
+                self.tree_widget.scrollToItem(item)
+
+    @pyqtSlot(str)
     def _on_widget_geometry_request(self, playlist_id: str):
         """
         Slot called when a widget requests a geometry update (e.g. expanded/collapsed).
@@ -1439,4 +1472,6 @@ class PlaylistTreeHandler(QObject):
             item.setSizeHint(0, widget.sizeHint())
             
             # Force the tree to re-layout items to accommodate the new height
-            self.tree_widget.doItemsLayout()
+            self.tree_widget.doItemsLayout()  # type: ignore
+
+

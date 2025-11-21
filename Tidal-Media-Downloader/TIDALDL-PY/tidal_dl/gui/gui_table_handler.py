@@ -1,4 +1,4 @@
-# --- START OF FILE gui_table_handler.py ---
+# tidal_dl/gui/gui_table_handler.py
 
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
@@ -6,7 +6,7 @@
 @File    :   gui_table_handler.py
 @Time    :   2025/04/15
 @Author  :   GeradeHouse
-@Version :   1.0
+@Version :   1.2
 @Desc    :   Manages the results QTableWidget in the GUI.
 """
 
@@ -34,7 +34,7 @@ except Exception:  # pragma: no cover - environment dependent
 
 
 if TYPE_CHECKING:
-    from tidal_dl.gui.gui import MainView
+    from tidal_dl.gui.gui_main import MainView
     from tidal_dl.gui.gui_download import DownloadHandler
     from tidal_dl.gui.gui_linking_handler import LinkingGuiHandler
 
@@ -68,6 +68,9 @@ class TableHandler(QObject):
         self.persistence_manager = persistence_manager
         self.linking_handler = linking_handler
         self.download_handler: Optional["DownloadHandler"] = None
+        
+        # Initialize column_indices to prevent AttributeError if accessed before population
+        self.column_indices: Dict[str, int] = {}
 
         if self.table_widget:
             self._connect_table_signals()
@@ -206,6 +209,29 @@ class TableHandler(QObject):
         if self.download_handler:
             self.download_handler._update_download_button_text()
 
+    def _create_progress_bar(self) -> QProgressBar:
+        """Creates a styled progress bar for the table."""
+        bar = QProgressBar()
+        bar.setRange(0, 100)
+        bar.setTextVisible(True)
+        bar.setFixedHeight(18)
+        bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #555;
+                border-radius: 4px;
+                background-color: #333;
+                text-align: center;
+                color: white;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QProgressBar::chunk {
+                background-color: #0078d4;
+                border-radius: 3px;
+            }
+        """)
+        return bar
+
     def _populate_table_generic(
         self,
         results_array: List[Any],
@@ -250,6 +276,11 @@ class TableHandler(QObject):
             rowData: Optional[List[str]] = None
             item_metadata: Any = item
             track_id_for_download_check: Optional[str] = None
+            
+            # Variables for indicator column (candidates)
+            has_candidates = False
+            candidates_list = []
+            linked_tidal_id = None
 
             try:
                 if is_spotify_track_list:
@@ -271,6 +302,8 @@ class TableHandler(QObject):
                         and aigmodel is not None
                     ):
                         link_info = persisted_tracks_dict.get(spotify_track_id, {})
+                        
+                        # 1. Deserialize Tidal Track
                         tidal_track_obj = None
                         tdata = link_info.get("tidal_track_details")
                         if tdata:
@@ -278,17 +311,50 @@ class TableHandler(QObject):
                                 tidal_track_obj = aigmodel.dictToModel(tdata, Track())
                             except Exception:
                                 tidal_track_obj = None
-
+                        
+                        # 2. Retrieve Candidates and Score
+                        candidates_list = link_info.get("candidates") or []
+                        score = link_info.get("score")
+                        
+                        # 3. Determine Status
+                        derived_status = "not_linked"
+                        
                         if tidal_track_obj:
-                            track_id_for_download_check = str(tidal_track_obj.id)
-                            link_status_text = "Linked"
-                            link_status_data_for_title.update(
-                                {
-                                    "link_status": "cached_linked",
-                                    "tidal_track_id": track_id_for_download_check,
-                                    "tidal_track": tidal_track_obj,
-                                }
-                            )
+                            linked_tidal_id = str(tidal_track_obj.id)
+                            track_id_for_download_check = linked_tidal_id
+                            
+                            if score is not None and score <= 1:
+                                link_status_text = f"Linked (Certainty score: {score}): {tidal_track_obj.id}"
+                                derived_status = "auto_linked"
+                            elif score is not None and score > 1:
+                                if candidates_list:
+                                    link_status_text = f"Manual linking required (Certainty score: {score}): {tidal_track_obj.id}"
+                                    derived_status = "manual_review_needed"
+                                    has_candidates = True
+                                else:
+                                    link_status_text = f"Linked (Uncertain, Score: {score}): {tidal_track_obj.id}"
+                                    derived_status = "found_uncertain"
+                            else:
+                                # Fallback if score missing but track exists
+                                link_status_text = f"Linked: {tidal_track_obj.id}"
+                                derived_status = "cached_linked"
+                        
+                        elif candidates_list:
+                            # No track selected, but candidates exist
+                            link_status_text = "Manual linking required (Candidates available)"
+                            derived_status = "candidates_only"
+                            has_candidates = True
+                        
+                        # 4. Update Metadata
+                        link_status_data_for_title.update(
+                            {
+                                "link_status": derived_status,
+                                "tidal_track_id": linked_tidal_id,
+                                "tidal_track": tidal_track_obj,
+                                "score": score,
+                                "candidates": candidates_list
+                            }
+                        )
 
                     artists_str = ", ".join(
                         spotify_track_data_to_use.get("artists", [])
@@ -330,6 +396,24 @@ class TableHandler(QObject):
 
                 if rowData:
                     table.addRow(rowData, item_metadata)
+                    
+                    # Set Indicator Data (Column 0) for Candidates
+                    if has_candidates:
+                        indicator_item = table.item(index, 0)
+                        if indicator_item:
+                            indicator_data = {
+                                "has_candidates": True,
+                                "expanded": False,
+                                "candidate_count": len(candidates_list),
+                                "candidates_list": candidates_list,
+                                "linked_tidal_track_id": linked_tidal_id,
+                            }
+                            indicator_item.setData(QtCore.Qt.ItemDataRole.UserRole, indicator_data)
+                            indicator_item.setText(f"+ ({len(candidates_list)})")
+                    
+                    # Update row appearance (colors) based on status
+                    table._update_row_appearance_for_row(index)
+
                     status_col_idx = self.column_indices.get("Status")
                     if (
                         status_col_idx is not None
@@ -351,11 +435,9 @@ class TableHandler(QObject):
                             status_item.setToolTip(download_state.get("tooltip", ""))
                         elif status == "downloading":
                             table.removeCellWidget(index, status_col_idx)
-                            bar = QProgressBar()
-                            bar.setValue(progress)
-                            bar.setRange(0, 100)
-                            bar.setFixedHeight(14)
-                            bar.setTextVisible(False)
+                            bar = self._create_progress_bar()
+                            bar.setValue(int(progress))
+                            bar.setFormat(f"{int(progress)}%")
                             table.setCellWidget(index, status_col_idx, bar)
                         elif status == "completed":
                             status_item.setText("Completed")
@@ -557,6 +639,7 @@ class TableHandler(QObject):
 
     @pyqtSlot(str)
     def setup_progress_bar_for_download(self, track_id: str):
+        # Added check for column_indices to prevent AttributeError
         if not self.table_widget or "Status" not in self.column_indices:
             return
         row = self._find_row_for_track_id(track_id)
@@ -569,15 +652,13 @@ class TableHandler(QObject):
                 item.setText("")
                 item.setToolTip("")
 
-            bar = QProgressBar()
-            bar.setRange(0, 100)
-            bar.setTextVisible(False)
-            bar.setFixedHeight(14)
+            bar = self._create_progress_bar()
             self.table_widget.setCellWidget(row, status_col, bar)
             logger.debug(f"Setup progress bar for track {track_id} at row {row}")
 
     @pyqtSlot(str, int)
     def update_track_progress(self, track_id: str, percentage: int):
+        # Added check for column_indices to prevent AttributeError
         if not self.table_widget or "Status" not in self.column_indices:
             return
         row = self._find_row_for_track_id(track_id)
@@ -586,15 +667,14 @@ class TableHandler(QObject):
         status_col = self.column_indices["Status"]
         widget = self.table_widget.cellWidget(row, status_col)
         if not isinstance(widget, QProgressBar):
-            bar = QProgressBar()
-            bar.setRange(0, 100)
-            bar.setTextVisible(False)
-            bar.setFixedHeight(14)
+            bar = self._create_progress_bar()
             self.table_widget.setCellWidget(row, status_col, bar)
             widget = bar
         widget.setValue(int(percentage))
+        widget.setFormat(f"{percentage}%")
 
     def mark_track_completed(self, track_id: str, ok: bool, error_msg: str = ""):
+        # Added check for column_indices to prevent AttributeError
         if not self.table_widget or "Status" not in self.column_indices:
             return
         row = self._find_row_for_track_id(track_id)
@@ -722,11 +802,9 @@ class TableHandler(QObject):
                 status_item.setText("Pending for download")
                 status_item.setToolTip(tooltip)
             elif status == "downloading":
-                bar = QProgressBar()
-                bar.setRange(0, 100)
-                bar.setTextVisible(False)
-                bar.setFixedHeight(14)
+                bar = self._create_progress_bar()
                 bar.setValue(int(progress))
+                bar.setFormat(f"{int(progress)}%")
                 self.table_widget.setCellWidget(row, status_col, bar)
             elif status == "completed":
                 status_item.setText("Completed")
@@ -734,5 +812,3 @@ class TableHandler(QObject):
                 status_item.setText("Failed" if status == "failed" else "Cancelled")
                 if error:
                     status_item.setToolTip(error)
-
-# --- END OF FILE gui_table_handler.py ---

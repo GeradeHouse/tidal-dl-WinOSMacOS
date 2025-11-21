@@ -3,6 +3,6 @@
 """
 This file makes the 'gui' directory a Python package and exposes the main entry point.
 """
-from .gui import main
+from .gui_main import main
 
 __all__ = ["main"]

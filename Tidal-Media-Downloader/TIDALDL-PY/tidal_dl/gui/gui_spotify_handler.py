@@ -11,17 +11,18 @@ from ..spotify import SpotifyAPI
 from ..printf import Printf
 from ..tidal import Type, Track, TIDAL_API
 from .gui_utils import format_duration_ms
-from .gui_custom_dialog import ModernDarkDialog
+from .gui_custom_dialog import CustomQMessageBox
 from ..persistence import LinkPersistenceManager
+from .. import paths
 
 if TYPE_CHECKING:
-    from tidal_dl.gui.gui import MainView
+    from .gui_main import MainView
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (Spotify operations need visibility)
-from tidal_dl.gui.gui_logging import setup_gui_logger
+from .gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 
@@ -96,14 +97,14 @@ class SpotifyGuiHandler(QObject):
                     "After entering them, click 'Save' at the bottom of the settings page, then try connecting to Spotify again. "
                     "For setup help, click 'How to get Spotify Client ID and Secret?' in the settings."
                 )
-                custom_dialog = ModernDarkDialog(
+                
+                CustomQMessageBox.warning(
+                    parent=self.main_view,
                     title="Spotify Credentials Missing",
                     main_message="Please enter Spotify Client ID and Secret in the 'Spotify Account Settings' section.",
                     informative_text=informative_text_for_dialog,
-                    icon_path=info_icon_path,
-                    parent=self.main_view,
+                    icon_path=info_icon_path
                 )
-                custom_dialog.exec()
 
                 if hasattr(
                     self.main_view.auth_handler, "_last_spotify_trigger_was_interactive"

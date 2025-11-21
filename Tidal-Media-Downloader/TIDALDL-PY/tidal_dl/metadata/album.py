@@ -1,3 +1,5 @@
+# tidal_dl/metadata/album.py
+
 from __future__ import annotations
 
 import logging
@@ -251,7 +253,7 @@ class AlbumMetadata:
             else:
                 # If both are None, set a default empty list
                 artists = []
-                logger.warning(f"[from_tidal] Both 'artists' and 'artist' are None for album ID {item_id}. Using default 'Unknown Artist'.")
+                logger.debug(f"[from_tidal] Both 'artists' and 'artist' are None for album ID {item_id}. Using default 'Unknown Artist'.")
 
         disc_total_val = getattr(resp, "numberOfVolumes", 1)
         if disc_total_val is None:

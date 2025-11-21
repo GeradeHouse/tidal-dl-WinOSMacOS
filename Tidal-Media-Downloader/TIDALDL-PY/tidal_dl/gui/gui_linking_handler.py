@@ -6,13 +6,13 @@
 @File    :   gui_linking_handler.py
 @Time    :   2025/04/15
 @Author  :   GeradeHouse
-@Version :   1.0
+@Version :   1.6
 @Desc    :   Handles GUI interactions related to Spotify track linking.
 """
 
 import logging
-from typing import List, Optional, Dict, TYPE_CHECKING, Any, Tuple  # Added Tuple
-from PyQt6 import QtWidgets, QtCore  # Keep existing PyQt6 imports
+from typing import List, Optional, Dict, TYPE_CHECKING, Any, Tuple
+from PyQt6 import QtWidgets, QtCore
 from PyQt6.QtCore import (
     QObject,
     pyqtSignal,
@@ -21,41 +21,44 @@ from PyQt6.QtCore import (
     Qt,
     QItemSelection,
     QItemSelectionModel,
-)  # Added Qt, QItemSelection, QItemSelectionModel
-from ..model import Track, Playlist  # Keep Track import, add Playlist
-from ..tidal import TidalAPI  # Keep TidalAPI
+)
+from ..model import Track, Playlist
+from ..tidal import TidalAPI
 from ..printf import Printf
-from ..persistence import LinkPersistenceManager  # Keep persistence
+from ..persistence import LinkPersistenceManager
 from .gui_custom_dialog import CustomQMessageBox
 
 if TYPE_CHECKING:
-    from tidal_dl.gui.gui import MainView  # Add MainView hint
-    from tidal_dl.gui.gui_table_handler import TableHandler  # Add TableHandler hint
-
-    # Add SplitterTable import for type hinting
+    from tidal_dl.gui.gui_main import MainView
+    from tidal_dl.gui.gui_table_handler import TableHandler
     from tidal_dl.gui.gui_table import SplitterTable
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.ERROR)  # Set specific level for this module
+logger.setLevel(logging.ERROR)
 
-# Set up GUI logging with INFO level for this module (linking operations need visibility)
+# Set up GUI logging with INFO level for this module
 from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 
-class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
+class LinkingGuiHandler(QObject):
     """
     Handles interactions between the MainView GUI and the track linking logic.
     Manages context menus, starting the linking process, and updating the UI.
     """
 
     requestLinkingStart = pyqtSignal(
-        list, str, object  # MODIFIED: tracks_to_link_data, playlist_id, callback
+        list, str, object  # tracks_to_link_data, playlist_id, callback
     )
     manualLinkApplied = pyqtSignal(
         int
     )  # Signal to notify MainView that a manual link has been applied
-    linkProgress = pyqtSignal(str, int) # MODIFIED: Add progress signal (playlist_id, count)
+    linkProgress = pyqtSignal(str, int) # playlist_id, count
+    
+    # --- NEW SIGNALS for Tree Widget Progress ---
+    linkingStarted = pyqtSignal(str, str, int) # playlist_id, action, total
+    linkingFinished = pyqtSignal(str) # playlist_id
+    playlistQueued = pyqtSignal(str) # playlist_id
 
     def __init__(
         self,
@@ -65,40 +68,72 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         link_button: QtWidgets.QPushButton,
         parent: Optional["MainView"] = None,
     ) -> None:
-        super().__init__(parent)  # Pass parent to QObject init
+        super().__init__(parent)
         self.api = api
         self.table_handler = table_handler
         self.persistence_manager = persistence_manager
         self.link_button = link_button
-        self.main_view = parent  # Assuming parent is the MainView instance
-        # FIXED: Per-playlist counters to prevent cross-contamination
+        self.main_view = parent
+        
+        # Per-playlist counters to prevent cross-contamination
         self._processed_counters: Dict[str, int] = {}
-        # CRITICAL FIX: Track which playlist is being processed
+        self._total_counts: Dict[str, int] = {} # Track total items to detect completion
+        # Track which playlist is being processed
         self._current_processing_playlist_id: Optional[str] = None
+        
         # Connect manual link application to sub-row collapse
         self.manualLinkApplied.connect(self.table_handler.collapse_sub_row)
 
         # --- Connect Link Button Click (Persistent Connection) ---
-        # This connection is made once during initialization.
         self.link_button.clicked.connect(self._handle_link_button_click)
+        
+        # --- Connect Internal Signal to Capture State from External Triggers ---
+        self.linkingStarted.connect(self._on_linking_started_internal)
+        
         logger.debug(
             "Connected link_button clicked signal to _handle_link_button_click"
         )
-        # --- End Connection ---
+
+    @pyqtSlot(str, str, int)
+    def _on_linking_started_internal(self, playlist_id: str, action: str, total: int):
+        """
+        Internal slot to capture the start of a linking job, whether triggered internally
+        or externally (e.g., by TaskQueueManager). Initializes counters.
+        """
+        logger.info(f"Linking job started for playlist {playlist_id}. Total tracks: {total}")
+        self._processed_counters[playlist_id] = 0
+        self._total_counts[playlist_id] = total
+        
+        # Set the current processing ID so table updates occur if this playlist is viewed
+        self._current_processing_playlist_id = playlist_id
+
+    def _get_current_table_playlist_id(self) -> Optional[str]:
+        """
+        Returns the ID of the playlist currently displayed in the main table.
+        Used to prevent cross-talk where linking updates for one playlist
+        appear on the table of another.
+        """
+        if not self.main_view:
+            return None
+        
+        # s_playlist_obj is set in PlaylistTreeHandler.onPlaylistItemClicked
+        # and represents the playlist currently loaded in the view/table.
+        playlist_obj = getattr(self.main_view, "s_playlist_obj", None)
+        
+        if isinstance(playlist_obj, dict):
+            # Spotify playlist data structure
+            return playlist_obj.get("data", {}).get("id")
+        elif isinstance(playlist_obj, Playlist):
+            # Tidal playlist object
+            return getattr(playlist_obj, "uuid", None)
+        
+        return None
 
     def _get_linking_status_from_row(
         self, row_index: int
     ) -> Tuple[Optional[str], bool]:
         """
         Helper to get the linking status and candidate status from a table row's metadata.
-
-        Args:
-            row_index (int): The index of the row to check.
-
-        Returns:
-            Tuple[Optional[str], bool]: A tuple containing:
-                - The link status string ('found', 'cached_linked', 'manual_linked', 'not_linked', etc.) or None if error.
-                - A boolean indicating if the row has candidates.
         """
         if (
             not self.main_view
@@ -137,18 +172,13 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
 
     def update_link_button_state(self) -> None:
         """
-        Updates the visibility and text of the 'Link Tracks' button based
-        on whether the current context is a Spotify playlist, the table selection,
-        and the linking status of the relevant tracks.
+        Updates the visibility and text of the 'Link Tracks' button.
         """
         if (
             not self.main_view
             or not self.table_handler
             or not self.table_handler.table_widget
         ):
-            logger.error(
-                "Cannot update link button state: MainView, TableHandler, or TableWidget not available."
-            )
             self.link_button.setVisible(False)
             return
 
@@ -161,41 +191,33 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
 
         # --- Visibility ---
         self.link_button.setVisible(is_spotify_playlist_selected)
-        logger.debug(
-            f"Link Tracks button visibility set to: {is_spotify_playlist_selected}"
-        )
 
         if not is_spotify_playlist_selected:
-            return  # No need to update text if not visible
+            return
 
         # --- Text Logic ---
         selected_indices = sorted(
             list(set(idx.row() for idx in table.selectedIndexes()))
         )
-        button_text = "Link Tracks"  # Default
+        button_text = "Link Tracks"
 
         if selected_indices:
-            # --- Selection Exists ---
             any_selected_linked = False
             num_selected = len(selected_indices)
             for row_index in selected_indices:
                 link_status, _ = self._get_linking_status_from_row(row_index)
-                # Consider 'found', 'cached_linked', 'manual_linked' as linked
                 if link_status in ["found", "cached_linked", "manual_linked", "auto_linked", "found_uncertain"]:
                     any_selected_linked = True
-                    break  # Found one linked, no need to check further
+                    break
 
             if any_selected_linked:
                 button_text = f"Relink {num_selected} Selected"
             else:
                 button_text = f"Link {num_selected} Selected"
-            logger.debug(f"Link button state (Selection): Text='{button_text}'")
-
         else:
-            # --- No Selection ---
             any_all_linked = False
             num_total = table.rowCount()
-            if num_total > 0:  # Only check if table has rows
+            if num_total > 0:
                 for row_index in range(num_total):
                     link_status, _ = self._get_linking_status_from_row(row_index)
                     if link_status in ["found", "cached_linked", "manual_linked", "auto_linked", "found_uncertain"]:
@@ -207,33 +229,23 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 else:
                     button_text = "Link All Tracks"
             else:
-                # Table is empty, default text is fine, but disable button?
-                button_text = "Link All Tracks"  # Keep default text
-                # Optionally disable if table is empty: self.link_button.setEnabled(False)
-            logger.debug(f"Link button state (No Selection): Text='{button_text}'")
+                button_text = "Link All Tracks"
 
         self.link_button.setText(button_text)
-        # Ensure button is enabled unless linking is active
         self.link_button.setEnabled(
             not getattr(self.main_view, "linking_active", False)
         )
 
-    @pyqtSlot(QtWidgets.QMenu, list)  # Changed QPoint to QtWidgets.QMenu
+    @pyqtSlot(QtWidgets.QMenu, list)
     def spotifyLinkContextMenu(
         self, menu: QtWidgets.QMenu, selected_rows_indices: List[int]
-    ) -> None:  # Changed pos to menu
+    ) -> None:
         """Populates the given context menu with actions for linking Spotify tracks."""
         if not self.main_view:
-            logger.error("main_view is None in spotifyLinkContextMenu.")
             return
-        # table = self.main_view.tableWidget # Not needed if menu is passed in and executed by caller
 
-        # --- Determine if ANY selected track is linked ---
-        # This check needs to be more robust, similar to TableHandler, to include all valid linked statuses
         any_selected_linked = False
-        all_selected_linked_or_error = (
-            True  # Assume true, set to false if any are unlinked and not in an error
-        )
+        all_selected_linked_or_error = True
 
         valid_linked_statuses = [
             "found",
@@ -256,25 +268,16 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 link_status, _ = self._get_linking_status_from_row(row_index)
                 if link_status in valid_linked_statuses:
                     any_selected_linked = True
-                elif (
-                    link_status not in error_statuses
-                ):  # If it's not linked and not an error status, then not all are linked/error
+                elif link_status not in error_statuses:
                     all_selected_linked_or_error = False
 
-            if (
-                not any_selected_linked and not all_selected_linked_or_error
-            ):  # If no tracks are linked, and not all are in an error state, allow linking all
-                pass  # Default behavior is to link
-            elif (
-                not all_selected_linked_or_error
-            ):  # Some are linked, some are not (and not error)
-                any_selected_linked = True  # Treat as if some are linked for "Relink" text, but still allow linking unlinked ones.
-                # The actual linking logic in startLinkingSelectedTracks will skip already linked ones.
-        # --- End Check ---
+            if not any_selected_linked and not all_selected_linked_or_error:
+                pass
+            elif not all_selected_linked_or_error:
+                any_selected_linked = True
 
         num_selected = len(selected_rows_indices)
 
-        # Action to Link/Relink
         if any_selected_linked:
             action_text_link = f"Relink/Link {num_selected} selected Spotify track(s)"
         else:
@@ -287,7 +290,6 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 lambda: self.startLinkingSelectedTracks(selected_rows_indices)
             )
 
-        # Action to Unlink (only if at least one is linked)
         if any_selected_linked:
             menu.addSeparator()
             unlinkAction = menu.addAction(
@@ -297,19 +299,14 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 unlinkAction.setEnabled(True)
                 unlinkAction.triggered.connect(lambda: self.unlinkSelectedTracks(selected_rows_indices))
 
-        # menu.exec(table.mapToGlobal(pos)) # Execution is handled by the caller (TableHandler)
-
     def startLinkingSelectedTracks(self, selected_rows_indices: List[int]) -> None:
         """Initiates the track linking process for selected rows."""
         if not self.main_view:
-            return  # Existing check
+            return
         if self.main_view.linking_active:
             logger.warning("Attempted to start linking while already active.")
             return
 
-        logger.info(
-            f"Initiating linking for selected Spotify rows: {selected_rows_indices}"
-        )
         logger.info(
             f"Initiating linking for {len(selected_rows_indices)} selected Spotify track(s)..."
         )
@@ -317,7 +314,6 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         tracks_to_link_data = []
         table = self.main_view.tableWidget
         for row_index in selected_rows_indices:
-            # Get metadata from Title column (index 1)
             item_widget = table.item(row_index, 1)
             item_data = (
                 item_widget.data(QtCore.Qt.ItemDataRole.UserRole)
@@ -326,61 +322,49 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             )
             if isinstance(item_data, dict) and item_data.get("type") == "spotify_track":
                 spotify_metadata = item_data.get("data")
-                # Ensure essential keys exist before adding
                 if spotify_metadata and all(
                     k in spotify_metadata for k in ("name", "artists", "album", "id")
                 ):
                     tracks_to_link_data.append((row_index, spotify_metadata))
                 else:
-                    logger.warning(
-                        f"Skipping row {row_index} due to missing essential metadata "
-                        f"in retrieved data: {spotify_metadata}"
-                    )
-            else:
-                logger.warning(
-                    f"Skipping row {row_index} as it's not a Spotify track or data is missing."
-                )
+                    logger.warning(f"Skipping row {row_index} due to missing metadata.")
 
         if not tracks_to_link_data:
             CustomQMessageBox.information(
                 self.main_view,
                 "Selection Error",
                 "No Valid Tracks",
-                "No valid Spotify tracks were found in your selection.\n\nPlease ensure the selected tracks have complete metadata."
+                "No valid Spotify tracks were found in your selection."
             )
             return
 
-        logger.debug(
-            f"Emitting requestLinkingStart signal with {len(tracks_to_link_data)} tracks."
-        )
-        # CRITICAL FIX: Store the playlist ID when linking starts, before user can click other playlists
+        # Store the playlist ID when linking starts
         playlist_id = None
         if self.main_view and isinstance(self.main_view.s_playlist_obj, dict):
             playlist_id = self.main_view.s_playlist_obj.get("data", {}).get("id")
-            self._current_processing_playlist_id = playlist_id  # CRITICAL: Store it!
-            logger.debug(f"🔴🔴🔴 STORING: Set _current_processing_playlist_id = {playlist_id} for playlist '{self.main_view.s_playlist_obj.get('data', {}).get('name')}'")
-            logger.debug(f"🔴🔴🔴 STORING: Current main_view.s_playlist_obj = {self.main_view.s_playlist_obj}")
-            logger.debug(f"🔴🔴🔴 TRACKING: _current_processing_playlist_id now = {self._current_processing_playlist_id}")
+            self._current_processing_playlist_id = playlist_id
         
         if playlist_id:
+            # Initialize counters and emit start signal to setup progress bar
             self._processed_counters[playlist_id] = 0
+            self._total_counts[playlist_id] = len(tracks_to_link_data)
+            self.linkingStarted.emit(playlist_id, "Linking", len(tracks_to_link_data))
+            
         self.requestLinkingStart.emit(tracks_to_link_data, playlist_id, None)
 
     def linkAllSpotifyTracks(self) -> None:
         """Initiates the track linking process for ALL Spotify tracks currently in the table."""
         if not self.main_view:
-            return  # Existing check
+            return
         if self.main_view.linking_active:
             logger.warning("Attempted to start linking while already active.")
             return
 
-        logger.info("Initiating linking for ALL Spotify tracks in the table.")
         logger.info("Initiating linking for all Spotify tracks...")
 
         tracks_to_link_data = []
         table = self.main_view.tableWidget
         for row_index in range(table.rowCount()):
-            # Get metadata from Title column (index 1)
             item_widget = table.item(row_index, 1)
             item_data = (
                 item_widget.data(QtCore.Qt.ItemDataRole.UserRole)
@@ -389,73 +373,54 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             )
             if isinstance(item_data, dict) and item_data.get("type") == "spotify_track":
                 spotify_metadata = item_data.get("data")
-                # Ensure essential keys exist before adding
                 if spotify_metadata and all(
                     k in spotify_metadata for k in ("name", "artists", "album", "id")
                 ):
                     tracks_to_link_data.append((row_index, spotify_metadata))
-                else:
-                    logger.warning(
-                        f"Skipping row {row_index} due to missing essential metadata "
-                        f"in retrieved data: {spotify_metadata}"
-                    )
 
         if not tracks_to_link_data:
             CustomQMessageBox.information(
                 self.main_view,
                 "No Tracks to Link",
                 "No Spotify Tracks Found",
-                "No Spotify tracks were found in the current table.\n\nPlease load a Spotify playlist to begin linking."
+                "No Spotify tracks were found in the current table."
             )
             return
 
-        logger.debug(
-            f"Emitting requestLinkingStart signal with {len(tracks_to_link_data)} tracks for 'Link All'."
-        )
-        # CRITICAL FIX: Store the playlist ID when linking starts, before user can click other playlists
+        # Store the playlist ID when linking starts
         playlist_id = None
         if self.main_view and isinstance(self.main_view.s_playlist_obj, dict):
             playlist_id = self.main_view.s_playlist_obj.get("data", {}).get("id")
-            self._current_processing_playlist_id = playlist_id  # CRITICAL: Store it!
-            logger.debug(f"🔴🔴🔴 STORING: Set _current_processing_playlist_id = {playlist_id} for playlist '{self.main_view.s_playlist_obj.get('data', {}).get('name')}'")
-            logger.debug(f"🔴🔴🔴 STORING: Current main_view.s_playlist_obj = {self.main_view.s_playlist_obj}")
-            logger.debug(f"🔴🔴🔴 TRACKING: _current_processing_playlist_id now = {self._current_processing_playlist_id}")
+            self._current_processing_playlist_id = playlist_id
         
         if playlist_id:
+            # Initialize counters and emit start signal to setup progress bar
             self._processed_counters[playlist_id] = 0
+            self._total_counts[playlist_id] = len(tracks_to_link_data)
+            self.linkingStarted.emit(playlist_id, "Linking", len(tracks_to_link_data))
+            
         self.requestLinkingStart.emit(tracks_to_link_data, playlist_id, None)
 
     @pyqtSlot()
     def _handle_link_button_click(self):
         """
-        Determines whether to link all or selected tracks based on table selection
-        when the 'Link Tracks' / 'Relink Tracks' button is clicked.
+        Determines whether to link all or selected tracks based on table selection.
         """
         if (
             not self.main_view
             or not self.table_handler
             or not self.table_handler.table_widget
         ):
-            logger.error(
-                "Cannot handle link button click: MainView, TableHandler or TableWidget not available."
-            )
             return
 
         table = self.table_handler.table_widget
-        # Get selected row indices correctly using the table's method
         selected_indices = sorted(
             list(set(idx.row() for idx in table.selectedIndexes()))
         )
 
         if selected_indices:
-            logger.debug(
-                f"Link button clicked with {len(selected_indices)} rows selected. Calling startLinkingSelectedTracks."
-            )
             self.startLinkingSelectedTracks(selected_indices)
         else:
-            logger.debug(
-                "Link button clicked with no rows selected. Calling linkAllSpotifyTracks."
-            )
             self.linkAllSpotifyTracks()
 
     @pyqtSlot(int)
@@ -463,11 +428,13 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
         """Slot called when linking starts for a specific row."""
         try:
             if not self.main_view:
-                logger.error(
-                    f"main_view is None in onLinkingStarted for row {row_index}."
-                )
                 return
-            # Use table_handler to update the row status
+            
+            # Check context before updating UI
+            current_table_id = self._get_current_table_playlist_id()
+            if current_table_id != self._current_processing_playlist_id:
+                return
+
             self.table_handler.update_linking_status(row_index, "linking", "Linking...")
             logger.info(f"Linking started for row {row_index + 1}...")
         except Exception as e:
@@ -475,176 +442,130 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 f"Error updating linking status for row {row_index}: {e}", exc_info=True
             )
 
-    @pyqtSlot(int, object, object, object)
+    @pyqtSlot(int, object, object, object, object)
     def onLinkingFinished(
         self,
         row_index: int,
         tidal_track: Optional[Track],
         candidates: Optional[List[Dict]],
         score: Optional[int],
+        spotify_data: Optional[Dict] = None,
     ) -> None:
         """Slot called when linking finishes for a specific row."""
         if not self.main_view:
-            logger.error(f"main_view is None in onLinkingFinished for row {row_index}.")
             return
 
         status_text = ""
-        link_status = "not_linked"  # Default
+        link_status = "not_linked"
 
-        # The 'candidates' variable here refers to alternative candidates if a best_match (tidal_track) was found,
-        # or all potential candidates if no single best_match was identified by searchLinkTrack.
-
-        logger.debug(
-            f"[onLinkingFinished Row {row_index}] Received: BestMatchID='{getattr(tidal_track, 'id', 'N/A')}', Candidates (alternatives/all) type: {type(candidates)}, len: {len(candidates) if candidates else 0}, Score={score}"
-        )
-        if candidates:
-            logger.debug(
-                f"[onLinkingFinished Row {row_index}] First candidate details: TID='{getattr(candidates[0].get('tidal_track'),'id','N/A')}', Title='{getattr(candidates[0].get('tidal_track'),'title','N/A')}'"
-            )
-
-        if tidal_track:  # A best guess/match was found
-            if (
-                score is not None and score <= 1
-            ):  # Confident automatic link (score 0 or 1)
+        if tidal_track:
+            if score is not None and score <= 1:
                 status_text = f"Linked (Certainty score: {score}): {tidal_track.id}"
                 link_status = "auto_linked"
-                logger.debug(
-                    f"Row {row_index + 1}: Auto-linked. Tidal ID: {tidal_track.id}, Score: {score}"
-                )
-            elif score is not None and score > 1:  # Score is > 1
-                if (
-                    candidates
-                ):  # Best guess found, score > 1, AND other candidates exist
+            elif score is not None and score > 1:
+                if candidates:
                     status_text = f"Manual linking required (Certainty score: {score}): {tidal_track.id}"
                     link_status = "manual_review_needed"
-                    logger.debug(
-                        f"Row {row_index + 1}: Manual review needed. Best guess Tidal ID: {tidal_track.id}, Score: {score}, Alternatives available."
-                    )
-                else:  # Best guess found, score > 1, but NO other candidates exist
-                    status_text = (
-                        f"Linked (Uncertain, Score: {score}): {tidal_track.id}"
-                    )
+                else:
+                    status_text = f"Linked (Uncertain, Score: {score}): {tidal_track.id}"
                     link_status = "found_uncertain"
-                    logger.debug(
-                        f"Row {row_index + 1}: Linked (uncertain). Tidal ID: {tidal_track.id}, Score: {score}, No other candidates."
-                    )
-            else:  # Score is None, but tidal_track (best guess) was present
-                status_text = f"Linked: {tidal_track.id}"  # Fallback if score is None
-                link_status = "auto_linked"  # Treat as auto_linked
-                logger.debug(
-                    f"Row {row_index + 1}: Linked (score was None). Tidal ID: {tidal_track.id}"
-                )
+            else:
+                status_text = f"Linked: {tidal_track.id}"
+                link_status = "auto_linked"
 
-        elif (
-            candidates
-        ):  # No single best_match (tidal_track is None), but candidates exist
+        elif candidates:
             status_text = "Manual linking required (Candidates available)"
             link_status = "candidates_only"
-            logger.debug(
-                f"Row {row_index + 1}: Not auto-linked, but {len(candidates)} candidates found."
-            )
-        else:  # No best_match (tidal_track is None), and no candidates
+        else:
             status_text = "Not Found"
             link_status = "not_found"
-            logger.debug(f"Row {row_index + 1}: Not linked, no candidates found.")
 
-        # Update table via TableHandler
-        logger.debug(
-            f"[onLinkingFinished Row {row_index}] About to call update_linking_status. Status='{link_status}', TidalTrackID='{getattr(tidal_track, 'id', 'N/A')}', Candidates type: {type(candidates)}, len: {len(candidates) if candidates else 0}, Score={score}"
-        )
-        self.table_handler.update_linking_status(
-            row_index=row_index,
-            status=link_status,
-            status_text=status_text,
-            tidal_track=tidal_track,
-            candidates=candidates,  # Pass the candidates list (alternatives or all)
-            score=score,
-        )
+        # Check context before updating UI
+        current_table_id = self._get_current_table_playlist_id()
+        if current_table_id == self._current_processing_playlist_id:
+            self.table_handler.update_linking_status(
+                row_index=row_index,
+                status=link_status,
+                status_text=status_text,
+                tidal_track=tidal_track,
+                candidates=candidates,
+                score=score,
+            )
 
         logger.info(f"Linking finished for row {row_index + 1}: {status_text}")
 
         # --- Persist Link ---
-        # Persist only if it's an automatic or manually confirmed link.
-        # For "auto_linked", "found_uncertain", and "manual_linked" (handled elsewhere)
-        should_persist = link_status in ["auto_linked", "found_uncertain"]
+        should_persist = link_status not in ["not_linked", "linking", "error"]
         
-        # MODIFIED: Fix cross-contamination by using stored processing playlist ID
         playlist_id = self._current_processing_playlist_id
         if not playlist_id and self.main_view and isinstance(self.main_view.s_playlist_obj, dict):
             playlist_id = self.main_view.s_playlist_obj.get("data", {}).get("id")
 
-        if (
-            should_persist
-            and tidal_track
-            and playlist_id
-        ):
-            table_widget = self.main_view.tableWidget
-            title_item = table_widget.item(row_index, 1)  # Title is column 1
-            title_item_data = (
-                title_item.data(QtCore.Qt.ItemDataRole.UserRole) if title_item else None
-            )
+        if should_persist and playlist_id:
             spotify_track_id = None
-            spotify_metadata = {}  # Initialize spotify_metadata
-            if (
-                isinstance(title_item_data, dict)
-                and title_item_data.get("type") == "spotify_track"
-            ):
-                spotify_metadata = title_item_data.get(
-                    "data", {}
-                )  # This should be the full Spotify track details
-                spotify_track_id = spotify_metadata.get("id")
+            spotify_metadata = {}
+            
+            if spotify_data:
+                spotify_metadata = spotify_data
+                spotify_track_id = spotify_data.get("id")
+            else:
+                # Fallback to table scraping ONLY if we are viewing the correct playlist
+                if current_table_id == playlist_id:
+                    table_widget = self.main_view.tableWidget
+                    title_item = table_widget.item(row_index, 1)
+                    title_item_data = (
+                        title_item.data(QtCore.Qt.ItemDataRole.UserRole) if title_item else None
+                    )
+                    if (
+                        isinstance(title_item_data, dict)
+                        and title_item_data.get("type") == "spotify_track"
+                    ):
+                        spotify_metadata = title_item_data.get("data", {})
+                        spotify_track_id = spotify_metadata.get("id")
 
-            if (
-                playlist_id and spotify_track_id and spotify_metadata and tidal_track
-            ):  # Ensure all necessary data is present
+            if spotify_track_id:
                 pm = getattr(self.main_view, "link_persistence_manager", None)
                 if pm:
-                    # For auto_linked or found_uncertain, we persist the best_match.
-                    # If there were alternatives (candidates), they are stored with the link.
                     pm.add_or_update_link(
                         playlist_id=playlist_id,
                         spotify_track_id=spotify_track_id,
-                        spotify_track_details=spotify_metadata,  # Pass full Spotify details
-                        tidal_track_object=tidal_track,  # Pass full Tidal Track object
+                        spotify_track_details=spotify_metadata,
+                        tidal_track_object=tidal_track,
                         candidates=candidates if candidates else None,
+                        score=score
                     )
-                    logger.debug(
-                        f"Persisted detailed link ({link_status}){' with alternatives' if candidates else ''}: {playlist_id} | {spotify_track_id} -> {tidal_track.id}"
-                    )
-                else:
-                    logger.error(
-                        "Link persistence manager not found on main_view. Cannot persist link."
-                    )
-            else:
-                logger.warning(
-                    f"Could not persist link for row {row_index}: Missing playlist_id ({playlist_id}) or spotify_track_id ({spotify_track_id})"
-                )
         # --- End Persist Link ---
 
-        # FIXED: Only use stored processing ID to prevent cross-contamination
+        # Update progress counters and check for completion
         processing_playlist_id = self._current_processing_playlist_id
-        
         if processing_playlist_id:
             current_count = self._processed_counters.get(processing_playlist_id, 0) + 1
             self._processed_counters[processing_playlist_id] = current_count
             self.linkProgress.emit(str(processing_playlist_id), current_count)
-        else:
-            logger.warning(f"🔴🔴🔴 CRITICAL: No processing playlist ID available - this indicates a setup issue")
+            
+            # Check if all items are processed
+            total = self._total_counts.get(processing_playlist_id, 0)
+            if total > 0 and current_count >= total:
+                logger.info(f"Playlist {processing_playlist_id} linking completed ({current_count}/{total}). Cleaning up.")
+                self.linkingFinished.emit(str(processing_playlist_id))
+                self._current_processing_playlist_id = None
+                self.update_link_button_state()
+                if self.main_view and hasattr(self.main_view, "download_handler") and self.main_view.download_handler:
+                    self.main_view.download_handler._update_download_button_text()
 
     @pyqtSlot(int, str)
     def onLinkingError(self, row_index: int, error_message: str) -> None:
         """Slot called when an error occurs during linking for a specific row."""
-        logger.error(f"Linking error for row {row_index + 1}: {error_message}")
         try:
             if not self.main_view:
-                logger.error(
-                    f"main_view is None in onLinkingError for row {row_index}."
-                )
                 return
-            # Update table via TableHandler
-            self.table_handler.update_linking_status(
-                row_index=row_index, status="error", status_text=f"Error: {error_message}", error_message=error_message
-            )
+            
+            current_table_id = self._get_current_table_playlist_id()
+            if current_table_id == self._current_processing_playlist_id:
+                self.table_handler.update_linking_status(
+                    row_index=row_index, status="error", status_text=f"Error: {error_message}", error_message=error_message
+                )
+            
             logger.error(f"Linking error for row {row_index + 1}: {error_message}")
         except Exception as e:
             logger.error(
@@ -652,40 +573,47 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 exc_info=True,
             )
         
-        # FIXED: Increment counter for this specific playlist and emit progress even on error
-        # CRITICAL FIX: Use stored processing ID, not current selection which may have changed
+        # Update progress counters and check for completion
         processing_playlist_id = self._current_processing_playlist_id
         if processing_playlist_id:
             current_count = self._processed_counters.get(processing_playlist_id, 0) + 1
             self._processed_counters[processing_playlist_id] = current_count
-            logger.debug(f"🔴 CRITICAL FIX: Emitting progress for processing playlist {processing_playlist_id} count {current_count} (ERROR)")
             self.linkProgress.emit(str(processing_playlist_id), current_count)
+
+            # Check if all items are processed
+            total = self._total_counts.get(processing_playlist_id, 0)
+            if total > 0 and current_count >= total:
+                logger.info(f"Playlist {processing_playlist_id} linking completed ({current_count}/{total}) [Error path]. Cleaning up.")
+                self.linkingFinished.emit(str(processing_playlist_id))
+                self._current_processing_playlist_id = None
+                self.update_link_button_state()
+                if self.main_view and hasattr(self.main_view, "download_handler") and self.main_view.download_handler:
+                    self.main_view.download_handler._update_download_button_text()
 
     @pyqtSlot()
     def onAllLinkingTasksFinished(self) -> None:
         """Slot called when the LinkingWorker has processed all tracks."""
         logger.info("All linking tasks finished.")
-        logger.info("Finished linking process for all selected/queued tracks.")
         
-        # CRITICAL FIX: Clean up the processing playlist ID
+        # Capture ID before clearing
+        finished_playlist_id = self._current_processing_playlist_id
+
+        # Clean up the processing playlist ID if not already done
         if self._current_processing_playlist_id:
-            logger.debug(f"🔴 CRITICAL FIX: Cleaning up processing playlist ID: {self._current_processing_playlist_id}")
             self._current_processing_playlist_id = None
         
-        # Update button state after linking finishes
-        self.update_link_button_state()  # This updates the "Link Tracks" button
+        # Emit finished signal to clean up progress bar if not already done
+        if finished_playlist_id:
+            self.linkingFinished.emit(finished_playlist_id)
+        
+        self.update_link_button_state()
 
-        # --- NEW: Update the "Download" button text as well ---
         if (
             self.main_view
             and hasattr(self.main_view, "download_handler")
             and self.main_view.download_handler
         ):
-            logger.debug(
-                "onAllLinkingTasksFinished: Triggering download button text update."
-            )
             self.main_view.download_handler._update_download_button_text()
-        # --- END NEW ---
 
     @pyqtSlot()
     def onStopLinkingClicked(self):
@@ -694,26 +622,26 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             return
         if self.main_view.linking_active:
             logger.info("Stop linking requested by user.")
-            logger.info("Stop linking requested...")
             
-            # CRITICAL FIX: Clean up the processing playlist ID
+            # Capture ID before clearing
+            stopped_playlist_id = self._current_processing_playlist_id
+
             if self._current_processing_playlist_id:
-                logger.debug(f"🔴 CRITICAL FIX: Cleaning up processing playlist ID on stop: {self._current_processing_playlist_id}")
                 self._current_processing_playlist_id = None
             
-            self.main_view.linking_stop_event.set()  # Signal the worker thread
+            # Emit finished signal to clean up progress bar
+            if stopped_playlist_id:
+                self.linkingFinished.emit(stopped_playlist_id)
+            
+            self.main_view.linking_stop_event.set()
             self.link_button.setText("Stopping...")
-            self.link_button.setEnabled(False)  # Disable button while stopping
-        else:
-            logger.warning("onStopLinkingClicked called but linking is not active.")
+            self.link_button.setEnabled(False)
 
     @pyqtSlot(int)
     def on_no_match_selected(self, main_row_index: int):
         """
         Handles the action when the user declares that none of the candidates are a match.
         """
-        logger.info(f"[LinkingGuiHandler] 'No Match' selected for row {main_row_index}.")
-
         if not self.main_view or not self.table_handler or not self.table_handler.table_widget:
             return
 
@@ -723,7 +651,7 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             status="not_found",
             status_text="Not Found (Manual)",
             tidal_track=None,
-            candidates=None, # Clear candidates as none matched
+            candidates=None,
             score=None
         )
 
@@ -746,31 +674,21 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 playlist_id=playlist_id,
                 spotify_track_id=spotify_track_id,
                 spotify_track_details=spotify_metadata,
-                tidal_track_object=None, # Explicitly link to None
+                tidal_track_object=None,
             )
-            logger.debug(f"Persisted 'No Match' for Spotify track {spotify_track_id} in playlist {playlist_id}.")
 
-        # Finally, collapse the sub-row
         self.manualLinkApplied.emit(main_row_index)
 
     @pyqtSlot(int, object)
     def onManualLinkSelected(self, main_row_index: int, selected_track: Track) -> None:
         """
         Handles the signal emitted when a user manually selects a linking candidate.
-        Updates the table, persists the link, and triggers sub-row collapse.
         """
-        logger.info(
-            f"[LinkingGuiHandler] Manual link selected for row {main_row_index}: Tidal Track ID {selected_track.id}"
-        )
-
         if (
             not self.main_view
             or not self.table_handler
             or not self.table_handler.table_widget
         ):
-            logger.error(
-                f"Cannot process manual link: MainView, TableHandler or TableWidget not available."
-            )
             return
 
         table_widget = self.table_handler.table_widget
@@ -782,13 +700,12 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             status="manual_linked",
             status_text=status_text,
             tidal_track=selected_track,
-            candidates=None # Clear candidates after manual selection
+            candidates=None
         )
 
-        # Retrieve Spotify track ID from the main table row data (Title column)
         title_item = table_widget.item(main_row_index, 1)
         spotify_track_id = None
-        spotify_metadata = {}  # Ensure spotify_metadata is defined
+        spotify_metadata = {}
 
         if title_item:
             title_item_data = title_item.data(QtCore.Qt.ItemDataRole.UserRole)
@@ -796,58 +713,32 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                 isinstance(title_item_data, dict)
                 and title_item_data.get("type") == "spotify_track"
             ):
-                spotify_metadata = title_item_data.get(
-                    "data", {}
-                )  # This should be the full Spotify track details
+                spotify_metadata = title_item_data.get("data", {})
                 spotify_track_id = spotify_metadata.get("id")
 
-        # Retrieve playlist ID, handling both dict and Playlist object types
         playlist_id = None
         playlist_obj = self.main_view.s_playlist_obj
         if isinstance(playlist_obj, dict):
-            # Assuming Spotify playlist data is stored directly
             playlist_id = playlist_obj.get("data", {}).get("id")
-        elif isinstance(
-            playlist_obj, Playlist
-        ):  # Make sure Playlist is imported if not already
+        elif isinstance(playlist_obj, Playlist):
             playlist_id = playlist_obj.uuid
-        elif playlist_obj:
-            logger.warning(f"Unexpected type for s_playlist_obj: {type(playlist_obj)}")
 
-        if (
-            spotify_track_id and playlist_id and spotify_metadata and selected_track
-        ):  # Ensure all necessary data
-            # Persist the manual link
+        if spotify_track_id and playlist_id and spotify_metadata and selected_track:
             self.persistence_manager.add_or_update_link(
                 playlist_id=playlist_id,
                 spotify_track_id=spotify_track_id,
-                spotify_track_details=spotify_metadata,  # Pass full Spotify details
-                tidal_track_object=selected_track,  # Pass full Tidal Track object
-                # No candidates for manual link, so it defaults to None
-            )
-            logger.debug(
-                f"[LinkingGuiHandler] Persisted detailed manual link: Spotify {spotify_track_id} -> Tidal {selected_track.id} for playlist {playlist_id}"
-            )
-        else:
-            logger.error(
-                f"[LinkingGuiHandler] Could not persist manual link for row {main_row_index}: Missing Spotify Track ID ({spotify_track_id}) or Playlist ID ({playlist_id})."
+                spotify_track_details=spotify_metadata,
+                tidal_track_object=selected_track,
             )
 
-        # --- THIS IS THE FIX ---
-        # Emit signal to trigger sub-row collapse
         self.manualLinkApplied.emit(main_row_index)
-        # --- END OF FIX ---
-
-        # Update the main link button state after applying a manual link
         self.update_link_button_state()
 
     def unlinkSelectedTracks(self, selected_rows_indices: List[int]):
         """
         Removes the link for the selected Spotify tracks.
         """
-        logger.info(f"Unlinking {len(selected_rows_indices)} selected tracks.")
         if not self.main_view or not self.table_handler or not self.table_handler.table_widget or not self.persistence_manager:
-            logger.error("Cannot unlink tracks: critical components are missing (MainView, TableHandler, TableWidget, or PersistenceManager).")
             return
 
         playlist_id = None
@@ -856,7 +747,6 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             playlist_id = playlist_obj.get("data", {}).get("id")
 
         if not playlist_id:
-            logger.error("Cannot unlink tracks: could not determine playlist ID.")
             CustomQMessageBox.information(self.main_view, "Error", "Playlist Error", "Could not determine the current playlist.")
             return
 
@@ -870,10 +760,8 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
             if isinstance(item_data, dict) and item_data.get("type") == "spotify_track":
                 spotify_track_id = item_data.get("data", {}).get("id")
                 if spotify_track_id:
-                    # Remove from persistence
                     self.persistence_manager.remove_link(playlist_id, spotify_track_id)
                     
-                    # Update UI
                     self.table_handler.update_linking_status(
                         row_index=row_index,
                         status="not_linked",
@@ -883,7 +771,6 @@ class LinkingGuiHandler(QObject):  # Inherit from QObject to use signals
                         score=None
                     )
         
-        logger.info(f"Finished unlinking {len(selected_rows_indices)} track(s).")
         self.update_link_button_state()
         if self.main_view.download_handler:
             self.main_view.download_handler._update_download_button_text()

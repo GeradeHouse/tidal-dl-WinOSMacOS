@@ -148,6 +148,10 @@ class PlaylistItemProgressWidget(QWidget):
             self.status_container.setVisible(True)
             visibility_changed = True
 
+        # Ensure progress bar is visible (might be hidden by set_queued)
+        self.progress_bar.setVisible(True)
+        self.percentage_label.setVisible(True)
+
         self.status_label.setText(f"{action_text}: {current}/{total}")
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(current)
@@ -158,6 +162,22 @@ class PlaylistItemProgressWidget(QWidget):
         self.percentage_label.setText(f"{percentage}%")
         
         # If visibility changed, we need to notify the parent tree item to resize
+        if visibility_changed:
+            self.geometryRequest.emit()
+
+    def set_queued(self):
+        """Sets the widget to a 'Queued' state."""
+        visibility_changed = False
+        
+        if not self.status_container.isVisible():
+            self.status_container.setVisible(True)
+            visibility_changed = True
+            
+        self.status_label.setText("Queued to be processed")
+        # Hide progress bar elements for cleaner look
+        self.progress_bar.setVisible(False)
+        self.percentage_label.setVisible(False)
+        
         if visibility_changed:
             self.geometryRequest.emit()
 
@@ -172,6 +192,8 @@ class PlaylistItemProgressWidget(QWidget):
         self.progress_bar.setValue(0)
         self.progress_bar.setMaximum(100)
         self.percentage_label.setText("0%")
+        self.progress_bar.setVisible(True) # Reset visibility
+        self.percentage_label.setVisible(True)
         
         if visibility_changed:
             self.geometryRequest.emit()

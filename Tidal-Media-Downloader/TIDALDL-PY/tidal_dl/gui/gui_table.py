@@ -1614,6 +1614,3 @@ class CandidateWidget(QtWidgets.QWidget):
         )
         # If you need to know which candidate was "selected" (but not yet chosen via "Select" button):
         # self.currently_highlighted_candidate_index = selected_row
-
-
-# --- END OF FILE gui_table.py ---

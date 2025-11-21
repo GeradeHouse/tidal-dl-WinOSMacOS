@@ -68,7 +68,7 @@ from .gui_utils import enableGui, EmittingStream, append_text_to_output
 from .gui_custom_dialog import CustomQMessageBox
 from .gui_resize_handler import ResizeHandler
 from .gui_event_handlers import MainViewEventHandlers
-from .task_queue_manager import TaskQueueManager # Import the new manager
+from .gui_task_queue_manager import TaskQueueManager # Import the new manager
 from .gui_logging import setup_gui_logger, get_gui_manager
 
 if TYPE_CHECKING:
@@ -88,7 +88,8 @@ setup_gui_logger(__name__, logging.INFO)
 
 class MainView(QWidget):
     s_linkingStarted = pyqtSignal(int)
-    s_linkingFinished = pyqtSignal(int, object, object, object)
+    # MODIFIED: Added 'object' (for dict) to the signal signature to match LinkingWorker
+    s_linkingFinished = pyqtSignal(int, object, object, object, object)
     s_linkingError = pyqtSignal(int, str)
     s_spotifyLoginFinished = pyqtSignal(object)
     s_spotifyPlaylistsFetched = pyqtSignal(list)
@@ -744,11 +745,14 @@ class MainView(QWidget):
         if not tracks_to_link_data or self.linking_active:
             return
         
-        # CRITICAL FIX: Set processing playlist ID if provided by TaskQueueManager
+        # CRITICAL FIX: Set processing playlist ID and TOTAL count if provided by TaskQueueManager
+        # This ensures that jobs started via the Tree Context Menu (which bypass LinkingGuiHandler.startLinkingSelectedTracks)
+        # have the correct total count for the progress bar cleanup logic.
         if playlist_id:
             self.linking_gui_handler._current_processing_playlist_id = playlist_id
             self.linking_gui_handler._processed_counters[playlist_id] = 0
-            logger_gui.debug(f"🔴🔴🔴 SETTING: Stored processing playlist ID in startLinkingWorker: {playlist_id}")
+            self.linking_gui_handler._total_counts[playlist_id] = len(tracks_to_link_data)
+            logger_gui.debug(f"🔴🔴🔴 SETTING: Stored processing playlist ID and TOTAL ({len(tracks_to_link_data)}) in startLinkingWorker: {playlist_id}")
         
         self.linking_active = True
         self.linking_stop_event.clear()

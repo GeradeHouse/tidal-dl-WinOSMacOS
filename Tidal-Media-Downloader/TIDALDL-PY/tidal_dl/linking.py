@@ -1,6 +1,9 @@
+# tidal_dl/linking.py
+
 import logging
 import re
 import threading
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import aigpy
@@ -29,6 +32,10 @@ except ImportError:
         return model  # Fallback for aigpy function
 
 def normalize_title(title: Optional[str]) -> str:
+    """
+    Normalizes a title for SEARCH QUERY generation.
+    Removes brackets and common suffixes to broaden search results.
+    """
     if not title:
         return ""
     # Remove common tags, version info, brackets, hyphens used for separation, and extra whitespace
@@ -45,6 +52,22 @@ def normalize_title(title: Optional[str]) -> str:
     # Remove leading/trailing whitespace and reduce multiple spaces to one
     normalized = " ".join(normalized.strip().split())
     return normalized
+
+def fuzzy_normalize(text: Optional[str]) -> str:
+    """
+    Normalizes a string for COMPARISON/SCORING.
+    Aggressively strips accents, punctuation, and whitespace to match content.
+    Example: "Title (Remix)" == "Title - Remix" -> "titleremix"
+    """
+    if not text:
+        return ""
+    # Normalize unicode characters (e.g. accents) to ASCII equivalent
+    text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('utf-8')
+    # Lowercase
+    text = text.lower()
+    # Remove all non-alphanumeric characters (a-z, 0-9)
+    text = re.sub(r'[^a-z0-9]', '', text)
+    return text
 
 
 def searchLinkTrack(
@@ -499,35 +522,70 @@ def searchLinkTrack(
                     score = 0  # Lower is better, initialize score for this track
                     mismatch_reasons: List[str] = []  # Reasons for score penalties
 
-                    # --- Title Scoring (using normalization) ---
-                    spotify_title_normalized = normalize_title(title)
-                    tidal_title_normalized = normalize_title(track.title)
+                    # --- Title Scoring (using fuzzy normalization) ---
+                    spotify_title_fuzzy = fuzzy_normalize(title)
+                    tidal_title_fuzzy = fuzzy_normalize(track.title)
 
-                    if spotify_title_normalized != tidal_title_normalized:
+                    title_score = 0
+                    if spotify_title_fuzzy != tidal_title_fuzzy:
+                        title_score = 1
                         score += 1  # Penalize if normalized titles don't match
                         mismatch_reasons.append("Title Differs")
                         # Buffer this detail
                         debug_buffer.append(
-                            f"    - Normalized title mismatch: Spotify='{spotify_title_normalized}', Tidal='{tidal_title_normalized}'"
+                            f"    - Fuzzy title mismatch: Spotify='{spotify_title_fuzzy}', Tidal='{tidal_title_fuzzy}'"
                         )
                     # --- End Title Scoring ---
 
                     # Score based on primary artist match
-                    tidal_artists_lower = (
-                        [
-                            a.name.lower()
-                            for a in cast(List[Artist], track.artists)
-                            if hasattr(a, "name") and a.name
-                        ]
-                        if hasattr(track, "artists") and track.artists
-                        else []
-                    )
-                    if primary_artist.lower() not in tidal_artists_lower:
-                        score += 1  # Penalize artist mismatch
-                        mismatch_reasons.append("Artist Mismatch")
+                    artist_score = 0
+                    primary_artist_fuzzy = fuzzy_normalize(primary_artist)
+                    tidal_artists_fuzzy = [
+                        fuzzy_normalize(a.name)
+                        for a in cast(List[Artist], track.artists)
+                        if hasattr(a, "name") and a.name
+                    ]
+                    
+                    if primary_artist_fuzzy not in tidal_artists_fuzzy:
+                        # Try partial match if exact match fails
+                        if not any(primary_artist_fuzzy in ta for ta in tidal_artists_fuzzy):
+                            artist_score = 1
+                            score += 1  # Penalize artist mismatch
+                            mismatch_reasons.append("Artist Mismatch")
+                            debug_buffer.append(
+                                f"    - Primary artist mismatch: Spotify='{primary_artist_fuzzy}', Tidal Artists='{tidal_artists_fuzzy}'"
+                            )
+
+                    # Score based on duration difference
+                    duration_score = 0
+                    duration_diff = float("inf")
+                    tidal_duration = getattr(track, "duration", None)
+                    if spotify_duration_s is not None and tidal_duration is not None:
+                        duration_diff = abs(tidal_duration - spotify_duration_s)
+                        if duration_diff > 30:  # Penalize duration difference > 30s more
+                            duration_score = 2
+                            score += 2
+                            mismatch_reasons.append("Duration > 30s")
+                        elif duration_diff > 10:  # Penalize duration difference > 10s
+                            duration_score = 1
+                            score += 1
+                            mismatch_reasons.append("Duration > 10s")
+                        if duration_score > 0:
+                            debug_buffer.append(
+                                f"    - Duration mismatch penalty: Diff={duration_diff:.2f}s, Penalty={duration_score}"
+                            )
+                    else:
+                        duration_score = 1
+                        score += 1  # Penalize if duration can't be compared
+                        mismatch_reasons.append("Duration Incomparable")
                         debug_buffer.append(
-                            f"    - Primary artist mismatch: Spotify='{primary_artist}', Tidal Artists='{[a.name for a in cast(List[Artist], track.artists) if hasattr(a, 'name')]}'"
-                        )  # Log actual names
+                            f"    - Duration mismatch penalty: Cannot compare durations (Spotify: {spotify_duration_s}, Tidal: {tidal_duration})"
+                        )
+
+                    # --- Core Match Check ---
+                    # If Title, Artist, and Duration match perfectly, we consider this a strong match
+                    # and ignore Album/ISRC penalties (likely same track on different release).
+                    core_match = (title_score == 0 and artist_score == 0 and duration_score == 0)
 
                     # Score based on album match
                     tidal_album_title = getattr(
@@ -538,49 +596,32 @@ def searchLinkTrack(
                         and album
                         and tidal_album_title.lower() != album.lower()
                     ):
-                        score += 1  # Penalize album mismatch
-                        mismatch_reasons.append("Album Mismatch")
-                        debug_buffer.append(
-                            f"    - Album mismatch: Spotify='{album}', Tidal='{tidal_album_title}'"
-                        )
-
-                    # Score based on duration difference
-                    duration_diff = float("inf")
-                    tidal_duration = getattr(track, "duration", None)
-                    if spotify_duration_s is not None and tidal_duration is not None:
-                        duration_diff = abs(tidal_duration - spotify_duration_s)
-                        duration_penalty = 0
-                        if (
-                            duration_diff > 10
-                        ):  # Penalize duration difference > 10s more
-                            duration_penalty = 2
-                            score += 2
-                            mismatch_reasons.append("Duration > 10s")
-                        elif duration_diff > 5:  # Penalize duration difference > 5s
-                            duration_penalty = 1
-                            score += 1
-                            mismatch_reasons.append("Duration > 5s")
-                        if duration_penalty > 0:
+                        if not core_match:
+                            score += 1  # Penalize album mismatch
+                            mismatch_reasons.append("Album Mismatch")
                             debug_buffer.append(
-                                f"    - Duration mismatch penalty: Diff={duration_diff:.2f}s, Penalty={duration_penalty}"
+                                f"    - Album mismatch: Spotify='{album}', Tidal='{tidal_album_title}'"
                             )
-                    else:
-                        score += 1  # Penalize if duration can't be compared
-                        mismatch_reasons.append("Duration Incomparable")
-                        debug_buffer.append(
-                            f"    - Duration mismatch penalty: Cannot compare durations (Spotify: {spotify_duration_s}, Tidal: {tidal_duration})"
-                        )
+                        else:
+                            debug_buffer.append(
+                                f"    - Album mismatch ignored due to Core Match: Spotify='{album}', Tidal='{tidal_album_title}'"
+                            )
 
                     # --- Calculate final score including ISRC penalty BEFORE comparing ---
                     isrc_penalty = 0  # Default penalty to 0
                     tidal_isrc = getattr(track, "isrc", None)
                     if isrc and tidal_isrc and isrc.lower() != tidal_isrc.lower():
-                        isrc_penalty = 2  # Define penalty value
-                        mismatch_reasons.append("ISRC Mismatch")
-                        # Buffer the penalty application detail
-                        debug_buffer.append(
-                            f"    - ISRC mismatch penalty applied: Spotify='{isrc}', Tidal='{tidal_isrc}', Penalty={isrc_penalty}"
-                        )
+                        if not core_match:
+                            isrc_penalty = 2  # Define penalty value
+                            mismatch_reasons.append("ISRC Mismatch")
+                            # Buffer the penalty application detail
+                            debug_buffer.append(
+                                f"    - ISRC mismatch penalty applied: Spotify='{isrc}', Tidal='{tidal_isrc}', Penalty={isrc_penalty}"
+                            )
+                        else:
+                            debug_buffer.append(
+                                f"    - ISRC mismatch ignored due to Core Match: Spotify='{isrc}', Tidal='{tidal_isrc}'"
+                            )
 
                     # Calculate the final score for this specific track including all penalties
                     # 'score' here holds the score from title, artist, album, duration checks
@@ -760,9 +801,10 @@ def searchLinkTrack(
 # --- Linking Worker Class (Moved from gui.py) ---
 class LinkingWorker(QObject):
     started = pyqtSignal(int)  # Emitted when processing for a single track starts
+    # MODIFIED: Added 'dict' to the signal signature to pass spotify_data
     finished = pyqtSignal(
-        int, object, object, object
-    )  # Emitted when processing for a single track finishes (success/fail) - Args: row_index, best_match (Track/None), candidates (List[Dict]/None), score (int/None)
+        int, object, object, object, dict
+    )  # Args: row_index, best_match (Track/None), candidates (List[Dict]/None), score (int/None), spotify_data (Dict)
     error = pyqtSignal(int, str)  # Emitted on error for a single track
     allTasksFinished = pyqtSignal()  # Emitted when the loop over all tracks completes
 
@@ -860,7 +902,7 @@ class LinkingWorker(QObject):
                     logger.debug(
                         f"[LinkingWorker Row {row_index}] First alternative candidate details before emit: TID='{getattr(candidates[0].get('tidal_track'),'id','N/A')}', Title='{getattr(candidates[0].get('tidal_track'),'title','N/A')}'"
                     )
-                self.finished.emit(row_index, best_match, candidates, score)
+                self.finished.emit(row_index, best_match, candidates, score, spotify_data)
 
             except Exception as e:
                 logger.error(
@@ -874,7 +916,3 @@ class LinkingWorker(QObject):
     # Corrected stop method signature and indentation
     def stop(self):
         self._is_running = False
-
-
-# --- Linking GUI Interaction Handler ---
-# Removed the entire LinkingGuiHandler class definition (lines 491-883)
