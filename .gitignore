@@ -157,3 +157,4 @@ cover_cache.pkl
 .tidal-dl.token.json
 spotify_to_tidal_links.json
 TidalDL_Installer_v*.exe
+setup_tidal_dl.iss

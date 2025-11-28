@@ -10,7 +10,7 @@
 #define AssetsDir   ProjectRoot + "\Tidal-Media-Downloader\TIDALDL-PY\tidal_dl\assets"
 
 #define MyAppName "Tidal-DL GUI"
-#define MyAppVersion "1.1.7"
+#define MyAppVersion "1.1.8"
 #define MyAppPublisher "GeradeHouse"
 #define MyAppExeName "tidal-dl-gui.exe"
 #define MyAppIconName "icon-tidal-dl-gui.ico"

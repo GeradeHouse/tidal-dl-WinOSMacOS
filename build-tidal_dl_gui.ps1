@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-Builds the tidal-dl-gui executable using PyInstaller.
+Builds the tidal-dl-gui executable using PyInstaller and optionally creates an Installer via Inno Setup.
 
 .DESCRIPTION
 This script cleans up previous build artifacts and runs PyInstaller
@@ -12,12 +12,14 @@ Includes icons, fonts, and images assets. Excludes common ML libraries.
 After a successful build, it also copies the resulting executable and the `_internal`
 folder to a fixed test location so the app can be run and tested immediately.
 
+If the -Installer switch is provided, it will also run Inno Setup to compile
+the installer executable into the 'dist-installer' folder.
+
 .PARAMETER BuildType
 Specifies the type of executable to build.
 'Windowed' creates a standard GUI application without a console window (--noconsole).
 'Console' creates an executable that opens a console window (useful for debugging).
 Defaults to 'Windowed'.
-(Kept for backward compatibility. Prefer using -Windowed or -Console.)
 
 .PARAMETER Windowed
 Switch-style way to request a windowed/GUI build. Equivalent to: -BuildType Windowed
@@ -29,6 +31,11 @@ Switch-style way to request a console build. Equivalent to: -BuildType Console
 Determines how aggressively the build environment is cleaned and dependencies are reinstalled.
 'Full' (default) cleans all build artifacts and runs 'pip install -r requirements.txt'.
 'Fast' performs a lighter cleanup and skips reinstalling requirements to speed up iterative builds.
+
+.PARAMETER Installer
+If specified, runs Inno Setup (iscc) after the build to create the installer executable.
+The installer will be placed in the 'dist-installer' folder.
+The version in 'setup_tidal_dl.iss' will be automatically incremented before the build starts.
 
 .EXAMPLE
 .\build-tidal_dl_gui.ps1
@@ -55,6 +62,14 @@ Builds the 'Console' executable using the new switch-style invocation.
 .\build-tidal_dl_gui.ps1 -Windowed -BuildMode Fast
 Builds the 'Windowed' executable using a faster, incremental build that keeps caches
 and skips reinstalling requirements.
+
+.EXAMPLE
+.\build-tidal_dl_gui.ps1 -Windowed -Installer
+Builds the GUI executable and then creates the Installer.
+
+.EXAMPLE
+.\build-tidal_dl_gui.ps1 -Windowed
+Builds the GUI executable only (no installer).
 #>
 param(
     [Parameter(Mandatory=$false)]
@@ -69,8 +84,48 @@ param(
 
     [Parameter(Mandatory=$false)]
     [ValidateSet("Full", "Fast")]
-    [string]$BuildMode = "Full"
+    [string]$BuildMode = "Full",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$Installer
 )
+
+# --- Configuration ---
+$ScriptDir = $PSScriptRoot # Directory where this script is located
+$ProjectSourceDir = Join-Path $ScriptDir "Tidal-Media-Downloader" # Path to the folder containing main.py
+$PackageDir = Join-Path $ProjectSourceDir "TIDALDL-PY" # Path to the main Python package
+
+# --- 0. Automatic Version Increment ---
+# This runs every time the script is executed, as requested.
+$IssPath = Join-Path $ScriptDir "setup_tidal_dl.iss"
+if (Test-Path $IssPath) {
+    Write-Host "Checking version in setup_tidal_dl.iss..." -ForegroundColor Yellow
+    try {
+        $issContent = Get-Content -Path $IssPath -Raw -Encoding UTF8
+        # Regex to match: #define MyAppVersion "1.1.7"
+        $verPattern = '(?m)^#define\s+MyAppVersion\s+"(\d+)\.(\d+)\.(\d+)"'
+        
+        if ($issContent -match $verPattern) {
+            $major = $matches[1]
+            $minor = $matches[2]
+            $patch = [int]$matches[3] + 1
+            $newVersion = "$major.$minor.$patch"
+            
+            # Replace with new version
+            $issContent = $issContent -replace $verPattern, "#define MyAppVersion `"$newVersion`""
+            
+            # Write back to file
+            Set-Content -Path $IssPath -Value $issContent -Encoding UTF8
+            Write-Host "Version updated to: $newVersion" -ForegroundColor Green
+        } else {
+            Write-Warning "Could not find '#define MyAppVersion' pattern in .iss file. Skipping version update."
+        }
+    } catch {
+        Write-Error "Failed to update version in .iss file: $($_.Exception.Message)"
+    }
+} else {
+    Write-Warning "setup_tidal_dl.iss not found at '$IssPath'. Skipping version update."
+}
 
 # --- Resolve Build Type (new switch style takes precedence) ---
 if ($Windowed -and $Console) {
@@ -156,11 +211,6 @@ if ($BuildMode -eq "Full") {
 
 Write-Host "Using PyInstaller from: $PyInstallerPath" -ForegroundColor Green
 
-# --- Configuration ---
-$ScriptDir = $PSScriptRoot # Directory where this script is located
-$ProjectSourceDir = Join-Path $ScriptDir "Tidal-Media-Downloader" # Path to the folder containing main.py
-$PackageDir = Join-Path $ProjectSourceDir "TIDALDL-PY" # Path to the main Python package
-
 # --- Build Variables ---
 $AppName = "tidal-dl-gui"
 $MainScript = "main.py" # Relative to $ProjectSourceDir
@@ -168,12 +218,6 @@ $IconFile = Join-Path $PackageDir "tidal_dl\assets\icons\icon-tidal-dl-gui.ico" 
 $SplashImage = Join-Path $PackageDir "tidal_dl\assets\images\splash.png" # Path to the splash screen image
 
 # --- Post-Build Copy Configuration ---
-# The user requested that after building, the following path's artifacts are copied:
-#   EXE:     <project-root>\Tidal-Media-Downloader\dist\tidal-dl-gui\tidal-dl-gui.exe
-#   FOLDER:  <project-root>\Tidal-Media-Downloader\dist\tidal-dl-gui\_internal
-# to:
-#   C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl-test
-# We derive the source from the actual project root to keep it aligned with where we built.
 $BuildOutputDir     = Join-Path $ProjectSourceDir ("dist\" + $AppName)
 $PostBuildExePath   = Join-Path $BuildOutputDir ($AppName + ".exe")
 $PostBuildFolder    = Join-Path $BuildOutputDir "_internal"
@@ -195,12 +239,12 @@ if ($BuildMode -eq "Full") {
 
     # Define paths to remove directly
     $DirectCleanupPaths = @(
-        Join-Path $ProjectSourceDir "dist"              # Removed comma
-        Join-Path $ProjectSourceDir "build"             # Removed comma
-        Join-Path $ProjectSourceDir "$AppName.spec"     # Removed comma
-        Join-Path $PackageDir "dist"                    # Removed comma
-        Join-Path $PackageDir "build"                   # Removed comma
-        Join-Path $PackageDir "MANIFEST.in"             # Removed comma
+        Join-Path $ProjectSourceDir "dist"
+        Join-Path $ProjectSourceDir "build"
+        Join-Path $ProjectSourceDir "$AppName.spec"
+        Join-Path $PackageDir "dist"
+        Join-Path $PackageDir "build"
+        Join-Path $PackageDir "MANIFEST.in"
     )
 
     # Remove direct paths
@@ -274,7 +318,7 @@ $pyinstallerArgs = @(
     "--add-data", "TIDALDL-PY/tidal_dl/assets/icons;tidal_dl/assets/icons",
     "--add-data", "TIDALDL-PY/tidal_dl/assets/fonts;tidal_dl/assets/fonts",
     "--add-data", "TIDALDL-PY/tidal_dl/assets/images;tidal_dl/assets/images",
-    "--add-data", "TIDALDL-PY/tidal_dl/metadata;tidal_dl/metadata" # <-- ADDED THIS LINE
+    "--add-data", "TIDALDL-PY/tidal_dl/metadata;tidal_dl/metadata"
 )
 # Add build type specific flag
 if ($BuildType -eq "Windowed") {
@@ -307,7 +351,7 @@ catch {
     exit 1
 }
 
-# --- Restore Original Location (Optional) ---
+# --- Restore Original Location ---
 Set-Location $ScriptDir
 Write-Host "Restored working directory to: $ScriptDir"
 
@@ -352,8 +396,56 @@ if (Test-Path $PostBuildFolder) {
     Write-Warning "Expected '_internal' folder not found at '$PostBuildFolder'. Skipping folder copy."
 }
 
+# --- Optional: Build Installer (Inno Setup) ---
+if ($Installer) {
+    Write-Host "-------------------------------------" -ForegroundColor Cyan
+    Write-Host "Building Installer via Inno Setup..." -ForegroundColor Cyan
+
+    # Check if iscc is available
+    if (Get-Command "iscc" -ErrorAction SilentlyContinue) {
+        
+        # Define output directory relative to the script root (Portable)
+        $InstallerOutputDir = "dist-installer"
+        $InstallerFullOutputDir = Join-Path $ScriptDir $InstallerOutputDir
+
+        # Ensure output directory exists
+        if (-not (Test-Path $InstallerFullOutputDir)) {
+            Write-Host "Creating installer output directory: $InstallerFullOutputDir" -ForegroundColor Yellow
+            New-Item -ItemType Directory -Path $InstallerFullOutputDir -Force | Out-Null
+        }
+
+        # Construct Inno Setup Command
+        # /O specifies the output directory. We use the relative path name to keep it portable in the command args,
+        # or we can pass the full path since we are running locally.
+        # Using the relative path "dist-installer" works if we are in $ScriptDir.
+        
+        Write-Host "Running Inno Setup Compiler..." -ForegroundColor Yellow
+        Write-Host "Output Folder: $InstallerFullOutputDir"
+        
+        try {
+            # Run iscc.exe
+            # /Qp = Quiet compile with progress
+            # /O = Output directory override
+            $proc = Start-Process -FilePath "iscc" -ArgumentList "/O`"$InstallerOutputDir`"", "/Qp", "`"setup_tidal_dl.iss`"" -PassThru -NoNewWindow -Wait
+            
+            if ($proc.ExitCode -eq 0) {
+                Write-Host "Installer created successfully!" -ForegroundColor Green
+                Write-Host "Location: $InstallerFullOutputDir" -ForegroundColor Green
+            } else {
+                Write-Error "Inno Setup failed with exit code $($proc.ExitCode)."
+            }
+        } catch {
+            Write-Error "Failed to execute Inno Setup: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Error "Inno Setup Compiler ('iscc') not found in PATH. Skipping installer build."
+    }
+}
+
 Write-Host "-------------------------------------" -ForegroundColor Cyan
 Write-Host "Build Script Finished." -ForegroundColor Cyan
 Write-Host "Build completed at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Cyan
-Write-Host "Artifacts are available (where present) at: $PostBuildTargetDir" -ForegroundColor Cyan
+if ($Installer) {
+    Write-Host "Installer available at: $(Join-Path $ScriptDir 'dist-installer')" -ForegroundColor Cyan
+}
 Write-Host "-------------------------------------"
