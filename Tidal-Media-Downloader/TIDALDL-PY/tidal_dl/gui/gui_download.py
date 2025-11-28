@@ -459,17 +459,22 @@ class DownloadHandler(QObject):
     @pyqtSlot(object, object, object)
     def _start_download_thread(
         self,
-        tracks_to_start,
-        playlist_context,
-        quality_arg_str
+        tracks_to_start: List[Track],
+        playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
+        quality_arg_str: Optional[str]
     ):
         self.main_view.download_active = True
         # CRITICAL FIX: Store the playlist ID when download starts, before user can click other playlists
         playlist_id = None
         if isinstance(playlist_context, Playlist):
             playlist_id = playlist_context.uuid
-        elif isinstance(playlist_context, dict) and playlist_context.get("type") == "spotify":
-            playlist_id = playlist_context.get("data", {}).get("id")
+        elif isinstance(playlist_context, dict):
+            p_type = playlist_context.get("type")
+            p_data = playlist_context.get("data")
+            if p_type == "spotify" and isinstance(p_data, dict):
+                playlist_id = p_data.get("id")
+            elif p_type == "tidal" and isinstance(p_data, Playlist):
+                playlist_id = p_data.uuid
         
         self._current_processing_playlist_id = playlist_id
         if playlist_id:

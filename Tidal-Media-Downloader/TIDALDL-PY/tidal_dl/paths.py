@@ -103,12 +103,15 @@ def __getBaseDirectory__():
             _create_directory_if_not_exists(xdg_config_path)
             return xdg_config_path
         else:  # Windows and other OS
-            # Windows bundled: Portable mode (config in executable's directory)
-            exe_dir = os.path.dirname(sys.executable)
+            # Windows bundled: Use User Music Directory
+            # This prevents Permission Errors when writing to Program Files
+            home_dir = os.path.expanduser("~")
+            music_config_dir = os.path.join(home_dir, "Music", "Tidal-dl")
             logger.debug(
-                f"Running bundled app on Windows/other. Using portable directory: {exe_dir}"
+                f"Running bundled app on Windows. Using Music config directory: {music_config_dir}"
             )
-            return exe_dir
+            _create_directory_if_not_exists(music_config_dir)
+            return music_config_dir
 
     # Fallback for development (unfrozen) mode: use the current project directory.
     dev_dir = os.path.abspath(".")
@@ -369,7 +372,6 @@ def resource_path(relative_path: str) -> str:
             # Frozen on Windows/Linux: prefer _MEIPASS first.
             if meipass:
                 roots.append(meipass)
-                expected_primary_path = os.path.join(meipass, "tidal_dl", normalized)
             else:
                 # Fallback to the executable directory
                 exe_dir = os.path.abspath(os.path.dirname(exe)) if exe else None

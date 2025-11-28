@@ -14,6 +14,7 @@ import pickle
 import threading
 from pathlib import Path
 from typing import Dict, Optional
+import os
 
 import requests
 from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QObject, pyqtSignal, QRunnable
@@ -22,6 +23,7 @@ from requests.exceptions import RequestException
 
 from tidal_dl import TIDAL_API
 from tidal_dl.settings import SETTINGS
+from tidal_dl.paths import getProfilePath  # Import getProfilePath directly
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
@@ -55,7 +57,12 @@ class CoverCache:
     def __init__(self, max_size=500):
         if self._initialized:
             return
-        self.cache_path = Path(SETTINGS._path_).parent / CACHE_FILE_NAME
+        
+        # --- FIX: Use getProfilePath() to ensure we write to User Music folder ---
+        # Previously: self.cache_path = Path(SETTINGS._path_).parent / CACHE_FILE_NAME
+        profile_path = getProfilePath()
+        self.cache_path = Path(profile_path) / CACHE_FILE_NAME
+        
         logger.debug(f"[CoverCache] Initializing cache singleton instance at {self.cache_path}")
         self._lock = threading.Lock()
         self.cache: Dict[str, bytes] = self._load_cache()
@@ -83,6 +90,9 @@ class CoverCache:
         
         logger.debug(f"[CoverCache] Saving {len(cache_copy)} items to {self.cache_path}")
         try:
+            # Ensure directory exists (just in case)
+            os.makedirs(self.cache_path.parent, exist_ok=True)
+            
             with open(self.cache_path, "wb") as f:
                 pickle.dump(cache_copy, f)
             logger.debug("[CoverCache] Successfully saved cache to disk.")

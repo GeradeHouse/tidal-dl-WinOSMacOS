@@ -1,5 +1,3 @@
-# --- START OF FILE gui_table.py ---
-
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
 """
@@ -38,42 +36,24 @@ Usage example:
 import os
 import logging
 from typing import List, Dict, Optional, Any
-from functools import partial
 
 # Third-party imports
 from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtCore import (
     Qt,
     pyqtSignal,
-    QItemSelection,
-    QItemSelectionModel,
-    pyqtSlot,
-)
-from PyQt6.QtGui import (
-    QMouseEvent,
-    QKeyEvent,
-    QColor,
-    QPalette,
-    QFont,
 )
 from PyQt6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
-    QAbstractItemView,
-    QHeaderView,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
 )
 import aigpy
 
 # Local application imports
 from tidal_dl.model import Track
 from tidal_dl.printf import Printf
-
-# from tidal_dl.tidal import TIDAL_API # TIDAL_API is not used directly in this file
+from .gui_table_delegate import HighlightPreservingDelegate
+from .gui_table_candidate_widget import CandidateWidget
 
 # --- Setup Logging ---
 logger = logging.getLogger(__name__)
@@ -94,7 +74,7 @@ _setup_gui_logging()
 
 # The SelectableLabel and ColumnWidget classes have been replaced by a QTableWidget–based implementation.
 # The new SplitterTable class below implements a spreadsheet–like widget that supports row selection
-# for download. Clicking on any cell in a row toggles that row’s selection, and the entire row is highlighted
+# for download. Clicking on any cell in a row toggles that row's selection, and the entire row is highlighted
 # with a uniform background color.
 #
 # At initialization:
@@ -209,6 +189,8 @@ class SplitterTable(QtWidgets.QTableWidget):
         if h_header:  # Add check
             h_header.sectionPressed.connect(self._handle_section_pressed)
             h_header.sectionResized.connect(self._handle_section_resized)
+            # Connect sort indicator changed to collapse sub-rows
+            h_header.sortIndicatorChanged.connect(self.on_sort_indicator_changed)
 
     def set_linking_gui_handler(self, handler):
         self.linking_gui_handler = handler
@@ -1117,500 +1099,14 @@ class SplitterTable(QtWidgets.QTableWidget):
         # Clear the stored initial widths now that logger is done (or skipped)
         self._initial_widths_on_press = []
 
+    @QtCore.pyqtSlot(int, Qt.SortOrder)
+    def on_sort_indicator_changed(self, logicalIndex: int, order: Qt.SortOrder):
+        """
+        Slot triggered when the user clicks a header to sort the table.
+        Collapses all sub-rows BEFORE the sort is visually applied to prevent corruption.
+        """
+        logger.debug(f"Sort indicator changed for column {logicalIndex}. Collapsing all sub-rows.")
+        self.collapse_all_sub_rows()
+        # The table will proceed with its internal sorting *after* this slot completes.
+
     # Removed eventFilter method as it's replaced by signal handling
-
-
-class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
-    """Keep an item’s Qt.ForegroundRole colour even when it is selected."""
-
-    def paint(
-        self,
-        painter: Optional[QtGui.QPainter],
-        option: QtWidgets.QStyleOptionViewItem,
-        index: QtCore.QModelIndex,
-    ) -> None:
-        # If painter is ever None (per PyQt6 signature), fall back to default behavior:
-        if painter is None:
-            super().paint(painter, option, index)
-            return
-
-        # Copy the incoming option so we don't mutate it in place
-        opt = QtWidgets.QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-
-        # If selected, pull out any custom brush and push it into the HighlightedText role
-        if opt.state & QtWidgets.QStyle.StateFlag.State_Selected:
-            brush = index.data(QtCore.Qt.ItemDataRole.ForegroundRole)
-            if isinstance(brush, QtGui.QBrush):
-                opt.palette.setBrush(QtGui.QPalette.ColorRole.HighlightedText, brush)
-
-        # --- START FIX ---
-        # Get the style object, which might be None.
-        actual_style: Optional[QtWidgets.QStyle]
-        if opt.widget is not None:
-            actual_style = opt.widget.style()
-        else:
-            actual_style = QtWidgets.QApplication.style()
-
-        if actual_style is None:
-            # This is a fallback if no style could be obtained.
-            # It's highly unlikely for QApplication.style() to be None in a running app.
-            logger.error(
-                "HighlightPreservingDelegate: Critical error - QStyle object is None. Cannot paint item."
-            )
-            # Fall back to default painting behavior. Painter is guaranteed not None here.
-            super().paint(painter, option, index)
-            return
-
-        # Now, actual_style is confirmed to be a QtWidgets.QStyle.
-        style: QtWidgets.QStyle = actual_style
-        # --- END FIX ---
-
-        # Finally paint with our modified palette
-        style.drawControl(
-            QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
-            opt,
-            painter,  # painter is guaranteed not None here
-            opt.widget,
-        )
-
-
-# --- Candidate Widget Class ---
-class CandidateWidget(QtWidgets.QWidget):
-    """
-    A widget to display a table of potential Tidal track candidates for a Spotify track.
-    Includes a 'Select' button for manual linking.
-    """
-
-    # Signal emitted when a user manually selects a candidate track
-    candidateSelected = QtCore.pyqtSignal(
-        int, object
-    )  # Args: main_row_index, selected_track (Track object)
-    # --- START FIX: Add new signal ---
-    noMatchSelected = QtCore.pyqtSignal(int)  # Arg: main_row_index
-    # --- END FIX ---
-
-    def __init__(
-        self,
-        main_row_index: int,
-        candidates: List[Dict],
-        initial_selected_track_id: Optional[str] = None,
-        parent=None,
-    ):
-        """
-        Initializes the CandidateWidget.
-
-        Args:
-            main_row_index (int): The row index in the main table this widget belongs to.
-            candidates (List[Dict]): A list of candidate dictionaries.
-            initial_selected_track_id (Optional[str]): The ID of the track that should be initially marked as selected.
-            parent (QWidget, optional): The parent widget. Defaults to None.
-        """
-        super().__init__(parent)
-        self.main_row_index = main_row_index
-        self.selected_tidal_track_id = initial_selected_track_id
-        logger.debug(
-            f"[CandidateWidget] Initializing for main row {main_row_index} with {len(candidates)} candidates. Initial selected ID: {initial_selected_track_id}"
-        )
-        self.candidates = candidates
-        self._setup_ui()
-
-    def _setup_ui(self):
-        """Sets up the layout and widgets for the CandidateWidget."""
-
-        # Check if a layout is ALREADY set. This is for debugging.
-        if self.layout() is not None:
-            logger.warning(
-                f"[CandidateWidget Row {self.main_row_index}] _setup_ui: Widget already has a layout ({self.layout()}) before attempting to set a new one. This is unexpected."
-            )
-
-        # 1. Create the layout object WITHOUT a parent widget initially.
-        layout = QtWidgets.QVBoxLayout()
-        # No 'if not layout:' check needed here, as this will always create a layout object.
-
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(5)
-
-        self.candidate_table = QtWidgets.QTableWidget()
-        self.candidate_table.setEditTriggers(
-            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
-        )
-        self.candidate_table.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
-        )  # Allow single row selection
-        self.candidate_table.setSelectionBehavior(
-            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
-        )  # Select whole rows
-        v_header = self.candidate_table.verticalHeader()
-        if v_header:  # Add check
-            v_header.setVisible(False)  # Hide row numbers
-        # self.candidate_table.horizontalHeader().setStretchLastSection(True) # Don't stretch last section initially
-        # Set smaller font for header
-        h_header = self.candidate_table.horizontalHeader()
-        if h_header:  # Check if header exists
-            header_font = h_header.font()
-            header_font.setPointSize(
-                max(6, header_font.pointSize() - 1)
-            )  # Decrease font size by 1pt, ensure minimum size (e.g., 6pt)
-            h_header.setFont(header_font)
-
-        # Define columns for the candidate table (Action moved to front, Score after Action)
-        # Rename Duration -> Length
-        candidate_column_headers = [
-            "Action",
-            "Score",
-            "Tidal Title",
-            "Artists",
-            "Album",
-            "Length",
-            "ISRC",
-            "Mismatch Reasons",
-        ]  # Length is index 5
-        self.candidate_table.setColumnCount(len(candidate_column_headers))
-        self.candidate_table.setHorizontalHeaderLabels(candidate_column_headers)
-
-        # Connect itemClicked or currentItemChanged to handle selection visual ---
-        self.candidate_table.itemClicked.connect(self._on_candidate_item_clicked)
-
-        # Apply stylesheet for smaller header padding (ensure it doesn't conflict with main style)
-        # and selection styling
-        widget_bg_color = "#383838"
-        table_bg_color = "#404040"
-        item_hover_bg_color = "#4E4E4E"  # Lighter grey for hover
-        # Define the selection background color explicitly to avoid conflicts
-        item_selected_bg_color = "#0078D4"  # Your current selection blue
-        item_selected_text_color = Qt.GlobalColor.white  # Text color for selected items
-
-        h_header = self.candidate_table.horizontalHeader()
-        if h_header:  # Add check
-            h_header.setStyleSheet(
-                "QHeaderView::section { background-color: #454545; border: 1px solid #555555; padding: 4px; }"
-            )
-
-        self.candidate_table.setStyleSheet(
-            f"""
-            QTableWidget {{
-                background-color: {table_bg_color};
-                border: none;
-                gridline-color: #505050;
-                outline: 0; /* Remove focus outline from the table itself */
-            }}
-            QTableWidget::item {{
-                background-color: transparent; /* Default item background */
-                border: none; /* Remove default item borders */
-                padding: 2px; /* Add some padding to items */
-            }}
-            QTableWidget::item:hover {{
-                background-color: {item_hover_bg_color};
-                color: white; /* Ensure text is white on hover */
-            }}
-            QTableWidget::item:selected {{
-                background-color: {item_selected_bg_color};
-                color: {item_selected_text_color}; /* Ensure text is white when selected */
-            }}
-            /* Ensure hover on a selected item still uses the hover background, if desired */
-            /* Or, if you want selected items to keep their selection color on hover, remove/comment this out */
-            QTableWidget::item:selected:hover {{
-                background-color: {item_hover_bg_color}; /* Override selection color on hover */
-                color: white;
-            }}
-            QTableWidget::item:focus {{ /* Remove focus rectangle around items */
-                outline: 0;
-                border: none; /* Or set to a specific color if you want a focus border */
-                background-color: transparent; /* Ensure focus doesn't change background unless also hovered/selected */
-            }}
-        """
-        )
-
-        self._populate_candidate_table()  # Populate before adding to layout might be fine
-
-        layout.addWidget(self.candidate_table)
-
-        # --- START FIX: Use a horizontal layout for the button ---
-        bottom_layout = QHBoxLayout()
-        bottom_layout.setContentsMargins(0, 5, 0, 0) # Add some top margin
-
-        self.none_match_button = QtWidgets.QPushButton("None of these are a match")
-        self.none_match_button.setStyleSheet(
-            "QPushButton { padding: 4px; background-color: #553333; border: 1px solid #775555; }"
-            "QPushButton:hover { background-color: #664444; }"
-        )
-        self.none_match_button.clicked.connect(self._on_none_match_clicked)
-        
-        bottom_layout.addWidget(self.none_match_button)
-        bottom_layout.addStretch() # This pushes the button to the left
-
-        layout.addLayout(bottom_layout)
-        # --- END FIX ---
-
-        # 2. Set the layout on the CandidateWidget (self)
-        self.setLayout(
-            layout
-        )  # This is the correct way to assign the top-level layout.
-
-        # Apply styling for visual distinction
-        self.setStyleSheet(
-            f"QWidget {{ background-color: {widget_bg_color}; border: 1px solid #555555; }}"
-        )
-        # Set inner table background and ensure grid lines are subtle if shown
-        # Moved stylesheet setting for candidate_table up to include selection
-        # Ensure header style matches (already set above)
-
-    def _populate_candidate_table(self):
-        logger.debug(
-            f"[CandidateWidget Row {self.main_row_index}] Populating table. Number of candidates: {len(self.candidates)}"
-        )  # Existing log
-        self.candidate_table.clearSelection()  # Clear any existing selection
-        self.candidate_table.setRowCount(len(self.candidates))
-        logger.debug(
-            f"[CandidateWidget Row {self.main_row_index}] Set candidate_table row count to: {len(self.candidates)}"
-        )
-
-        # Set a smaller default row height for the candidate table ---
-        v_header = self.candidate_table.verticalHeader()
-        if v_header:  # Check if header exists
-            v_header.setDefaultSectionSize(28)
-        else:
-            logger.warning(
-                f"[CandidateWidget Row {self.main_row_index}] Could not get vertical header to set default section size."
-            )
-
-        selected_font_color = QtGui.QColor("#20867a")
-        # Explicitly set the default font color to white for unselected items
-        default_font_color = QtGui.QColor(Qt.GlobalColor.white)  # MODIFIED HERE
-
-        for row_index, candidate_data in enumerate(self.candidates):
-            try:
-                tidal_track = candidate_data.get("tidal_track")
-                is_this_row_selected = (
-                    tidal_track
-                    and getattr(tidal_track, "id", None) == self.selected_tidal_track_id
-                )
-                score = candidate_data.get("score", "N/A")
-                mismatch_reasons_list = candidate_data.get(
-                    "mismatch_reasons", []
-                )  # Ensure it's a list
-                mismatch_text = (
-                    ", ".join(mismatch_reasons_list)
-                    if mismatch_reasons_list
-                    else "None"
-                )
-                artists_str = (
-                    ", ".join(
-                        [
-                            getattr(a, "name", "N/A")
-                            for a in getattr(tidal_track, "artists", [])
-                        ]
-                    )
-                    if getattr(tidal_track, "artists", [])
-                    else "N/A"
-                )
-                album_title = getattr(
-                    getattr(tidal_track, "album", None), "title", "N/A"
-                )
-                duration_s = getattr(tidal_track, "duration", 0)
-                duration_str = Printf.formatDuration(duration_s)
-                isrc = getattr(tidal_track, "isrc", "N/A")
-                title_text = getattr(tidal_track, "title", "N/A")
-
-                logger.debug(
-                    f"[CandidateWidget Row {self.main_row_index} SubRow {row_index}] Data: Score={score}, Title='{title_text}', Artists='{artists_str}', Album='{album_title}', Len='{duration_str}', ISRC='{isrc}', Mismatch='{mismatch_text}'"
-                )  # ADD THIS
-
-                def create_item(
-                    text,
-                    alignment=Qt.AlignmentFlag.AlignLeft
-                    | Qt.AlignmentFlag.AlignVCenter,
-                ):
-                    item = QtWidgets.QTableWidgetItem(str(text))
-                    item.setTextAlignment(alignment)
-                    item_font = (
-                        item.font()
-                    )  # Gets the widget's default font (e.g. 11pt)
-                    # MODIFIED: Set to 9.5pt. Application default is 11pt. 11 - 1.5 = 9.5pt.
-                    new_point_size = item_font.pointSizeF() - 2.0
-                    item_font.setPointSizeF(
-                        max(6.0, new_point_size)
-                    )  # Use setPointSizeF for fractional sizes
-                    item.setFont(item_font)
-                    if is_this_row_selected:
-                        item.setForeground(selected_font_color)
-                    else:
-                        item.setForeground(default_font_color)  # Reset for other rows
-                    return item
-
-                self.candidate_table.setItem(
-                    row_index, 1, create_item(score, Qt.AlignmentFlag.AlignCenter)
-                )
-                self.candidate_table.setItem(row_index, 2, create_item(title_text))
-                self.candidate_table.setItem(row_index, 3, create_item(artists_str))
-                self.candidate_table.setItem(row_index, 4, create_item(album_title))
-                self.candidate_table.setItem(
-                    row_index,
-                    5,
-                    create_item(duration_str, Qt.AlignmentFlag.AlignCenter),
-                )
-                self.candidate_table.setItem(
-                    row_index, 6, create_item(isrc, Qt.AlignmentFlag.AlignCenter)
-                )
-                self.candidate_table.setItem(row_index, 7, create_item(mismatch_text))
-
-                select_button = QtWidgets.QPushButton("Select")
-                if is_this_row_selected:
-                    select_button.setText("Selected")
-                    # select_button.setEnabled(False) # Optionally disable
-                # Make button smaller ---
-                select_button.setStyleSheet(
-                    "QPushButton { padding: 1px 3px; margin: 0px; }"
-                )  # Minimal padding
-                button_font = select_button.font()
-                button_font.setPointSize(8)  # Smaller font
-                select_button.setFont(button_font)
-                select_button.setFixedHeight(22)  # Fixed height
-
-                select_button.clicked.connect(
-                    partial(self._on_select_clicked, self.main_row_index, tidal_track)
-                )
-                self.candidate_table.setCellWidget(row_index, 0, select_button)
-                logger.debug(
-                    f"[CandidateWidget Row {self.main_row_index} SubRow {row_index}] Set items and button."
-                )
-
-            except Exception as e:
-                logger.error(
-                    f"[CandidateWidget Row {self.main_row_index}] Error populating candidate sub-row {row_index}: {e}",
-                    exc_info=True,
-                )
-                self.candidate_table.setItem(
-                    row_index, 0, QtWidgets.QTableWidgetItem("Error loading candidate")
-                )
-                for col in range(1, self.candidate_table.columnCount()):
-                    self.candidate_table.setItem(
-                        row_index, col, QtWidgets.QTableWidgetItem("-")
-                    )
-
-        self.candidate_table.resizeColumnsToContents()
-        # REMOVE or COMMENT OUT: self.candidate_table.resizeRowsToContents()
-        # logger.debug(f"[CandidateWidget Row {self.main_row_index}] Called resizeRowsToContents().") # Comment out if line above is removed
-
-        # Explicitly set row height for all rows ---
-        fixed_row_height = 28  # Or your desired height
-        for i in range(self.candidate_table.rowCount()):
-            self.candidate_table.setRowHeight(i, fixed_row_height)
-        logger.debug(
-            f"[CandidateWidget Row {self.main_row_index}] Set all candidate rows to fixed height: {fixed_row_height}px"
-        )
-
-        logger.debug(
-            f"[CandidateWidget Row {self.main_row_index}] Finished populating. Candidate table visible: {self.candidate_table.isVisible()}, Width: {self.candidate_table.width()}, Height: {self.candidate_table.height()}"
-        )
-        viewport = self.candidate_table.viewport()
-        if viewport:
-            viewport.update()  # Force viewport update
-        self.candidate_table.updateGeometry()
-        self.updateGeometry()
-
-    def _on_select_clicked(self, main_row_index: int, selected_track: object):
-        """Slot to handle 'Select' button clicks."""
-        logger.debug(
-            f"[CandidateWidget Row {main_row_index}] Select button clicked for track ID: {getattr(selected_track, 'id', 'N/A')}"
-        )
-        self.selected_tidal_track_id = getattr(selected_track, "id", None)
-        self.candidateSelected.emit(main_row_index, selected_track)
-
-        # Refresh the candidate table to apply new styling for selection
-        # This re-runs _populate_candidate_table which will apply the new font color.
-        # A more targeted update would be to iterate rows and update styles, but this is simpler.
-        self._populate_candidate_table()  # Re-populate to update styles based on new self.selected_tidal_track_id
-        # self.candidate_table.viewport().update() # Alternative, if styling is purely dynamic (less reliable here)
-
-    # --- START FIX: Add the slot for the new button ---
-    @pyqtSlot()
-    def _on_none_match_clicked(self):
-        """Slot to handle 'None of these are a match' button clicks."""
-        logger.debug(f"[CandidateWidget Row {self.main_row_index}] 'None Match' button clicked.")
-        self.noMatchSelected.emit(self.main_row_index)
-    # --- END FIX ---
-
-    def calculate_required_height(self, max_rows_no_scroll=6) -> int:
-        # Get the layout AFTER _setup_ui has run and self.setLayout() has been called.
-        current_layout = self.layout()
-        if not isinstance(
-            current_layout, QtWidgets.QVBoxLayout
-        ):  # Check if it's the expected layout type
-            logger.warning(
-                f"[CandidateWidget Row {self.main_row_index}] calculate_required_height: Layout is None or not QVBoxLayout! Type: {type(current_layout)}"
-            )
-            return 50
-
-        # Ensure contentsMargins are from the layout itself
-        base_height = (
-            current_layout.contentsMargins().top()
-            + current_layout.contentsMargins().bottom()
-        )
-
-        h_header = self.candidate_table.horizontalHeader()
-        header_height = 0
-        if h_header and not h_header.isHidden():
-            header_height = h_header.sizeHint().height()
-            if header_height <= 0:
-                header_height = 25
-        logger.debug(
-            f"[CandidateWidget Row {self.main_row_index}] Header height: {header_height}"
-        )
-
-        rows_to_calculate = self.candidate_table.rowCount()
-        rows_height = 0
-        # default_row_height = 28 # Keep this as a fallback
-        fixed_candidate_row_height = 28  # The height you set above
-
-        if rows_to_calculate > 0:
-            # If you set a fixed height for all rows, the calculation is simpler:
-            rows_height = rows_to_calculate * fixed_candidate_row_height
-            # The loop below can be removed if using a fixed height for all rows
-            # for i in range(rows_to_calculate):
-            #     row_h = self.candidate_table.rowHeight(i)
-            #     if row_h <= 5:
-            #         logger.warning(f"[CandidateWidget Row {self.main_row_index}] SubRow {i} height is {row_h}. Using default_row_height.")
-            #         row_h = default_row_height
-            #     rows_height += row_h
-            #     logger.debug(f"[CandidateWidget Row {self.main_row_index}] SubRow {i} height used for calc: {row_h}")
-
-        logger.debug(
-            f"[CandidateWidget Row {self.main_row_index}] Total rows_height: {rows_height}"
-        )
-
-        padding = 5  # Keep some padding
-
-        total_height = base_height + header_height + rows_height + padding
-        logger.debug(
-            f"[CandidateWidget Row {self.main_row_index}] Calculated required height: {total_height} (Base: {base_height}, Header: {header_height}, Rows ({rows_to_calculate}): {rows_height}, Padding: {padding})"
-        )
-
-        min_height_per_row_content = 25
-        min_total_height = (
-            base_height
-            + header_height
-            + (min_height_per_row_content if rows_to_calculate > 0 else 0)
-            + padding
-        )
-
-        final_height = max(total_height, min_total_height, 50)
-        logger.debug(
-            f"[CandidateWidget Row {self.main_row_index}] Final height to be returned: {final_height}"
-        )
-        return final_height
-
-    @pyqtSlot(QtWidgets.QTableWidgetItem)  # Import QTableWidgetItem if not already
-    def _on_candidate_item_clicked(self, item: QtWidgets.QTableWidgetItem):
-        if not item:
-            return
-        # When an item is clicked, the table's selection model handles the visual highlighting
-        # due to the stylesheet and selection mode.
-        # We don't need to do much here unless we want to store the selected candidate.
-        selected_row = item.row()
-        logger.debug(
-            f"[CandidateWidget Row {self.main_row_index}] Candidate item clicked at sub-row {selected_row}"
-        )
-        # If you need to know which candidate was "selected" (but not yet chosen via "Select" button):
-        # self.currently_highlighted_candidate_index = selected_row

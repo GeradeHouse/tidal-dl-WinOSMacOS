@@ -4,6 +4,7 @@ import logging
 import re
 import threading
 import unicodedata
+import difflib  # Added for similarity checking
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 import aigpy
@@ -518,6 +519,62 @@ def searchLinkTrack(
                 items_list: List[Track] = search_result.tracks.items
                 for item in items_list:
                     track: Track = item
+                    
+                    # --- Candidate Filtering Logic ---
+                    # 1. Artist Overlap Check
+                    # We require at least one artist to match loosely (substring or high similarity)
+                    # This filters out covers/karaoke by different artists.
+                    spotify_artists_fuzzy = [fuzzy_normalize(a) for a in artists]
+                    tidal_artists_fuzzy = [
+                        fuzzy_normalize(a.name)
+                        for a in cast(List[Artist], track.artists)
+                        if hasattr(a, "name") and a.name
+                    ]
+                    
+                    artist_match_found = False
+                    if not spotify_artists_fuzzy:
+                        # Fallback if no artists provided (unlikely)
+                        artist_match_found = True 
+                    else:
+                        for s_art in spotify_artists_fuzzy:
+                            for t_art in tidal_artists_fuzzy:
+                                # Check for substring match
+                                if s_art in t_art or t_art in s_art:
+                                    artist_match_found = True
+                                    break
+                                # Check for high similarity (e.g. P!nk vs Pink)
+                                if difflib.SequenceMatcher(None, s_art, t_art).ratio() > 0.8:
+                                    artist_match_found = True
+                                    break
+                            if artist_match_found:
+                                break
+                    
+                    if not artist_match_found:
+                        # Skip this candidate if artists are completely different
+                        continue
+
+                    # 2. Title Similarity Check
+                    # We require the title to be somewhat similar.
+                    s_title_norm = normalize_title(title)
+                    t_title_norm = normalize_title(track.title)
+                    
+                    title_match_found = False
+                    if not s_title_norm or not t_title_norm:
+                         title_match_found = True # Fallback
+                    else:
+                        # Check substring
+                        if s_title_norm in t_title_norm or t_title_norm in s_title_norm:
+                            title_match_found = True
+                        else:
+                            # Check similarity ratio
+                            ratio = difflib.SequenceMatcher(None, s_title_norm, t_title_norm).ratio()
+                            if ratio > 0.5: # Allow some variation
+                                title_match_found = True
+                    
+                    if not title_match_found:
+                        continue
+                    # ---------------------------------
+
                     # --- Start of block to be indented ---
                     score = 0  # Lower is better, initialize score for this track
                     mismatch_reasons: List[str] = []  # Reasons for score penalties
@@ -540,11 +597,8 @@ def searchLinkTrack(
                     # Score based on primary artist match
                     artist_score = 0
                     primary_artist_fuzzy = fuzzy_normalize(primary_artist)
-                    tidal_artists_fuzzy = [
-                        fuzzy_normalize(a.name)
-                        for a in cast(List[Artist], track.artists)
-                        if hasattr(a, "name") and a.name
-                    ]
+                    # Re-calculate tidal_artists_fuzzy for scoring context if needed, or reuse
+                    # tidal_artists_fuzzy was calculated above for filtering
                     
                     if primary_artist_fuzzy not in tidal_artists_fuzzy:
                         # Try partial match if exact match fails
@@ -800,12 +854,12 @@ def searchLinkTrack(
 
 # --- Linking Worker Class (Moved from gui.py) ---
 class LinkingWorker(QObject):
-    started = pyqtSignal(int)  # Emitted when processing for a single track starts
-    # MODIFIED: Added 'dict' to the signal signature to pass spotify_data
+    # MODIFIED: Signals now include spotify_data to allow robust row identification
+    started = pyqtSignal(int, dict)  # row_index, spotify_data
     finished = pyqtSignal(
         int, object, object, object, dict
     )  # Args: row_index, best_match (Track/None), candidates (List[Dict]/None), score (int/None), spotify_data (Dict)
-    error = pyqtSignal(int, str)  # Emitted on error for a single track
+    error = pyqtSignal(int, str, dict)  # row_index, error_msg, spotify_data
     allTasksFinished = pyqtSignal()  # Emitted when the loop over all tracks completes
 
     def __init__(
@@ -836,7 +890,8 @@ class LinkingWorker(QObject):
                 logger.info("LinkingWorker stopping early (_is_running is False).")
                 break
             try:
-                self.started.emit(row_index)
+                # Emit started with spotify_data
+                self.started.emit(row_index, spotify_data)
 
                 # --- Extract data robustly from potentially simplified structure ---
                 title: Optional[str] = spotify_data.get("name")
@@ -886,7 +941,7 @@ class LinkingWorker(QObject):
                         f"Row {row_index}: Missing essential metadata after extraction: Title={title}, Artists={artists}, Album={album}. Original data: {spotify_data}"
                     )
                     self.error.emit(
-                        row_index, "Missing essential metadata (title, artists, album)"
+                        row_index, "Missing essential metadata (title, artists, album)", spotify_data
                     )
                     continue  # Skip this track
 
@@ -908,7 +963,7 @@ class LinkingWorker(QObject):
                 logger.error(
                     f"Error linking track at row {row_index}: {e}", exc_info=True
                 )
-                self.error.emit(row_index, str(e))
+                self.error.emit(row_index, str(e), spotify_data)
         # Emit allTasksFinished signal AFTER the loop completes
         logger.debug("LinkingWorker loop finished. Emitting allTasksFinished.")
         self.allTasksFinished.emit()

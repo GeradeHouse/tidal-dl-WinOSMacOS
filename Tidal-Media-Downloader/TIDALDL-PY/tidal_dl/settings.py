@@ -127,6 +127,15 @@ class Settings(aigpy.model.ModelBase):
         if not hasattr(self, "fontSize") or not isinstance(self.fontSize, int) or not (8 <= self.fontSize <= 16):
             self.fontSize = 11
 
+        # --- FIX: Ensure downloadPath is absolute ---
+        # This prevents the app from trying to write to Program Files if the default "./Downloads/" is used.
+        from .paths import get_user_download_path
+        self.downloadPath = get_user_download_path(self.downloadPath)
+        
+        #log download path
+        print(f"Download path set to: {self.downloadPath}")
+        # --------------------------------------------
+
         from .lang.language import getLang
 
         if not isinstance(self.language, str) or self.language.lower() not in [

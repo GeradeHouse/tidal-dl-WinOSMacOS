@@ -1,4 +1,4 @@
-# tidal_dl/gui/gui.py
+# tidal_dl/gui/gui_main.py
 
 import logging
 import sys
@@ -42,7 +42,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6 import QtWidgets, QtGui
 
-from tidal_dl.gui.gui_play_bar import PlayBarWidget
+from tidal_dl.gui.gui_player_bar import PlayBarWidget
 from tidal_dl.gui.gui_player_logic import PlayerLogic
 from tidal_dl.tidal import Track, Playlist, AudioQuality, Type, TIDAL_API
 from tidal_dl.printf import Printf
@@ -87,10 +87,10 @@ setup_gui_logger(__name__, logging.INFO)
 
 
 class MainView(QWidget):
-    s_linkingStarted = pyqtSignal(int)
-    # MODIFIED: Added 'object' (for dict) to the signal signature to match LinkingWorker
+    # MODIFIED: Signals now include spotify_data (dict) for robust row identification
+    s_linkingStarted = pyqtSignal(int, dict)
     s_linkingFinished = pyqtSignal(int, object, object, object, object)
-    s_linkingError = pyqtSignal(int, str)
+    s_linkingError = pyqtSignal(int, str, dict)
     s_spotifyLoginFinished = pyqtSignal(object)
     s_spotifyPlaylistsFetched = pyqtSignal(list)
     s_spotifyTracksFetched = pyqtSignal(str, list)

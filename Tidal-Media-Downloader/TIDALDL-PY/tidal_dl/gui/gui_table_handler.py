@@ -566,13 +566,16 @@ class TableHandler(QObject):
             indicator_item = QTableWidgetItem()
             table.setItem(row_index, 0, indicator_item)
 
+        # Extract ID safely to a local variable to avoid scope/undefined issues
+        linked_id = tidal_track.id if tidal_track else None
+
         if candidates and len(candidates) > 0:
             indicator_data = {
                 "has_candidates": True,
                 "expanded": False,
                 "candidate_count": len(candidates),
                 "candidates_list": candidates,
-                "linked_tidal_track_id": tidal_track.id if tidal_track else None,
+                "linked_tidal_track_id": linked_id,
             }
             indicator_item.setData(QtCore.Qt.ItemDataRole.UserRole, indicator_data)
             logger.debug(f"[TableHandler] Set indicator data for row {row_index} with {len(candidates)} candidates.")
@@ -582,7 +585,7 @@ class TableHandler(QObject):
                 "expanded": False,
                 "candidate_count": 0,
                 "candidates_list": [],
-                "linked_tidal_track_id": tidal_track.id if tidal_track else None,
+                "linked_tidal_track_id": linked_id,
             }
             indicator_item.setData(QtCore.Qt.ItemDataRole.UserRole, indicator_data)
             logger.debug(f"[TableHandler] Cleared indicator data for row {row_index}.")
@@ -605,12 +608,26 @@ class TableHandler(QObject):
         """Repopulates the table using the current main_view state."""
         if not self.main_view:
             return
-        playlist_obj = self.main_view.s_playlist_obj
+        
+        # s_playlist_obj is the item_data dict from the tree item
+        playlist_context = self.main_view.s_playlist_obj
         playlist_id = None
-        if isinstance(playlist_obj, dict):
-            playlist_id = playlist_obj.get("data", {}).get("id")
-        elif isinstance(playlist_obj, Playlist):
-            playlist_id = playlist_obj.uuid
+
+        if isinstance(playlist_context, dict):
+            # Check type to determine how to extract ID
+            p_type = playlist_context.get("type")
+            p_data = playlist_context.get("data")
+            
+            if p_type == "spotify" and isinstance(p_data, dict):
+                playlist_id = p_data.get("id")
+            elif p_type == "tidal" and isinstance(p_data, Playlist):
+                playlist_id = p_data.uuid
+            elif isinstance(p_data, dict): # Fallback for generic dict data
+                playlist_id = p_data.get("id")
+                
+        elif isinstance(playlist_context, Playlist):
+             # Direct Playlist object (legacy or direct assignment)
+            playlist_id = playlist_context.uuid
 
         self._populate_table_generic(
             self.main_view.s_array, self.main_view.s_type or Type.Null, playlist_id
@@ -635,6 +652,27 @@ class TableHandler(QObject):
                     current_track_id = str(item_data.get("tidal_track_id"))
             if current_track_id and current_track_id == track_id_to_find:
                 return row
+        return None
+
+    def _find_row_for_spotify_id(self, spotify_id_to_find: Optional[str]) -> Optional[int]:
+        """
+        Finds the row index for a given Spotify Track ID.
+        This is robust against table sorting/filtering as it scans current rows.
+        """
+        if not self.table_widget or not spotify_id_to_find:
+            return None
+            
+        for row in range(self.table_widget.rowCount()):
+            title_item = self.table_widget.item(row, 1)
+            if not title_item:
+                continue
+                
+            item_data = title_item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(item_data, dict) and item_data.get("type") == "spotify_track":
+                data = item_data.get("data", {})
+                if data.get("id") == spotify_id_to_find:
+                    return row
+                    
         return None
 
     @pyqtSlot(str)

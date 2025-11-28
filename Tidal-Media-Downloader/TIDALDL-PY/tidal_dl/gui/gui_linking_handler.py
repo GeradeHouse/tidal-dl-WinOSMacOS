@@ -423,8 +423,8 @@ class LinkingGuiHandler(QObject):
         else:
             self.linkAllSpotifyTracks()
 
-    @pyqtSlot(int)
-    def onLinkingStarted(self, row_index: int) -> None:
+    @pyqtSlot(int, dict)
+    def onLinkingStarted(self, row_index: int, spotify_data: dict) -> None:
         """Slot called when linking starts for a specific row."""
         try:
             if not self.main_view:
@@ -435,8 +435,17 @@ class LinkingGuiHandler(QObject):
             if current_table_id != self._current_processing_playlist_id:
                 return
 
-            self.table_handler.update_linking_status(row_index, "linking", "Linking...")
-            logger.info(f"Linking started for row {row_index + 1}...")
+            # Robustly find the row index using the Spotify ID
+            spotify_id = spotify_data.get('id')
+            sid_str = str(spotify_id) if spotify_id else None
+            actual_row = self.table_handler._find_row_for_spotify_id(sid_str)
+            
+            if actual_row is not None:
+                self.table_handler.update_linking_status(actual_row, "linking", "Linking...")
+                logger.info(f"Linking started for row {actual_row + 1} (ID: {spotify_id})...")
+            else:
+                logger.warning(f"Could not find row for Spotify ID {spotify_id} to update status.")
+
         except Exception as e:
             logger.error(
                 f"Error updating linking status for row {row_index}: {e}", exc_info=True
@@ -483,16 +492,24 @@ class LinkingGuiHandler(QObject):
         # Check context before updating UI
         current_table_id = self._get_current_table_playlist_id()
         if current_table_id == self._current_processing_playlist_id:
+            # Robustly find the row index using the Spotify ID
+            actual_row = row_index
+            if spotify_data:
+                spotify_id = spotify_data.get('id')
+                sid_str = str(spotify_id) if spotify_id else None
+                found_row = self.table_handler._find_row_for_spotify_id(sid_str)
+                if found_row is not None:
+                    actual_row = found_row
+            
             self.table_handler.update_linking_status(
-                row_index=row_index,
+                row_index=actual_row,
                 status=link_status,
                 status_text=status_text,
                 tidal_track=tidal_track,
                 candidates=candidates,
                 score=score,
             )
-
-        logger.info(f"Linking finished for row {row_index + 1}: {status_text}")
+            logger.info(f"Linking finished for row {actual_row + 1}: {status_text}")
 
         # --- Persist Link ---
         should_persist = link_status not in ["not_linked", "linking", "error"]
@@ -553,8 +570,8 @@ class LinkingGuiHandler(QObject):
                 if self.main_view and hasattr(self.main_view, "download_handler") and self.main_view.download_handler:
                     self.main_view.download_handler._update_download_button_text()
 
-    @pyqtSlot(int, str)
-    def onLinkingError(self, row_index: int, error_message: str) -> None:
+    @pyqtSlot(int, str, dict)
+    def onLinkingError(self, row_index: int, error_message: str, spotify_data: dict) -> None:
         """Slot called when an error occurs during linking for a specific row."""
         try:
             if not self.main_view:
@@ -562,11 +579,20 @@ class LinkingGuiHandler(QObject):
             
             current_table_id = self._get_current_table_playlist_id()
             if current_table_id == self._current_processing_playlist_id:
+                # Robustly find the row index using the Spotify ID
+                actual_row = row_index
+                if spotify_data:
+                    spotify_id = spotify_data.get('id')
+                    sid_str = str(spotify_id) if spotify_id else None
+                    found_row = self.table_handler._find_row_for_spotify_id(sid_str)
+                    if found_row is not None:
+                        actual_row = found_row
+
                 self.table_handler.update_linking_status(
-                    row_index=row_index, status="error", status_text=f"Error: {error_message}", error_message=error_message
+                    row_index=actual_row, status="error", status_text=f"Error: {error_message}", error_message=error_message
                 )
+                logger.error(f"Linking error for row {actual_row + 1}: {error_message}")
             
-            logger.error(f"Linking error for row {row_index + 1}: {error_message}")
         except Exception as e:
             logger.error(
                 f"Error updating linking error status for row {row_index}: {e}",

@@ -11,7 +11,7 @@ import imageio_ffmpeg
 # --- END: New Imports ---
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.ERROR)  # Set specific level for this module
+logger.setLevel(logging.DEBUG)  # Set specific level for this module
 
 # Set up GUI logging with INFO level for this module (player logic operations)
 from tidal_dl.gui.gui_logging import setup_gui_logger
