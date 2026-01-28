@@ -10,10 +10,29 @@
 #define AssetsDir   ProjectRoot + "\Tidal-Media-Downloader\TIDALDL-PY\tidal_dl\assets"
 
 #define MyAppName "Tidal-DL GUI"
-#define MyAppVersion "1.1.8"
+; Load the version from the external file
+#include "version.iss"
 #define MyAppPublisher "GeradeHouse"
 #define MyAppExeName "tidal-dl-gui.exe"
 #define MyAppIconName "icon-tidal-dl-gui.ico"
+
+; -------------------------------------------------------------------------
+; TESTING MODE LOGIC
+; -------------------------------------------------------------------------
+; If "TestingMode" is defined (passed via /DTestingMode from command line),
+; we change the install folder and the music folder name.
+#ifdef TestingMode
+  #define MusicFolderName "Tidal-dl-test"
+  ; In Testing mode, install directly to the Music\Tidal-dl-test folder
+  ; This creates a duplicate, isolated version as requested.
+  #define InstallPath "{%USERPROFILE}\Music\" + MusicFolderName
+  #define AppNameSuffix " (Test)"
+#else
+  #define MusicFolderName "Tidal-dl"
+  ; In Normal mode, install to Program Files
+  #define InstallPath "{autopf}\" + MyAppName
+  #define AppNameSuffix ""
+#endif
 
 ; -------------------------------------------------------------------------
 ; APP ID (GUID)
@@ -23,16 +42,16 @@
 
 [Setup]
 AppId={#MyAppAppId}
-AppName={#MyAppName}
+AppName={#MyAppName}{#AppNameSuffix}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 
-; Install to C:\Program Files\Tidal-DL GUI
-DefaultDirName={autopf}\{#MyAppName}
+; Install Directory (Dynamic based on TestingMode)
+DefaultDirName={#InstallPath}
 ArchitecturesInstallIn64BitMode=x64compatible
 
 ; Create Start Menu folder
-DefaultGroupName={#MyAppName}
+DefaultGroupName={#MyAppName}{#AppNameSuffix}
 
 ; Uninstall settings
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -64,7 +83,7 @@ DisableWelcomePage=no
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=admin
-OutputBaseFilename=TidalDL_Installer_v{#MyAppVersion}
+OutputBaseFilename=TidalDL_Installer_v{#MyAppVersion}{#AppNameSuffix}
 OutputDir={#ProjectRoot}
 
 [Languages]
@@ -76,7 +95,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Dirs]
 ; Use {%USERPROFILE} to access the environment variable for C:\Users\<Name>
-Name: "{%USERPROFILE}\Music\Tidal-dl"; Permissions: users-modify
+; The folder name changes dynamically based on TestingMode
+Name: "{%USERPROFILE}\Music\{#MusicFolderName}"; Permissions: users-modify
 
 [Files]
 ; 1. The Main Executable
@@ -90,15 +110,15 @@ Source: "{#AssetsDir}\icons\{#MyAppIconName}"; DestDir: "{app}"; Flags: ignoreve
 
 [Icons]
 ; Start Menu Shortcut
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppIconName}"
+Name: "{group}\{#MyAppName}{#AppNameSuffix}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppIconName}"
 
 ; Desktop Shortcut (Smart Logic)
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppIconName}"; Check: ShouldCreateDesktopShortcut
+Name: "{autodesktop}\{#MyAppName}{#AppNameSuffix}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppIconName}"; Check: ShouldCreateDesktopShortcut
 
 [Run]
 ; Option to run the app immediately after installation finishes
 ; NOTE: This must be placed BEFORE the [Code] section!
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName + AppNameSuffix, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 // Import Windows API functions for Window Focus and File Attributes
@@ -134,8 +154,8 @@ procedure CustomizeMusicFolderIcon;
 var
   MusicFolderPath, DesktopIniPath, IconPath: String;
 begin
-  // Use {%USERPROFILE} here as well
-  MusicFolderPath := ExpandConstant('{%USERPROFILE}\Music\Tidal-dl');
+  // Use the Preprocessor variable MusicFolderName injected into the string
+  MusicFolderPath := ExpandConstant('{%USERPROFILE}\Music\{#MusicFolderName}');
   DesktopIniPath  := MusicFolderPath + '\desktop.ini';
   IconPath        := ExpandConstant('{app}\{#MyAppIconName}');
 
@@ -179,7 +199,7 @@ begin
 
   if IsUpgrade then
   begin
-    DesktopShortcutExists := FileExists(ExpandConstant('{autodesktop}\{#MyAppName}.lnk'));
+    DesktopShortcutExists := FileExists(ExpandConstant('{autodesktop}\{#MyAppName}{#AppNameSuffix}.lnk'));
   end;
 
   Result := True;
@@ -189,9 +209,9 @@ procedure InitializeWizard;
 begin
   if IsUpgrade then
   begin
-    WizardForm.WelcomeLabel1.Caption := 'Update found for {#MyAppName}';
+    WizardForm.WelcomeLabel1.Caption := 'Update found for {#MyAppName}{#AppNameSuffix}';
     WizardForm.WelcomeLabel2.Caption := 
-      'Setup has detected an existing installation of {#MyAppName}.' + #13#10 + #13#10 +
+      'Setup has detected an existing installation of {#MyAppName}{#AppNameSuffix}.' + #13#10 + #13#10 +
       'The installer will now update the application to version {#MyAppVersion}.' + #13#10 + #13#10 +
       'Your existing settings and shortcuts will be preserved. Click Next to continue.';
   end;

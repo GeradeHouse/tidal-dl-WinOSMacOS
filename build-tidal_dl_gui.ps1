@@ -2,74 +2,65 @@
 
 <#
 .SYNOPSIS
-Builds the tidal-dl-gui executable using PyInstaller and optionally creates an Installer via Inno Setup.
+Builds the Tidal-DL GUI executable and optionally creates an Installer.
 
 .DESCRIPTION
-This script cleans up previous build artifacts and runs PyInstaller
-to create a standalone executable for the Tidal Media Downloader GUI.
-It allows specifying the build type (Windowed or Console).
-Includes icons, fonts, and images assets. Excludes common ML libraries.
-After a successful build, it also copies the resulting executable and the `_internal`
-folder to a fixed test location so the app can be run and tested immediately.
-
-If the -Installer switch is provided, it will also run Inno Setup to compile
-the installer executable into the 'dist-installer' folder.
-
-.PARAMETER BuildType
-Specifies the type of executable to build.
-'Windowed' creates a standard GUI application without a console window (--noconsole).
-'Console' creates an executable that opens a console window (useful for debugging).
-Defaults to 'Windowed'.
+This script automates the build process for the Tidal Media Downloader GUI.
+It performs the following steps:
+1.  Increments the version number in 'version.iss'.
+2.  Cleans up previous build artifacts.
+3.  Runs PyInstaller to create a standalone executable (Windowed or Console).
+4.  (Optional) Copies artifacts to a specific OneDrive test folder if -Testing is used.
+5.  (Optional) Compiles an Installer using Inno Setup if -Installer is used.
 
 .PARAMETER Windowed
-Switch-style way to request a windowed/GUI build. Equivalent to: -BuildType Windowed
+Builds a standard GUI application (no console window). This is the default behavior.
 
 .PARAMETER Console
-Switch-style way to request a console build. Equivalent to: -BuildType Console
-
-.PARAMETER BuildMode
-Determines how aggressively the build environment is cleaned and dependencies are reinstalled.
-'Full' (default) cleans all build artifacts and runs 'pip install -r requirements.txt'.
-'Fast' performs a lighter cleanup and skips reinstalling requirements to speed up iterative builds.
+Builds a console application. Useful for debugging crashes or viewing live logs.
 
 .PARAMETER Installer
 If specified, runs Inno Setup (iscc) after the build to create the installer executable.
-The installer will be placed in the 'dist-installer' folder.
-The version in 'setup_tidal_dl.iss' will be automatically incremented before the build starts.
+The installer is placed in the 'dist-installer' folder.
+
+.PARAMETER Testing
+Enables "Testing Mode". Behavior depends on whether -Installer is used:
+1.  If -Installer is NOT used: Copies the built EXE and '_internal' folder directly to:
+    'C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl-test'
+2.  If -Installer IS used: Skips the direct file copy. Instead, compiles the installer
+    with the 'TestingMode' flag, causing it to install into 'Music\Tidal-dl-test'.
+
+.PARAMETER BuildMode
+Controls the cleanup strategy:
+- 'Full' (Default): Deletes all artifacts (dist, build, spec) and reinstalls requirements.
+- 'Fast': Keeps the 'build' cache and skips pip install. Use this for quick code iterations.
+
+.PARAMETER BuildType
+Legacy parameter for specifying 'Windowed' or 'Console'. Prefer using the switches above.
 
 .EXAMPLE
-.\build-tidal_dl_gui.ps1
-Builds the default 'Windowed' executable (if no switches/parameters are supplied,
-the script will prompt for a choice).
-
-.EXAMPLE
-.\build-tidal_dl_gui.ps1 -BuildType Console
-Builds the 'Console' executable. (Legacy invocation, still supported.)
-
-.EXAMPLE
-.\build-tidal_dl_gui.ps1 -BuildType Windowed
-Builds the 'Windowed' executable. (Legacy invocation, still supported.)
-
-.EXAMPLE
+# 1. Standard Build (GUI only, no installer)
 .\build-tidal_dl_gui.ps1 -Windowed
-Builds the 'Windowed' executable using the new switch-style invocation.
 
 .EXAMPLE
-.\build-tidal_dl_gui.ps1 -Console
-Builds the 'Console' executable using the new switch-style invocation.
-
-.EXAMPLE
-.\build-tidal_dl_gui.ps1 -Windowed -BuildMode Fast
-Builds the 'Windowed' executable using a faster, incremental build that keeps caches
-and skips reinstalling requirements.
-
-.EXAMPLE
+# 2. Create a Standard Installer
+# Builds the GUI, increments version, and creates an installer in 'dist-installer'.
 .\build-tidal_dl_gui.ps1 -Windowed -Installer
-Builds the GUI executable and then creates the Installer.
 
 .EXAMPLE
-.\build-tidal_dl_gui.ps1 -Windowed
-Builds the GUI executable only (no installer).
+# 3. Create a Test Build & Installer
+# Builds GUI, skips manual copy, and creates an installer that installs to 'Music\Tidal-dl-test'.
+.\build-tidal_dl_gui.ps1 -Windowed -Installer -Testing
+
+.EXAMPLE
+# 4. Test Raw Executable (No Installer)
+# Builds GUI and copies files directly to 'Music\Tidal-dl-test' for immediate testing.
+.\build-tidal_dl_gui.ps1 -Windowed -Testing
+
+.EXAMPLE
+# 5. Fast Iteration
+# Rebuilds the EXE without reinstalling dependencies or clearing the build cache.
+.\build-tidal_dl_gui.ps1 -Windowed -BuildMode Fast
 #>
 param(
     [Parameter(Mandatory=$false)]
@@ -87,7 +78,10 @@ param(
     [string]$BuildMode = "Full",
 
     [Parameter(Mandatory=$false)]
-    [switch]$Installer
+    [switch]$Installer,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$Testing
 )
 
 # --- Configuration ---
@@ -96,10 +90,11 @@ $ProjectSourceDir = Join-Path $ScriptDir "Tidal-Media-Downloader" # Path to the 
 $PackageDir = Join-Path $ProjectSourceDir "TIDALDL-PY" # Path to the main Python package
 
 # --- 0. Automatic Version Increment ---
-# This runs every time the script is executed, as requested.
-$IssPath = Join-Path $ScriptDir "setup_tidal_dl.iss"
+# This runs every time the script is executed.
+# Targets the separate version file 'version.iss' to avoid Git noise on the main script.
+$IssPath = Join-Path $ScriptDir "version.iss"
 if (Test-Path $IssPath) {
-    Write-Host "Checking version in setup_tidal_dl.iss..." -ForegroundColor Yellow
+    Write-Host "Checking version in version.iss..." -ForegroundColor Yellow
     try {
         $issContent = Get-Content -Path $IssPath -Raw -Encoding UTF8
         # Regex to match: #define MyAppVersion "1.1.7"
@@ -118,13 +113,13 @@ if (Test-Path $IssPath) {
             Set-Content -Path $IssPath -Value $issContent -Encoding UTF8
             Write-Host "Version updated to: $newVersion" -ForegroundColor Green
         } else {
-            Write-Warning "Could not find '#define MyAppVersion' pattern in .iss file. Skipping version update."
+            Write-Warning "Could not find '#define MyAppVersion' pattern in version.iss. Skipping version update."
         }
     } catch {
-        Write-Error "Failed to update version in .iss file: $($_.Exception.Message)"
+        Write-Error "Failed to update version in version.iss: $($_.Exception.Message)"
     }
 } else {
-    Write-Warning "setup_tidal_dl.iss not found at '$IssPath'. Skipping version update."
+    Write-Warning "version.iss not found at '$IssPath'. Skipping version update."
 }
 
 # --- Resolve Build Type (new switch style takes precedence) ---
@@ -228,6 +223,7 @@ Write-Host "-------------------------------------" -ForegroundColor Cyan
 Write-Host "Starting Build for '$AppName'" -ForegroundColor Cyan
 Write-Host "Build Type: $BuildType" -ForegroundColor Cyan
 Write-Host "Build Mode: $BuildMode" -ForegroundColor Cyan
+Write-Host "Testing Mode: $(if ($Testing) {'Enabled'} else {'Disabled'})" -ForegroundColor Cyan
 Write-Host "Project Source: $ProjectSourceDir" -ForegroundColor Cyan
 Write-Host "-------------------------------------"
 
@@ -355,45 +351,58 @@ catch {
 Set-Location $ScriptDir
 Write-Host "Restored working directory to: $ScriptDir"
 
-# --- Post-Build: Copy Artifacts to Test Location ---
-Write-Host "-------------------------------------" -ForegroundColor Cyan
-Write-Host "Copying build artifacts to test location..." -ForegroundColor Cyan
+# --- Post-Build: Copy Artifacts to Test Location (CONDITIONAL) ---
+# Logic:
+# 1. If -Testing is ON and -Installer is OFF: Copy files manually (for raw EXE testing).
+# 2. If -Testing is ON and -Installer is ON: Skip copy (Installer will handle deployment).
+# 3. If -Testing is OFF: Do nothing.
 
-# Ensure the target directory exists
-try {
-    if (-not (Test-Path $PostBuildTargetDir)) {
-        Write-Host "Test directory does not exist. Creating: $PostBuildTargetDir" -ForegroundColor Yellow
-        New-Item -ItemType Directory -Path $PostBuildTargetDir -Force | Out-Null
-    }
-} catch {
-    Write-Error "Failed to ensure test directory '$PostBuildTargetDir' exists: $($_.Exception.Message)"
-    # do not exit here; show that build finished but copy failed
-}
+if ($Testing -and -not $Installer) {
+    Write-Host "-------------------------------------" -ForegroundColor Cyan
+    Write-Host "Copying build artifacts to test location (Testing Mode)..." -ForegroundColor Cyan
 
-# Copy the EXE
-if (Test-Path $PostBuildExePath) {
+    # Ensure the target directory exists
     try {
-        Write-Host "Copying EXE from '$PostBuildExePath' to '$PostBuildTargetDir'..." -ForegroundColor Yellow
-        Copy-Item -Path $PostBuildExePath -Destination $PostBuildTargetDir -Force
-        Write-Host "EXE copied successfully." -ForegroundColor Green
+        if (-not (Test-Path $PostBuildTargetDir)) {
+            Write-Host "Test directory does not exist. Creating: $PostBuildTargetDir" -ForegroundColor Yellow
+            New-Item -ItemType Directory -Path $PostBuildTargetDir -Force | Out-Null
+        }
     } catch {
-        Write-Error "Failed to copy EXE to test location: $($_.Exception.Message)"
+        Write-Error "Failed to ensure test directory '$PostBuildTargetDir' exists: $($_.Exception.Message)"
     }
-} else {
-    Write-Warning "Expected EXE not found at '$PostBuildExePath'. Skipping EXE copy."
-}
 
-# Copy the _internal folder (and its contents)
-if (Test-Path $PostBuildFolder) {
-    try {
-        Write-Host "Copying '_internal' folder from '$PostBuildFolder' to '$PostBuildTargetDir'..." -ForegroundColor Yellow
-        Copy-Item -Path $PostBuildFolder -Destination $PostBuildTargetDir -Recurse -Force
-        Write-Host "'_internal' folder copied successfully." -ForegroundColor Green
-    } catch {
-        Write-Error "Failed to copy '_internal' folder to test location: $($_.Exception.Message)"
+    # Copy the EXE
+    if (Test-Path $PostBuildExePath) {
+        try {
+            Write-Host "Copying EXE from '$PostBuildExePath' to '$PostBuildTargetDir'..." -ForegroundColor Yellow
+            Copy-Item -Path $PostBuildExePath -Destination $PostBuildTargetDir -Force
+            Write-Host "EXE copied successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "Failed to copy EXE to test location: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Warning "Expected EXE not found at '$PostBuildExePath'. Skipping EXE copy."
     }
+
+    # Copy the _internal folder (and its contents)
+    if (Test-Path $PostBuildFolder) {
+        try {
+            Write-Host "Copying '_internal' folder from '$PostBuildFolder' to '$PostBuildTargetDir'..." -ForegroundColor Yellow
+            Copy-Item -Path $PostBuildFolder -Destination $PostBuildTargetDir -Recurse -Force
+            Write-Host "'_internal' folder copied successfully." -ForegroundColor Green
+        } catch {
+            Write-Error "Failed to copy '_internal' folder to test location: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Warning "Expected '_internal' folder not found at '$PostBuildFolder'. Skipping folder copy."
+    }
+} elseif ($Testing -and $Installer) {
+    Write-Host "-------------------------------------" -ForegroundColor Cyan
+    Write-Host "Testing mode enabled, but skipping direct file copy." -ForegroundColor Yellow
+    Write-Host "Reason: -Installer flag is set. The installer will deploy files to the test location." -ForegroundColor Yellow
 } else {
-    Write-Warning "Expected '_internal' folder not found at '$PostBuildFolder'. Skipping folder copy."
+    Write-Host "-------------------------------------" -ForegroundColor Cyan
+    Write-Host "Testing flag not set. Skipping copy to test location." -ForegroundColor Yellow
 }
 
 # --- Optional: Build Installer (Inno Setup) ---
@@ -415,18 +424,27 @@ if ($Installer) {
         }
 
         # Construct Inno Setup Command
-        # /O specifies the output directory. We use the relative path name to keep it portable in the command args,
-        # or we can pass the full path since we are running locally.
-        # Using the relative path "dist-installer" works if we are in $ScriptDir.
-        
+        # We use an array for arguments to handle quoting cleanly
+        $isccArgs = @(
+            "/O`"$InstallerOutputDir`"", # Output folder
+            "/Qp"                        # Quiet with progress
+        )
+
+        # If Testing mode is active, pass the definition to Inno Setup
+        if ($Testing) {
+            Write-Host "Enabling 'TestingMode' in Inno Setup..." -ForegroundColor Yellow
+            $isccArgs += "/DTestingMode"
+        }
+
+        # Add the script file
+        $isccArgs += "`"setup_tidal_dl.iss`""
+
         Write-Host "Running Inno Setup Compiler..." -ForegroundColor Yellow
         Write-Host "Output Folder: $InstallerFullOutputDir"
         
         try {
             # Run iscc.exe
-            # /Qp = Quiet compile with progress
-            # /O = Output directory override
-            $proc = Start-Process -FilePath "iscc" -ArgumentList "/O`"$InstallerOutputDir`"", "/Qp", "`"setup_tidal_dl.iss`"" -PassThru -NoNewWindow -Wait
+            $proc = Start-Process -FilePath "iscc" -ArgumentList $isccArgs -PassThru -NoNewWindow -Wait
             
             if ($proc.ExitCode -eq 0) {
                 Write-Host "Installer created successfully!" -ForegroundColor Green

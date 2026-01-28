@@ -108,6 +108,7 @@
     "python.analysis.useLibraryCodeForTypes": true,
 
     // auto-activate venv in terminals
-    "python.terminal.activateEnvironment": true
+    "python.terminal.activateEnvironment": true,
+    "task.allowAutomaticTasks": "on"
   }
 }
