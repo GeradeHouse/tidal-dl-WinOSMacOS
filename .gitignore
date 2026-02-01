@@ -160,3 +160,7 @@ dist-installer/
 TidalDL_Installer_v*.exe
 version.iss
 generate-file-listing.ps1
+
+
+generate-folded-project-context/*
+project-files-listing.txt
