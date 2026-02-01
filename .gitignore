@@ -12,6 +12,7 @@ Thumbs.db
 .rooignore
 .roomodes
 .roomodes.backup
+.kilocode/rules/rules.md
 
 ###############################################################################
 # 2. Local history / snapshots (root-level)
@@ -151,7 +152,6 @@ docker-compose.yml
 .kilocodemodes
 .kilocode/mcp.json
 cover_cache.pkl
-.gitignore
 .spotify_token_cache.json
 .tidal-dl.json
 .tidal-dl.token.json
