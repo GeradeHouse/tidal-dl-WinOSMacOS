@@ -357,7 +357,9 @@ class MainView(QWidget):
                     p = QPainter(self)
                     p.setRenderHint(QPainter.RenderHint.Antialiasing)
                     p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(QColor("#aaaaaa"))
+                    c = QColor()
+                    c.setNamedColor("#aaaaaa")
+                    p.setBrush(c)
                     r = self.rect()
                     y = r.center().y()
                     dot_offset = 4
@@ -571,6 +573,8 @@ class MainView(QWidget):
 
         # Connect progress signals from individual handlers to the Playlist Tree Handler
         self.download_handler.downloadProgress.connect(self.tree_handler.on_job_progress)
+        self.download_handler.downloadStarted.connect(self.tree_handler.on_job_started)
+        self.download_handler.downloadFinished.connect(self.tree_handler.on_job_finished)
         self.linking_gui_handler.linkProgress.connect(self.tree_handler.on_job_progress)
 
     @pyqtSlot(QtWidgets.QTableWidgetItem)
@@ -676,7 +680,9 @@ class MainView(QWidget):
         path = QtGui.QPainterPath()
         path.addRoundedRect(QRectF(self.rect()), 10, 10)
         painter.setClipPath(path)
-        painter.fillRect(self.rect(), QColor("#1E1E1E"))
+        bg_color = QColor()
+        bg_color.setNamedColor("#1E1E1E")
+        painter.fillRect(self.rect(), bg_color)
         if hasattr(self, "background_pixmap") and not self.background_pixmap.isNull():
             target_rect = self.rect()
             scaled_pixmap = self.background_pixmap.scaled(

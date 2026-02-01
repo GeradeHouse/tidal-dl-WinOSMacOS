@@ -219,6 +219,8 @@ class DownloadHandler(QObject):
     """
     # MODIFIED: Add progress signal
     downloadProgress = pyqtSignal(str, int) # playlist_id, count
+    downloadStarted = pyqtSignal(str, str, int) # playlist_id, action, total
+    downloadFinished = pyqtSignal(str) # playlist_id
 
     def __init__(
         self,
@@ -479,6 +481,7 @@ class DownloadHandler(QObject):
         self._current_processing_playlist_id = playlist_id
         if playlist_id:
             self._processed_counters[playlist_id] = 0
+            self.downloadStarted.emit(playlist_id, "Downloading", len(tracks_to_start))
             logger.debug(f"🔴🔴🔴 DOWNLOAD: Set _current_processing_playlist_id = {playlist_id}")
         
         self.main_view.stop_event.clear()
@@ -613,6 +616,7 @@ class DownloadHandler(QObject):
         
         # CRITICAL FIX: Clean up the processing playlist ID
         if self._current_processing_playlist_id:
+            self.downloadFinished.emit(self._current_processing_playlist_id)
             logger.debug(f"🔴🔴🔴 DOWNLOAD: Cleaning up processing playlist ID: {self._current_processing_playlist_id}")
             self._current_processing_playlist_id = None
         
@@ -641,7 +645,9 @@ class DownloadHandler(QObject):
                     self.main_view,
                     "Download Complete",
                     "Download finished successfully.",
-                    f"Saved to: {path if path else 'N/A'}"
+                    f"Saved to: {path if path else 'N/A'}",
+                    show_folder_path=path,
+                    show_in_folder_func=show_in_folder
                 )
             elif title in ["Download Stopped", "Download Cancelled", "Download Error"]:
                 CustomQMessageBox.information(self.main_view, title, "Download Status", msg or f"Download failed: {msg}")

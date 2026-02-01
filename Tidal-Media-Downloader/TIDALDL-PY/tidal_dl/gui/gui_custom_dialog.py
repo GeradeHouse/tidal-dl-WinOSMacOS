@@ -270,7 +270,7 @@ class CustomQMessageBox:
         return path
 
     @staticmethod
-    def information(parent: Optional[QWidget], title: str, main_message: str, informative_text: str = "", icon_path: Optional[str] = None):
+    def information(parent: Optional[QWidget], title: str, main_message: str, informative_text: str = "", icon_path: Optional[str] = None, show_folder_path: Optional[str] = None, show_in_folder_func: Optional[Callable] = None):
         """Displays an information dialog with an OK button."""
         icon = icon_path if icon_path else CustomQMessageBox._get_icon("success.png")
         dlg = ModernDarkDialog(
@@ -279,7 +279,9 @@ class CustomQMessageBox:
             informative_text=informative_text,
             icon_path=icon,
             parent=parent,
-            buttons=["OK"]
+            buttons=["OK"],
+            show_folder_path=show_folder_path,
+            show_in_folder_func=show_in_folder_func
         )
         dlg.exec()
 
