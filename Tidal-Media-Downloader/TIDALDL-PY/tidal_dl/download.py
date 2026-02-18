@@ -16,8 +16,10 @@ import asyncio
 import json
 import logging
 import os
+import stat
 import subprocess
 import tempfile
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
@@ -175,6 +177,28 @@ def __setMetaData__(
     This function now uses the advanced streamrip tagging engine.
     """
     logger.info(f"Starting metadata tagging for '{os.path.basename(filepath)}' using streamrip engine.")
+
+    def _is_permission_denied_error(exc: Exception) -> bool:
+        """Best-effort detection for transient file lock / ACL write errors."""
+        current: Optional[BaseException] = exc
+        visited: set[int] = set()
+        while current and id(current) not in visited:
+            visited.add(id(current))
+            err_no = getattr(current, "errno", None)
+            if err_no == 13:
+                return True
+
+            message = str(current).lower()
+            if (
+                "permission denied" in message
+                or "winerror 32" in message
+                or "used by another process" in message
+            ):
+                return True
+
+            current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+
+        return False
     
     # Determine the correct album object
     album_obj = album if album is not None else track.album
@@ -218,11 +242,47 @@ def __setMetaData__(
                 temp_f.write(cover_data)
                 cover_path = temp_f.name
         
-        # Step 3: Run the asynchronous tagging function
-        # We use asyncio.run() to call the async tag_file from our sync code
-        asyncio.run(tag_file(filepath, streamrip_meta, cover_path))
+        # Step 3: Run tagging with retries for transient file locks
+        # (OneDrive sync / AV scanners can briefly lock newly written files)
+        max_retries = 6
+        base_delay_seconds = 0.25
+        file_name = os.path.basename(filepath)
 
-        logger.info(f"Successfully tagged '{os.path.basename(filepath)}' with extensive metadata.")
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Ensure write-bit is present before mutagen tries to save
+                try:
+                    os.chmod(filepath, stat.S_IREAD | stat.S_IWRITE)
+                except Exception:
+                    pass
+
+                # We use asyncio.run() to call the async tag_file from sync code
+                asyncio.run(tag_file(filepath, streamrip_meta, cover_path))
+                logger.info(f"Successfully tagged '{file_name}' with extensive metadata.")
+                break
+            except Exception as tag_error:
+                is_permission = _is_permission_denied_error(tag_error)
+                if is_permission and attempt < max_retries:
+                    wait_seconds = base_delay_seconds * attempt
+                    logger.warning(
+                        f"Permission denied while tagging '{file_name}' "
+                        f"(attempt {attempt}/{max_retries}). Retrying in {wait_seconds:.2f}s..."
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+
+                logger.error(
+                    f"Failed to tag file '{file_name}' using streamrip engine: {tag_error}",
+                    exc_info=True,
+                )
+                logger.error(f"Failed to write metadata for '{track.title}': {tag_error}")
+                if is_permission:
+                    logger.error(
+                        "Tagging failed due to persistent file access denial. "
+                        "If this path is inside OneDrive, consider pausing sync or "
+                        "using a non-synced download folder."
+                    )
+                break
 
     except Exception as e:
         logger.error(f"Failed to tag file '{os.path.basename(filepath)}' using streamrip engine: {e}", exc_info=True)
