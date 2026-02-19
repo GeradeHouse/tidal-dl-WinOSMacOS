@@ -52,7 +52,12 @@ class TaskQueueManager(QObject):
         
         self.process_next_job()
 
-    def add_spotify_download_job(self, spotify_playlists_data: List[Dict[str, Any]], quality: AudioQuality):
+    def add_spotify_download_job(
+        self,
+        spotify_playlists_data: List[Dict[str, Any]],
+        quality: AudioQuality,
+        non_completed_only: bool = False,
+    ):
         """Adds a job to download all tracks in the selected Spotify playlists."""
         if not spotify_playlists_data:
             return
@@ -62,6 +67,7 @@ class TaskQueueManager(QObject):
                 "type": "download_spotify",
                 "playlist_data": p_data,
                 "quality": quality,
+                "non_completed_only": bool(non_completed_only),
                 "description": f"Download Spotify playlist: {p_data.get('data', {}).get('name', 'Unknown')}"
             }
             self.task_queue.append(job)
@@ -69,7 +75,12 @@ class TaskQueueManager(QObject):
 
         self.process_next_job()
 
-    def add_tidal_download_job(self, tidal_playlists: List[Playlist], quality: AudioQuality):
+    def add_tidal_download_job(
+        self,
+        tidal_playlists: List[Playlist],
+        quality: AudioQuality,
+        non_completed_only: bool = False,
+    ):
         """Adds a job to download all tracks in the selected Tidal playlists."""
         if not tidal_playlists:
             return
@@ -79,6 +90,7 @@ class TaskQueueManager(QObject):
                 "type": "download_tidal",
                 "playlist_obj": playlist,
                 "quality": quality,
+                "non_completed_only": bool(non_completed_only),
                 "description": f"Download Tidal playlist: {getattr(playlist, 'title', 'Unknown')}"
             }
             self.task_queue.append(job)
@@ -188,6 +200,7 @@ class TaskQueueManager(QObject):
         playlist_data = job.get("playlist_data", {})
         playlist_id = playlist_data.get("data", {}).get("id")
         quality = job.get("quality")
+        non_completed_only = bool(job.get("non_completed_only", False))
 
         if not playlist_id:
             logger.error("Cannot download playlist: Missing ID.")
@@ -288,6 +301,11 @@ class TaskQueueManager(QObject):
                                 except Exception as e:
                                     logger.error(f"Failed to deserialize newly linked track {spotify_id}: {e}")
                     
+                    if non_completed_only:
+                        final_download_list = self.main_view.table_handler.filter_non_completed_tracks(
+                            final_download_list,
+                            playlist_data,
+                        )
                     self._start_download(final_download_list, playlist_data, quality)
 
                 # Use invokeMethod to call startLinkingWorker on the main thread
@@ -302,6 +320,11 @@ class TaskQueueManager(QObject):
 
             else:
                 logger.info("All tracks are already linked (or skipped). Starting download.")
+                if non_completed_only:
+                    linked_tracks_for_download = self.main_view.table_handler.filter_non_completed_tracks(
+                        linked_tracks_for_download,
+                        playlist_data,
+                    )
                 self._start_download(linked_tracks_for_download, playlist_data, quality)
 
         threading.Thread(target=pre_download_thread, daemon=True).start()
@@ -311,6 +334,7 @@ class TaskQueueManager(QObject):
         """Handles the logic for a Tidal download job."""
         playlist_obj = job.get("playlist_obj")
         quality = job.get("quality")
+        non_completed_only = bool(job.get("non_completed_only", False))
         playlist_id = getattr(playlist_obj, 'uuid', None)
 
         if not playlist_obj or not playlist_id:
@@ -320,6 +344,11 @@ class TaskQueueManager(QObject):
 
         def fetch_tracks_thread():
             tracks, _ = TIDAL_API.getItems(str(playlist_id), Type.Playlist)
+            if non_completed_only and tracks:
+                tracks = self.main_view.table_handler.filter_non_completed_tracks(
+                    tracks,
+                    cast(Optional[Playlist], playlist_obj),
+                )
             # Emit jobStarted signal
             QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
                                             QtCore.Q_ARG(str, str(playlist_id)),

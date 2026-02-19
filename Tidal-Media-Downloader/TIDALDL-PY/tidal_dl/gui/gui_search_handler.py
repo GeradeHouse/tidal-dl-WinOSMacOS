@@ -185,6 +185,9 @@ class SearchHandler(QObject):
     searchResultsReady = pyqtSignal(
         list, Type, object
     )  # results_array, result_type, search_context
+    keywordSearchReady = pyqtSignal(
+        str, list, list, list
+    )  # query, tracks, albums, artists
     searchFailed = pyqtSignal(str)  # error_message
     liveSearchResultsReady = pyqtSignal(list)  # For live search dropdown (only results)
     data_fetched = pyqtSignal(list, str)
@@ -195,6 +198,27 @@ class SearchHandler(QObject):
         self.live_search_thread: Optional[QThread] = None
         self.live_search_worker: Optional[LiveSearchWorker] = None
         self._latest_search_id = 0  # Counter for live searches
+
+    def _extract_search_items(
+        self,
+        search_result_union: Union[SearchResult, Tuple[SearchResult, str]],
+        item_type: Type,
+    ) -> List[Any]:
+        """Normalizes TIDAL search return values and extracts typed item arrays."""
+        search_result = (
+            search_result_union[0]
+            if isinstance(search_result_union, tuple)
+            else search_result_union
+        )
+        if not isinstance(search_result, SearchResult):
+            return []
+
+        items = TIDAL_API.getSearchResultItems(search_result, item_type)
+        if isinstance(items, list):
+            return items
+        if items is None:
+            return []
+        return [items]
 
     def _fetch_data_thread(self, item_type: Type, item_id: str):
         """
@@ -262,10 +286,11 @@ class SearchHandler(QObject):
         )
         thread.start()
 
-    def perform_search(self, query: str):  # Removed search_type parameter
+    def perform_search(self, query: str):
         """
-        Performs a search based on the query (primarily for URLs), emitting results or errors.
-        Keyword searches are primarily handled by the live search mechanism.
+        Performs a search based on the query.
+        - URL input resolves directly to the linked TIDAL object.
+        - Keyword input now performs full searches for tracks/albums/artists.
         """
         logger.debug(f"SearchHandler: Performing search. Query='{query}'")
         if not query:
@@ -275,6 +300,7 @@ class SearchHandler(QObject):
 
         search_context: Any = None  # To store album/playlist if URL points to tracks
         actual_result_type: Optional[Type] = None  # Initialize type
+        suppress_empty_tracks_error = False
 
         try:
             results_array: List[Any] = []
@@ -323,37 +349,70 @@ class SearchHandler(QObject):
                 logger.info(f"Displaying item from URL: {actual_result_type.name}")
 
             else:
-                # Handle non-URL input (keyword search) - Now primarily handled by live search.
-                # Emit an error or perform a default search if desired.
-                logger.warning(
-                    f"Keyword search via Enter press ('{query}') is not the primary mechanism. Use live search suggestions or enter a URL."
+                logger.info(f"Performing keyword search for query: '{query}'")
+
+                track_results: List[Any] = []
+                album_results: List[Any] = []
+                artist_results: List[Any] = []
+
+                try:
+                    track_results = self._extract_search_items(
+                        TIDAL_API.search(query, Type.Track, limit=50), Type.Track
+                    )
+                except Exception as track_err:
+                    logger.error(
+                        f"Keyword track search failed for '{query}': {track_err}",
+                        exc_info=True,
+                    )
+
+                try:
+                    album_results = self._extract_search_items(
+                        TIDAL_API.search(query, Type.Album, limit=30), Type.Album
+                    )
+                except Exception as album_err:
+                    logger.error(
+                        f"Keyword album search failed for '{query}': {album_err}",
+                        exc_info=True,
+                    )
+
+                try:
+                    artist_results = self._extract_search_items(
+                        TIDAL_API.search(query, Type.Artist, limit=20), Type.Artist
+                    )
+                except Exception as artist_err:
+                    logger.error(
+                        f"Keyword artist search failed for '{query}': {artist_err}",
+                        exc_info=True,
+                    )
+
+                self.keywordSearchReady.emit(
+                    query, track_results, album_results, artist_results
                 )
-                # Option 1: Emit error
-                self.searchFailed.emit(
-                    "Enter a valid URL or use live search suggestions."
+
+                if not track_results and not album_results and not artist_results:
+                    self.searchFailed.emit("No results found.")
+                    self.searchResultsReady.emit([], Type.Track, None)
+                    return
+
+                results_array = track_results
+                actual_result_type = Type.Track
+                suppress_empty_tracks_error = True
+
+                logger.info(
+                    f"Keyword search results for '{query}': "
+                    f"tracks={len(track_results)}, albums={len(album_results)}, artists={len(artist_results)}"
                 )
-                # Option 2: Perform a default search (e.g., for Tracks) - Uncomment if needed
-                # logger.debug(f"Performing default keyword search (Track) for: '{query}'")
-                # try:
-                #     s_result_union = TIDAL_API.search(query, Type.Track, limit=50)
-                #     if isinstance(s_result_union, tuple): s_result = s_result_union[0]
-                #     elif isinstance(s_result_union, SearchResult): s_result = s_result_union
-                #     else: raise TypeError(f"Unexpected return type: {type(s_result_union)}")
-                #     results_array = TIDAL_API.getSearchResultItems(s_result, Type.Track)
-                #     actual_result_type = Type.Track
-                #     logger.info(f"Default search returned {len(results_array)} tracks.")
-                # except Exception as default_search_err:
-                #      logger.error(f"Default keyword search failed: {default_search_err}", exc_info=True)
-                #      self.searchFailed.emit(f"Default search failed: {default_search_err}")
-                #      results_array = [] # Ensure empty results on error
-                # Option 3: Do nothing and let the live search results remain (if any)
-                return  # Exit if handling as error or doing nothing
 
             if not results_array:
-                # This case might be hit if URL parsing succeeded but yielded no data,
-                # or if default search (if enabled) failed/returned nothing.
+                if suppress_empty_tracks_error:
+                    self.searchResultsReady.emit(
+                        [],
+                        actual_result_type if actual_result_type else Type.Null,
+                        search_context,
+                    )
+                    return
+
                 self.searchFailed.emit("No results found.")
-                # Emit empty results to clear table, use determined type or None
                 self.searchResultsReady.emit(
                     [],
                     actual_result_type if actual_result_type else Type.Null,

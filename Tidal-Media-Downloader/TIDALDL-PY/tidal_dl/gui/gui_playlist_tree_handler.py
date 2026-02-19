@@ -1121,6 +1121,19 @@ class PlaylistTreeHandler(QObject):
                                     self.set_playlist_queued(str(playlist_id))
                             self.task_queue_manager.add_tidal_download_job(playlists_data, quality)
 
+                        def queue_and_download_tidal_non_completed(playlists_data, quality):
+                            if not self.task_queue_manager:
+                                return
+                            for playlist_obj in playlists_data:
+                                playlist_id = getattr(playlist_obj, "uuid", None)
+                                if playlist_id:
+                                    self.set_playlist_queued(str(playlist_id))
+                            self.task_queue_manager.add_tidal_download_job(
+                                playlists_data,
+                                quality,
+                                non_completed_only=True,
+                            )
+
                         dlQualities = [
                             ("M4a (Low - 96k)", AudioQuality.LOW),
                             ("M4a (High - 320k)", AudioQuality.HIGH),
@@ -1135,6 +1148,22 @@ class PlaylistTreeHandler(QObject):
                                 action.triggered.connect(
                                     partial(queue_and_download_tidal, tidal_playlists, quality_enum)
                                 )
+
+                        download_non_completed_menu = menu.addMenu(
+                            f"Download non-completed Playlist{plural_s} As..."
+                        )
+                        if download_non_completed_menu:
+                            download_non_completed_menu.setStyleSheet(MENU_STYLESHEET)
+                            for text, quality_enum in dlQualities:
+                                action = download_non_completed_menu.addAction(text)
+                                if action:
+                                    action.triggered.connect(
+                                        partial(
+                                            queue_and_download_tidal_non_completed,
+                                            tidal_playlists,
+                                            quality_enum,
+                                        )
+                                    )
 
             elif item_type == "spotify":
                 spotify_playlists_data = [item.data(0, Qt.ItemDataRole.UserRole) for item in playlist_items]
@@ -1169,6 +1198,19 @@ class PlaylistTreeHandler(QObject):
                                 self.set_playlist_queued(str(pid))
                         self.task_queue_manager.add_spotify_download_job(playlists_data, quality)
 
+                    def queue_and_download_spotify_non_completed(playlists_data, quality):
+                        if not self.task_queue_manager:
+                            return
+                        for p in playlists_data:
+                            pid = p.get('data', {}).get('id')
+                            if pid:
+                                self.set_playlist_queued(str(pid))
+                        self.task_queue_manager.add_spotify_download_job(
+                            playlists_data,
+                            quality,
+                            non_completed_only=True,
+                        )
+
                     dlQualities = [
                         ("M4a (Low - 96k)", AudioQuality.LOW),
                         ("M4a (High - 320k)", AudioQuality.HIGH),
@@ -1183,6 +1225,22 @@ class PlaylistTreeHandler(QObject):
                             action.triggered.connect(
                                 partial(queue_and_download_spotify, spotify_playlists_data, quality_enum)
                             )
+
+                    download_non_completed_menu = menu.addMenu(
+                        f"Download non-completed Playlist{plural_s} As..."
+                    )
+                    if download_non_completed_menu:
+                        download_non_completed_menu.setStyleSheet(MENU_STYLESHEET)
+                        for text, quality_enum in dlQualities:
+                            action = download_non_completed_menu.addAction(text)
+                            if action:
+                                action.triggered.connect(
+                                    partial(
+                                        queue_and_download_spotify_non_completed,
+                                        spotify_playlists_data,
+                                        quality_enum,
+                                    )
+                                )
         
         menu.popup(global_pos)
 

@@ -257,6 +257,75 @@ class LinkPersistenceManager:
         playlists = links_data_dict.get("playlists", {})
         return playlists.get(playlist_id, {})  # Return playlist data or empty dict.
 
+    def get_cached_track_quality(self, tidal_track_id: str) -> Optional[str]:
+        """
+        Retrieves a cached quality label for a Tidal track ID.
+
+        Args:
+            tidal_track_id (str): Tidal track identifier.
+
+        Returns:
+            Optional[str]: Cached quality text if available, otherwise None.
+        """
+        if not tidal_track_id:
+            return None
+
+        if self.links_data is None:
+            self.load_links()
+
+        links_data_dict = cast(Dict[str, Any], self.links_data)
+        quality_cache = links_data_dict.get("track_quality_cache", {})
+        if not isinstance(quality_cache, dict):
+            return None
+
+        entry = quality_cache.get(str(tidal_track_id), {})
+        if not isinstance(entry, dict):
+            return None
+
+        quality_text = entry.get("quality_text")
+        if isinstance(quality_text, str) and quality_text.strip():
+            return quality_text.strip()
+        return None
+
+    def set_cached_track_quality(self, tidal_track_id: str, quality_text: str) -> None:
+        """
+        Stores (or updates) a cached quality label for a Tidal track ID.
+
+        Args:
+            tidal_track_id (str): Tidal track identifier.
+            quality_text (str): Human-readable quality label.
+        """
+        track_id = str(tidal_track_id or "").strip()
+        cleaned_quality = str(quality_text or "").strip()
+        if not track_id or not cleaned_quality:
+            return
+
+        if self.links_data is None:
+            self.load_links()
+
+        links_data_dict = cast(Dict[str, Any], self.links_data)
+
+        quality_cache = links_data_dict.get("track_quality_cache")
+        if not isinstance(quality_cache, dict):
+            quality_cache = {}
+            links_data_dict["track_quality_cache"] = quality_cache
+
+        existing_entry = quality_cache.get(track_id)
+        if isinstance(existing_entry, dict):
+            existing_quality = existing_entry.get("quality_text")
+            if isinstance(existing_quality, str) and existing_quality.strip() == cleaned_quality:
+                return
+
+        quality_cache[track_id] = {
+            "quality_text": cleaned_quality,
+            "timestamp": self._get_current_timestamp(),
+        }
+
+        if not self.save_links():
+            logger.error(
+                f"Failed to save track quality cache for track {track_id}"
+            )
+
     def add_or_update_link(
         self,
         playlist_id: str,

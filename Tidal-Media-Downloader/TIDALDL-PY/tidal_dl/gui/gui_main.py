@@ -10,10 +10,13 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QPushButton,
+    QButtonGroup,
     QComboBox,
     QScrollArea,
     QTextEdit,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QStackedWidget,
     QSplitter,
     QSplitterHandle,
@@ -34,6 +37,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QPainter,
     QColor,
+    QIcon,
     QKeyEvent,
     QMouseEvent,
     QPaintEvent,
@@ -387,6 +391,112 @@ class MainView(QWidget):
             "QSplitter { background-color: transparent; } QSplitter::handle { background-color: #444; }"
         )
 
+        self.search_results_tabs_widget = QWidget()
+        self.search_results_tabs_layout = QHBoxLayout(self.search_results_tabs_widget)
+        self.search_results_tabs_layout.setContentsMargins(4, 6, 4, 8)
+        self.search_results_tabs_layout.setSpacing(8)
+
+        self.search_results_tab_group = QButtonGroup(self)
+        self.search_results_tab_group.setExclusive(True)
+
+        tab_button_style = (
+            "QPushButton {"
+            "background-color: rgba(255, 255, 255, 0.04);"
+            "color: #E8E8E8;"
+            "border: 1px solid rgba(255, 255, 255, 0.12);"
+            "border-radius: 12px;"
+            "padding: 6px 12px;"
+            "font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            "background-color: rgba(255, 255, 255, 0.1);"
+            "}"
+            "QPushButton:checked {"
+            "background-color: rgba(255, 255, 255, 0.18);"
+            "border: 1px solid rgba(255, 255, 255, 0.35);"
+            "color: #FFFFFF;"
+            "}"
+        )
+
+        self.btnTopResults = QPushButton("Top results")
+        self.btnTracksResults = QPushButton("Tracks")
+        self.btnAlbumsResults = QPushButton("Albums")
+        for button in (
+            self.btnTopResults,
+            self.btnTracksResults,
+            self.btnAlbumsResults,
+        ):
+            button.setCheckable(True)
+            button.setStyleSheet(tab_button_style)
+            self.search_results_tab_group.addButton(button)
+            self.search_results_tabs_layout.addWidget(button)
+
+        self.search_results_tabs_layout.addStretch(1)
+        self.btnTopResults.clicked.connect(lambda: self._set_search_results_page("top"))
+        self.btnTracksResults.clicked.connect(
+            lambda: self._set_search_results_page("tracks")
+        )
+        self.btnAlbumsResults.clicked.connect(
+            lambda: self._set_search_results_page("albums")
+        )
+        self.search_results_tabs_widget.setVisible(False)
+
+        self.top_results_list = QListWidget()
+        self.top_results_list.setObjectName("keywordTopResultsList")
+        self.top_results_list.setStyleSheet(
+            "QListWidget {"
+            "background-color: transparent;"
+            "border: 1px solid rgba(255, 255, 255, 0.1);"
+            "border-radius: 8px;"
+            "padding: 6px;"
+            "}"
+            "QListWidget::item {"
+            "padding: 8px;"
+            "margin: 2px;"
+            "border-radius: 6px;"
+            "}"
+            "QListWidget::item:selected {"
+            "background-color: rgba(255, 255, 255, 0.14);"
+            "}"
+        )
+        self.top_results_list.itemClicked.connect(self._on_keyword_result_item_clicked)
+
+        self.albums_grid_list = QListWidget()
+        self.albums_grid_list.setObjectName("keywordAlbumsGridList")
+        self.albums_grid_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.albums_grid_list.setFlow(QListWidget.Flow.LeftToRight)
+        self.albums_grid_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.albums_grid_list.setMovement(QListWidget.Movement.Static)
+        self.albums_grid_list.setWrapping(True)
+        self.albums_grid_list.setSpacing(12)
+        self.albums_grid_list.setWordWrap(True)
+        self.albums_grid_list.setIconSize(QSize(160, 160))
+        self.albums_grid_list.setStyleSheet(
+            "QListWidget {"
+            "background-color: transparent;"
+            "border: 1px solid rgba(255, 255, 255, 0.1);"
+            "border-radius: 8px;"
+            "padding: 8px;"
+            "}"
+            "QListWidget::item {"
+            "width: 170px;"
+            "height: 220px;"
+            "padding: 6px;"
+            "margin: 4px;"
+            "border-radius: 6px;"
+            "}"
+            "QListWidget::item:selected {"
+            "background-color: rgba(255, 255, 255, 0.14);"
+            "}"
+        )
+        self.albums_grid_list.itemClicked.connect(self._on_keyword_result_item_clicked)
+
+        self.search_results_stack = QStackedWidget()
+        self.search_results_stack.addWidget(self.verticalSplitter)  # tracks view
+        self.search_results_stack.addWidget(self.top_results_list)  # top results view
+        self.search_results_stack.addWidget(self.albums_grid_list)  # albums view
+        self._set_search_results_page("tracks")
+
         self.funcGrid = QVBoxLayout()
         self.funcGrid.setContentsMargins(6, 0, 6, 10)
         self.funcGrid.setSpacing(0)
@@ -394,8 +504,9 @@ class MainView(QWidget):
         searchBarLayout.addStretch(1)
         searchBarLayout.addWidget(self.search_bar)
         self.funcGrid.addLayout(searchBarLayout)
-        self.funcGrid.addWidget(self.verticalSplitter)
-        self.funcGrid.setStretchFactor(self.verticalSplitter, 1)
+        self.funcGrid.addWidget(self.search_results_tabs_widget)
+        self.funcGrid.addWidget(self.search_results_stack)
+        self.funcGrid.setStretchFactor(self.search_results_stack, 1)
 
         self.playlist_tree_widget = PlaylistTreeWidget(self)
         self.playlist_tree_widget.setMouseTracking(True)
@@ -473,23 +584,32 @@ class MainView(QWidget):
         self.search_handler.searchResultsReady.connect(
             self.table_handler.populate_search_results
         )
+        self.search_handler.keywordSearchReady.connect(self._on_keyword_search_ready)
         self.search_handler.liveSearchResultsReady.connect(
             self.search_bar._display_live_results
         )
         self.search_handler.data_fetched.connect(
             self.table_handler._populate_table_from_search
         )
+        self.search_handler.data_fetched.connect(self._on_data_fetched_for_search_view)
         self.search_handler.searchFailed.connect(self.table_handler.show_error_message)
         self.search_handler.searchFailed.connect(
             lambda msg: logger_gui.info(f"Search Error: {msg}")
         )
+        self.search_bar.resultSelected.connect(self._on_live_result_selected_for_view)
         self.tree_handler.tidalPlaylistSelected.connect(
             lambda pl: logger_gui.info(f"Selected Tidal Playlist: {pl.title}")
+        )
+        self.tree_handler.tidalPlaylistSelected.connect(
+            lambda _pl: self._reset_keyword_search_views()
         )
         self.tree_handler.spotifyPlaylistSelected.connect(
             lambda pl_data: logger_gui.info(
                 f"Selected Spotify Playlist: {pl_data['data']['name']}"
             )
+        )
+        self.tree_handler.spotifyPlaylistSelected.connect(
+            lambda _pl_data: self._reset_keyword_search_views()
         )
         self.tree_handler.requestTidalPlaylistDownload.connect(
             self.task_queue_manager.add_tidal_download_job
@@ -742,8 +862,193 @@ class MainView(QWidget):
                 else:
                     self.verticalSplitter.setSizes([500, 150])
 
+    def _set_search_results_page(self, page: str) -> None:
+        page_map = {"tracks": 0, "top": 1, "albums": 2}
+        page_index = page_map.get(page, 0)
+        self.search_results_stack.setCurrentIndex(page_index)
+
+        self.btnTracksResults.setChecked(page == "tracks")
+        self.btnTopResults.setChecked(page == "top")
+        self.btnAlbumsResults.setChecked(page == "albums")
+
+    def _format_artist_names(self, artists_value: Any) -> str:
+        if isinstance(artists_value, list):
+            names = [
+                artist.name
+                for artist in artists_value
+                if hasattr(artist, "name") and getattr(artist, "name")
+            ]
+            return ", ".join(names) if names else "Unknown Artist"
+        if hasattr(artists_value, "name"):
+            return str(artists_value.name)
+        if isinstance(artists_value, str):
+            return artists_value
+        return "Unknown Artist"
+
+    def _get_cover_pixmap(self, cover_id: Optional[str], width: int, height: int) -> Optional[QPixmap]:
+        if not cover_id:
+            return None
+
+        try:
+            cover_url = TIDAL_API.getCoverUrl(str(cover_id), str(width), str(height))
+            if not cover_url:
+                return None
+
+            cached = self.cover_cache.get(cover_url)
+            if cached and not cached.isNull():
+                return cached
+
+            cover_data = TIDAL_API.getCoverData(str(cover_id), str(width), str(height))
+            if not cover_data:
+                return None
+
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(cover_data):
+                return None
+
+            self.cover_cache.set(cover_url, pixmap)
+            return pixmap
+        except Exception as cover_err:
+            logger_gui.debug(
+                f"Could not load cover art for '{cover_id}' ({width}x{height}): {cover_err}"
+            )
+        return None
+
+    def _add_disabled_info_item(self, target_list: QListWidget, text: str) -> None:
+        info_item = QListWidgetItem(text)
+        info_item.setFlags(info_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        target_list.addItem(info_item)
+
+    @pyqtSlot(str, list, list, list)
+    def _on_keyword_search_ready(
+        self,
+        query: str,
+        tracks: list,
+        albums: list,
+        artists: list,
+    ) -> None:
+        _ = query
+        self.top_results_list.clear()
+        self.albums_grid_list.clear()
+
+        self.search_results_tabs_widget.setVisible(True)
+
+        max_top_tracks = 6
+        max_top_albums = 6
+        max_top_artists = 6
+
+        for track in tracks[:max_top_tracks]:
+            track_title = getattr(track, "title", "Unknown Track")
+            track_artists = self._format_artist_names(getattr(track, "artists", None))
+            subtitle = f"Track • {track_artists}"
+            top_item = QListWidgetItem(f"{track_title}\n{subtitle}")
+            top_item.setData(
+                Qt.ItemDataRole.UserRole,
+                {"type": Type.Track, "id": getattr(track, "id", ""), "title": track_title},
+            )
+
+            album_obj = getattr(track, "album", None)
+            track_cover_id = getattr(album_obj, "cover", None) if album_obj else None
+            track_pixmap = self._get_cover_pixmap(track_cover_id, 64, 64)
+            if track_pixmap and not track_pixmap.isNull():
+                top_item.setIcon(QIcon(track_pixmap))
+            self.top_results_list.addItem(top_item)
+
+        for album in albums[:max_top_albums]:
+            album_title = getattr(album, "title", "Unknown Album")
+            album_artists = self._format_artist_names(
+                getattr(album, "artists", getattr(album, "artist", None))
+            )
+            subtitle = f"Album • {album_artists}"
+            top_item = QListWidgetItem(f"{album_title}\n{subtitle}")
+            top_item.setData(
+                Qt.ItemDataRole.UserRole,
+                {"type": Type.Album, "id": getattr(album, "id", ""), "title": album_title},
+            )
+
+            album_cover_id = getattr(album, "cover", None)
+            album_pixmap = self._get_cover_pixmap(album_cover_id, 64, 64)
+            if album_pixmap and not album_pixmap.isNull():
+                top_item.setIcon(QIcon(album_pixmap))
+            self.top_results_list.addItem(top_item)
+
+        for artist in artists[:max_top_artists]:
+            artist_name = getattr(artist, "name", "Unknown Artist")
+            subtitle = "Artist"
+            top_item = QListWidgetItem(f"{artist_name}\n{subtitle}")
+            top_item.setData(
+                Qt.ItemDataRole.UserRole,
+                {"type": Type.Artist, "id": getattr(artist, "id", ""), "name": artist_name},
+            )
+
+            artist_cover_id = getattr(artist, "picture", None)
+            artist_pixmap = self._get_cover_pixmap(artist_cover_id, 64, 64)
+            if artist_pixmap and not artist_pixmap.isNull():
+                top_item.setIcon(QIcon(artist_pixmap))
+            self.top_results_list.addItem(top_item)
+
+        if self.top_results_list.count() == 0:
+            self._add_disabled_info_item(self.top_results_list, "No top results available.")
+
+        for album in albums:
+            album_title = getattr(album, "title", "Unknown Album")
+            album_item = QListWidgetItem(album_title)
+            album_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+            )
+            album_item.setData(
+                Qt.ItemDataRole.UserRole,
+                {"type": Type.Album, "id": getattr(album, "id", ""), "title": album_title},
+            )
+            album_item.setSizeHint(QSize(176, 220))
+
+            album_cover_id = getattr(album, "cover", None)
+            album_pixmap = self._get_cover_pixmap(album_cover_id, 220, 220)
+            if album_pixmap and not album_pixmap.isNull():
+                album_item.setIcon(QIcon(album_pixmap))
+
+            self.albums_grid_list.addItem(album_item)
+
+        if self.albums_grid_list.count() == 0:
+            self._add_disabled_info_item(self.albums_grid_list, "No albums found.")
+
+        self._set_search_results_page("top")
+
+    @pyqtSlot(QListWidgetItem)
+    def _on_keyword_result_item_clicked(self, item: QListWidgetItem) -> None:
+        payload = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(payload, dict):
+            return
+
+        item_type = payload.get("type")
+        item_id = payload.get("id")
+        if not item_type or not item_id:
+            return
+
+        self._set_search_results_page("tracks")
+        self.search_handler._on_result_item_clicked(payload)
+
+    @pyqtSlot(dict)
+    def _on_live_result_selected_for_view(self, result_data: Dict[str, Any]) -> None:
+        _ = result_data
+        self._reset_keyword_search_views()
+
+    @pyqtSlot(list, str)
+    def _on_data_fetched_for_search_view(self, results: list, error_msg: str) -> None:
+        _ = (results, error_msg)
+        if self.search_results_tabs_widget.isVisible():
+            self._set_search_results_page("tracks")
+
+    def _reset_keyword_search_views(self) -> None:
+        self.search_results_tabs_widget.setVisible(False)
+        self.top_results_list.clear()
+        self.albums_grid_list.clear()
+        self._set_search_results_page("tracks")
+
     @pyqtSlot(str)
     def _trigger_search(self, query: str):
+        if query.startswith("http://") or query.startswith("https://"):
+            self._reset_keyword_search_views()
         self.search_handler.perform_search(query)
 
     @pyqtSlot(list, str, object)  # tracks_to_link_data, playlist_id, on_finish_callback

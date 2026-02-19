@@ -82,6 +82,10 @@ BASE = "https://api.tidalhifi.com/v1"
 AUTH_URL = "https://auth.tidal.com/v1/oauth2"
 
 
+class NonRetriableApiError(Exception):
+    """Raised for API errors that should not be retried."""
+
+
 class TidalAPI(object):
     def __init__(self):
         # Treat LoginKey dynamically to avoid strict attribute-assignment complaints
@@ -105,6 +109,79 @@ class TidalAPI(object):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:83.0) Gecko/20100101 Firefox/83.0"
         })
         # --- END MODIFICATION ---
+
+    def _is_token_expired_response(self, response: requests.Response) -> bool:
+        """Detects whether a 401 response indicates an expired access token."""
+        if response.status_code != 401:
+            return False
+
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {}
+
+        sub_status = payload.get("subStatus") or payload.get("sub_status")
+        user_message = str(payload.get("userMessage", "")).lower()
+        text = (response.text or "").lower()
+
+        return (
+            sub_status == 11003
+            or "token has expired" in user_message
+            or "expired" in user_message
+            or '"substatus":11003' in text
+            or '"sub_status":11003' in text
+            or "token has expired" in text
+        )
+
+    def _persist_runtime_token(self) -> None:
+        """Persists refreshed runtime token data to token settings file."""
+        try:
+            from tidal_dl.settings import TOKEN
+
+            if self.key.userId is not None:
+                TOKEN.userid = self.key.userId
+            if self.key.countryCode is not None:
+                TOKEN.countryCode = self.key.countryCode
+            if self.key.accessToken:
+                TOKEN.accessToken = self.key.accessToken
+            if self.key.refreshToken:
+                TOKEN.refreshToken = self.key.refreshToken
+
+            if self.key.expiresIn:
+                TOKEN.expiresAfter = int(time.time()) + int(self.key.expiresIn)
+
+            TOKEN.apiKeyIndex = SETTINGS.apiKeyIndex
+            TOKEN.save()
+        except Exception as e:
+            logger.warning(f"Could not persist refreshed token to file: {e}")
+
+    def _try_refresh_after_unauthorized(self) -> bool:
+        """Attempts a single token refresh for expired-token 401 responses."""
+        refresh_token = self.key.refreshToken
+
+        if not refresh_token:
+            try:
+                from tidal_dl.settings import TOKEN
+
+                refresh_token = TOKEN.refreshToken
+            except Exception:
+                refresh_token = None
+
+        if not refresh_token:
+            logger.warning(
+                "401 due to expired token, but no refresh token is available."
+            )
+            return False
+
+        logger.info("Access token expired. Attempting automatic refresh...")
+        refreshed = self.refreshAccessToken(refresh_token)
+        if refreshed:
+            self._persist_runtime_token()
+            logger.info("Automatic token refresh succeeded.")
+            return True
+
+        logger.warning("Automatic token refresh failed.")
+        return False
 
     # --------------------------------------------------------------------- #
     #                           Internal helpers                            #
@@ -146,6 +223,7 @@ class TidalAPI(object):
         raw: str = ""
         result: Dict[str, Any] = {}
         respond: Optional[requests.Response] = None
+        refresh_attempted = False
 
         for attempt in range(0, 3):
             try:
@@ -161,7 +239,18 @@ class TidalAPI(object):
                         return {}
                 
                 if respond.status_code == 401:
-                    raise Exception("TIDAL: Unauthorized - may be due to geo restrictions or quality not available with current subscription")
+                    if self._is_token_expired_response(respond):
+                        if not refresh_attempted and self._try_refresh_after_unauthorized():
+                            refresh_attempted = True
+                            continue
+
+                        raise NonRetriableApiError(
+                            "TIDAL: Access token expired and refresh failed. Please log in again."
+                        )
+
+                    raise NonRetriableApiError(
+                        "TIDAL: Unauthorized - may be due to geo restrictions or quality not available with current subscription"
+                    )
                 if respond.status_code == 429:
                     retry_after = int(respond.headers.get('Retry-After', '2'))
                     wait_time = min(retry_after, 60)
@@ -197,6 +286,12 @@ class TidalAPI(object):
                 logger.error(f"__get__ failed to decode JSON response: {raw[:500]}...")
                 errmsg += f" | Invalid JSON received: {raw[:100]}..."
                 break
+            except NonRetriableApiError as e:
+                logger.error(f"__get__ non-retriable error: {e}")
+                errmsg += f" | {e}"
+                if respond is not None and respond.text:
+                    errmsg += f" | Last raw response: {respond.text[:200]}..."
+                raise Exception(errmsg) from e
             except requests.exceptions.RequestException as e:
                 logger.error(f"__get__ request failed: {e}")
                 errmsg += f" | Request failed: {e}"
@@ -232,6 +327,7 @@ class TidalAPI(object):
         errmsg: str = "GetQuality operation err!"
         respond: Optional[requests.Response] = None
         result: Dict[str, Any] = {}
+        refresh_attempted = False
 
         for index in range(0, 3):
             try:
@@ -253,6 +349,18 @@ class TidalAPI(object):
                         print(i, end=" ")
                     print("")
                     continue
+                if respond.status_code == 401:
+                    if self._is_token_expired_response(respond):
+                        if not refresh_attempted and self._try_refresh_after_unauthorized():
+                            refresh_attempted = True
+                            continue
+                        raise NonRetriableApiError(
+                            "TIDAL: Access token expired and refresh failed during quality retrieval. Please log in again."
+                        )
+
+                    raise NonRetriableApiError(
+                        "TIDAL: Unauthorized during quality retrieval."
+                    )
                 result = json.loads(respond.text)
                 if not isinstance(result, dict):
                     continue
@@ -261,6 +369,11 @@ class TidalAPI(object):
                 if "userMessage" in result and result["userMessage"] is not None:
                     errmsg += str(result["userMessage"])
                 break
+            except NonRetriableApiError as e:
+                errmsg += f" | {e}"
+                if respond is not None:
+                    errmsg += f" | Last raw response: {respond.text[:200]}..."
+                raise Exception(errmsg) from e
             except Exception:
                 if index >= 2:
                     if respond is not None:

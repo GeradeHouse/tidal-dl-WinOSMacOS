@@ -289,7 +289,10 @@ class DownloadHandler(QObject):
             logger.warning("[GUI] onActuallyPaused called but download_paused is False")
 
     def startContextMenuDownload(
-        self, tracks_with_rows: List[Tuple[int, Track]], quality_enum: AudioQuality
+        self,
+        tracks_with_rows: List[Tuple[int, Track]],
+        quality_enum: AudioQuality,
+        non_completed_only: bool = False,
     ):
         if self.main_view.download_active:
             CustomQMessageBox.information(
@@ -309,8 +312,26 @@ class DownloadHandler(QObject):
             )
             return
 
-        tracks_only = [track for _, track in tracks_with_rows]
         current_playlist_context = getattr(self.main_view, "s_playlist_obj", None)
+        filtered_tracks_with_rows = tracks_with_rows
+        if non_completed_only:
+            table_handler = getattr(self.main_view, "table_handler", None)
+            if table_handler:
+                filtered_tracks_with_rows = [
+                    (row, track)
+                    for row, track in tracks_with_rows
+                    if not table_handler.is_track_completed(track, current_playlist_context)
+                ]
+
+        tracks_only = [track for _, track in filtered_tracks_with_rows]
+        if not tracks_only:
+            CustomQMessageBox.information(
+                self.main_view,
+                "Download Skipped",
+                "No Non-Completed Tracks",
+                "All selected tracks are already completed on disk.",
+            )
+            return
 
         quality_str = Printf.map_quality(quality_enum)
 
@@ -365,6 +386,38 @@ class DownloadHandler(QObject):
                 action.triggered.connect(
                     partial(self.startContextMenuDownload, tracks_with_rows, qual_enum)
                 )
+
+        table_handler = getattr(self.main_view, "table_handler", None)
+        current_playlist_context = getattr(self.main_view, "s_playlist_obj", None)
+        non_completed_tracks_with_rows: List[Tuple[int, Track]] = []
+        if table_handler:
+            non_completed_tracks_with_rows = [
+                (row_index, tidal_track)
+                for row_index, tidal_track in tracks_with_rows
+                if not table_handler.is_track_completed(tidal_track, current_playlist_context)
+            ]
+
+        if non_completed_tracks_with_rows:
+            menu.addSeparator()
+            non_completed_menu_title = (
+                f"Download non-completed {len(non_completed_tracks_with_rows)} Track"
+            )
+            if len(non_completed_tracks_with_rows) > 1:
+                non_completed_menu_title += "s"
+
+            non_completed_menu = menu.addMenu(non_completed_menu_title)
+            if non_completed_menu:
+                for text, qual_enum in dlQualities:
+                    action = non_completed_menu.addAction(text)
+                    if action:
+                        action.triggered.connect(
+                            partial(
+                                self.startContextMenuDownload,
+                                non_completed_tracks_with_rows,
+                                qual_enum,
+                                True,
+                            )
+                        )
 
     def _get_tidal_track_from_row(self, row_index: int) -> Optional[Track]:
         table = getattr(self.main_view, "tableWidget", None)
@@ -495,7 +548,9 @@ class DownloadHandler(QObject):
             self.active_downloads[str(track.id)] = {
                 "status": "pending",
                 "progress": 0,
+                "track": track,
                 "playlist_context": playlist_context,
+                "requested_quality": quality_arg_str,
                 "tooltip": f"Position {i+1} of {len(tracks_to_start)} in queue.",
             }
         logger.debug(
@@ -548,12 +603,31 @@ class DownloadHandler(QObject):
     @pyqtSlot(str, bool, str)
     def onTrackFinished(self, track_id: str, ok: bool, error_msg: str):
         state = self.active_downloads.get(track_id)
+        completed_quality: Optional[str] = None
         if state:
             state["status"] = "completed" if ok else "failed"
             state["progress"] = 100 if ok else state.get("progress", 0)
+            if ok:
+                table_handler = getattr(self.main_view, "table_handler", None)
+                track_obj = state.get("track")
+                playlist_context = state.get("playlist_context")
+                if table_handler and isinstance(track_obj, Track):
+                    completed_quality = table_handler.get_completed_quality_for_track(
+                        track_obj,
+                        playlist_context,
+                    )
+                if not completed_quality:
+                    completed_quality = state.get("requested_quality")
+                if completed_quality:
+                    state["completed_quality"] = completed_quality
             if not ok:
                 state["error"] = error_msg
-        self.main_view.table_handler.mark_track_completed(track_id, ok, error_msg)
+        self.main_view.table_handler.mark_track_completed(
+            track_id,
+            ok,
+            error_msg,
+            quality_text=completed_quality,
+        )
 
         # MODIFIED: Increment counter and emit progress  
         # CRITICAL FIX: Use stored processing ID, not current selection which may have changed
