@@ -7,21 +7,26 @@ Builds the Tidal-DL GUI executable and optionally creates an Installer.
 .DESCRIPTION
 This script automates the build process for the Tidal Media Downloader GUI.
 It performs the following steps:
-1.  Increments the version number in 'version.iss'.
+1.  Increments the version number in 'version.iss' (x.y.9 -> x.y+1.0).
 2.  Cleans up previous build artifacts.
 3.  Runs PyInstaller to create a standalone executable (Windowed or Console).
 4.  (Optional) Copies artifacts to a specific OneDrive test folder if -Testing is used.
 5.  (Optional) Compiles an Installer using Inno Setup if -Installer is used.
 
 .PARAMETER Windowed
-Builds a standard GUI application (no console window). This is the default behavior.
+Builds a standard GUI application (no console window). 
+This is the default behavior if no build type is specified.
+Example: .\build-tidal_dl_gui.ps1 -Windowed
 
 .PARAMETER Console
-Builds a console application. Useful for debugging crashes or viewing live logs.
+Builds a console application. 
+Useful for debugging crashes or viewing live logs in a command prompt.
+Example: .\build-tidal_dl_gui.ps1 -Console
 
 .PARAMETER Installer
 If specified, runs Inno Setup (iscc) after the build to create the installer executable.
 The installer is placed in the 'dist-installer' folder.
+Example: .\build-tidal_dl_gui.ps1 -Windowed -Installer
 
 .PARAMETER Testing
 Enables "Testing Mode". Behavior depends on whether -Installer is used:
@@ -29,14 +34,21 @@ Enables "Testing Mode". Behavior depends on whether -Installer is used:
     'C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl-test'
 2.  If -Installer IS used: Skips the direct file copy. Instead, compiles the installer
     with the 'TestingMode' flag, causing it to install into 'Music\Tidal-dl-test'.
+Example: .\build-tidal_dl_gui.ps1 -Windowed -Testing
 
 .PARAMETER BuildMode
 Controls the cleanup strategy:
 - 'Full' (Default): Deletes all artifacts (dist, build, spec) and reinstalls requirements.
 - 'Fast': Keeps the 'build' cache and skips pip install. Use this for quick code iterations.
+Example: .\build-tidal_dl_gui.ps1 -BuildMode Fast
 
 .PARAMETER BuildType
-Legacy parameter for specifying 'Windowed' or 'Console'. Prefer using the switches above.
+Legacy parameter for specifying 'Windowed' or 'Console'. 
+Prefer using the -Windowed or -Console switches above.
+
+.PARAMETER Help
+Displays this help documentation.
+Alias: -h
 
 .EXAMPLE
 # 1. Standard Build (GUI only, no installer)
@@ -61,6 +73,11 @@ Legacy parameter for specifying 'Windowed' or 'Console'. Prefer using the switch
 # 5. Fast Iteration
 # Rebuilds the EXE without reinstalling dependencies or clearing the build cache.
 .\build-tidal_dl_gui.ps1 -Windowed -BuildMode Fast
+
+.EXAMPLE
+# 6. Show Help
+.\build-tidal_dl_gui.ps1 -Help
+.\build-tidal_dl_gui.ps1 -h
 #>
 param(
     [Parameter(Mandatory=$false)]
@@ -81,8 +98,18 @@ param(
     [switch]$Installer,
 
     [Parameter(Mandatory=$false)]
-    [switch]$Testing
+    [switch]$Testing,
+
+    [Parameter(Mandatory=$false)]
+    [Alias("h")]
+    [switch]$Help
 )
+
+# --- Help Check ---
+if ($Help) {
+    Get-Help $PSCommandPath -Full
+    exit 0
+}
 
 # --- Configuration ---
 $ScriptDir = $PSScriptRoot # Directory where this script is located
@@ -101,9 +128,19 @@ if (Test-Path $IssPath) {
         $verPattern = '(?m)^#define\s+MyAppVersion\s+"(\d+)\.(\d+)\.(\d+)"'
         
         if ($issContent -match $verPattern) {
-            $major = $matches[1]
-            $minor = $matches[2]
-            $patch = [int]$matches[3] + 1
+            $major = [int]$matches[1]
+            $minor = [int]$matches[2]
+            $patch = [int]$matches[3]
+
+            # Increment logic: Patch + 1
+            $patch++
+
+            # Rollover logic: If patch > 9, reset patch to 0 and increment minor
+            if ($patch -gt 9) {
+                $patch = 0
+                $minor++
+            }
+
             $newVersion = "$major.$minor.$patch"
             
             # Replace with new version
