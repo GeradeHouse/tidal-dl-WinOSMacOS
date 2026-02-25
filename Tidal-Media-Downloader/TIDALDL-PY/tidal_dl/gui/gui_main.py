@@ -3,8 +3,7 @@
 import logging
 import sys
 import threading
-import time
-from typing import Optional, List, Any, Dict, Union, Callable, TYPE_CHECKING, Tuple
+from typing import Optional, List, Any, Dict, Union, Callable, TYPE_CHECKING
 
 from PyQt6.QtWidgets import (
     QWidget,
@@ -17,7 +16,6 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QLabel,
     QListWidget,
-    QListWidgetItem,
     QStackedWidget,
     QSplitter,
     QSplitterHandle,
@@ -28,7 +26,6 @@ from PyQt6.QtCore import (
     Qt,
     pyqtSignal,
     QThread,
-    QThreadPool,
     pyqtSlot,
     QSize,
     QPoint,
@@ -39,12 +36,10 @@ from PyQt6.QtGui import (
     QPixmap,
     QPainter,
     QColor,
-    QIcon,
     QKeyEvent,
     QMouseEvent,
     QPaintEvent,
     QResizeEvent,
-    QPainterPath,
 )
 from PyQt6 import QtWidgets, QtGui
 
@@ -56,7 +51,7 @@ from tidal_dl import paths
 from tidal_dl.settings import SETTINGS
 from tidal_dl.linking import LinkingWorker
 from tidal_dl.persistence import LinkPersistenceManager
-from tidal_dl.gui.gui_cover_cache import CoverCache, CoverArtWorker
+from tidal_dl.gui.gui_cover_cache import CoverCache
 from tidal_dl.spotify import SpotifyAPI
 
 from .gui_settings import SettingsPage
@@ -68,7 +63,7 @@ from .gui_download import DownloadHandler
 from .gui_linking_handler import LinkingGuiHandler
 from .gui_spotify_handler import SpotifyGuiHandler
 from .gui_navigation import NavigationHandler
-from .gui_search import SearchBarWidget
+from .gui_search import SearchBarWidget, KeywordSearchResultsController
 from .gui_playlist_tree import PlaylistTreeWidget
 from .gui_utils import enableGui, EmittingStream, append_text_to_output
 from .gui_custom_dialog import CustomQMessageBox
@@ -88,7 +83,6 @@ logger_gui = logging.getLogger(__name__)
 logger_gui.setLevel(logging.WARNING)
 
 # Set up GUI logging with INFO level for this module (GUI core operations)
-from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 
@@ -140,14 +134,6 @@ class MainView(QWidget):
 
         self.link_persistence_manager = LinkPersistenceManager()
         self.cover_cache = CoverCache()
-        self._keyword_cover_generation: int = 0
-        self._keyword_cover_subscribers: Dict[
-            str, List[Tuple[QListWidget, QListWidgetItem, int]]
-        ] = {}
-        self._keyword_cover_workers: Dict[str, CoverArtWorker] = {}
-        self._top_result_icon_size: int = 96
-        self._top_result_artist_avatar_size: int = 96
-        self._top_result_item_height: int = 118
         self.spotify_api = SpotifyAPI()
         self.player_logic = PlayerLogic(TIDAL_API, self)
 
@@ -192,6 +178,18 @@ class MainView(QWidget):
         self.tree_handler.set_linking_handler(self.linking_gui_handler)
         
         self.search_handler = SearchHandler(parent=self)
+        self.keyword_results_controller = KeywordSearchResultsController(
+            parent=self,
+            cover_cache=self.cover_cache,
+            top_results_list=self.top_results_list,
+            albums_grid_list=self.albums_grid_list,
+            search_results_tabs_widget=self.search_results_tabs_widget,
+            search_results_stack=self.search_results_stack,
+            btn_tracks_results=self.btnTracksResults,
+            btn_top_results=self.btnTopResults,
+            btn_albums_results=self.btnAlbumsResults,
+            on_result_selected=self.search_handler._on_result_item_clicked,
+        )
         self.download_handler = DownloadHandler(
             main_view=self,
             button_stack=self.c_downloadButtonStack,
@@ -454,7 +452,10 @@ class MainView(QWidget):
         self.top_results_list = QListWidget()
         self.top_results_list.setObjectName("keywordTopResultsList")
         self.top_results_list.setIconSize(
-            QSize(self._top_result_icon_size, self._top_result_icon_size)
+            QSize(
+                KeywordSearchResultsController.TOP_RESULT_ICON_SIZE,
+                KeywordSearchResultsController.TOP_RESULT_ICON_SIZE,
+            )
         )
         self.top_results_list.setSpacing(6)
         self.top_results_list.setStyleSheet(
@@ -478,8 +479,6 @@ class MainView(QWidget):
             "border: 1px solid rgba(255, 255, 255, 0.22);"
             "}"
         )
-        self.top_results_list.itemClicked.connect(self._on_keyword_result_item_clicked)
-
         self.albums_grid_list = QListWidget()
         self.albums_grid_list.setObjectName("keywordAlbumsGridList")
         self.albums_grid_list.setViewMode(QListWidget.ViewMode.IconMode)
@@ -508,8 +507,6 @@ class MainView(QWidget):
             "background-color: rgba(255, 255, 255, 0.14);"
             "}"
         )
-        self.albums_grid_list.itemClicked.connect(self._on_keyword_result_item_clicked)
-
         self.search_results_stack = QStackedWidget()
         self.search_results_stack.addWidget(self.verticalSplitter)  # tracks view
         self.search_results_stack.addWidget(self.top_results_list)  # top results view
@@ -604,24 +601,30 @@ class MainView(QWidget):
         self.search_handler.searchResultsReady.connect(
             self.table_handler.populate_search_results
         )
-        self.search_handler.keywordSearchReady.connect(self._on_keyword_search_ready)
+        self.search_handler.keywordSearchReady.connect(
+            self.keyword_results_controller.on_keyword_search_ready
+        )
         self.search_handler.liveSearchResultsReady.connect(
             self.search_bar._display_live_results
         )
         self.search_handler.data_fetched.connect(
             self.table_handler._populate_table_from_search
         )
-        self.search_handler.data_fetched.connect(self._on_data_fetched_for_search_view)
+        self.search_handler.data_fetched.connect(
+            self.keyword_results_controller.on_data_fetched_for_search_view
+        )
         self.search_handler.searchFailed.connect(self.table_handler.show_error_message)
         self.search_handler.searchFailed.connect(
             lambda msg: logger_gui.info(f"Search Error: {msg}")
         )
-        self.search_bar.resultSelected.connect(self._on_live_result_selected_for_view)
+        self.search_bar.resultSelected.connect(
+            self.keyword_results_controller.on_live_result_selected_for_view
+        )
         self.tree_handler.tidalPlaylistSelected.connect(
             lambda pl: logger_gui.info(f"Selected Tidal Playlist: {pl.title}")
         )
         self.tree_handler.tidalPlaylistSelected.connect(
-            lambda _pl: self._reset_keyword_search_views()
+            lambda _pl: self.keyword_results_controller.reset_keyword_search_views()
         )
         self.tree_handler.spotifyPlaylistSelected.connect(
             lambda pl_data: logger_gui.info(
@@ -629,7 +632,7 @@ class MainView(QWidget):
             )
         )
         self.tree_handler.spotifyPlaylistSelected.connect(
-            lambda _pl_data: self._reset_keyword_search_views()
+            lambda _pl_data: self.keyword_results_controller.reset_keyword_search_views()
         )
         self.tree_handler.requestTidalPlaylistDownload.connect(
             self.task_queue_manager.add_tidal_download_job
@@ -883,6 +886,10 @@ class MainView(QWidget):
                     self.verticalSplitter.setSizes([500, 150])
 
     def _set_search_results_page(self, page: str) -> None:
+        if hasattr(self, "keyword_results_controller"):
+            self.keyword_results_controller.set_search_results_page(page)
+            return
+
         page_map = {"tracks": 0, "top": 1, "albums": 2}
         page_index = page_map.get(page, 0)
         self.search_results_stack.setCurrentIndex(page_index)
@@ -891,356 +898,16 @@ class MainView(QWidget):
         self.btnTopResults.setChecked(page == "top")
         self.btnAlbumsResults.setChecked(page == "albums")
 
-    def _format_artist_names(self, artists_value: Any) -> str:
-        if isinstance(artists_value, list):
-            names = [
-                artist.name
-                for artist in artists_value
-                if hasattr(artist, "name") and getattr(artist, "name")
-            ]
-            return ", ".join(names) if names else "Unknown Artist"
-        if hasattr(artists_value, "name"):
-            return str(artists_value.name)
-        if isinstance(artists_value, str):
-            return artists_value
-        return "Unknown Artist"
-
-    def _get_cover_pixmap(self, cover_id: Optional[str], width: int, height: int) -> Optional[QPixmap]:
-        if not cover_id:
-            return None
-
-        start = time.perf_counter()
-        try:
-            cover_url = TIDAL_API.getCoverUrl(str(cover_id), str(width), str(height))
-            if not cover_url:
-                return None
-
-            cached = self.cover_cache.get(cover_url)
-            if cached and not cached.isNull():
-                return cached
-
-            cover_data = TIDAL_API.getCoverData(str(cover_id), str(width), str(height))
-            if not cover_data:
-                return None
-
-            pixmap = QPixmap()
-            if not pixmap.loadFromData(cover_data):
-                return None
-
-            self.cover_cache.set(cover_url, pixmap)
-            return pixmap
-        except Exception as cover_err:
-            logger_gui.debug(
-                f"Could not load cover art for '{cover_id}' ({width}x{height}): {cover_err}"
-            )
-        finally:
-            elapsed_ms = (time.perf_counter() - start) * 1000.0
-            if elapsed_ms >= 120.0:
-                logger_gui.warning(
-                    "SEARCH_UI_COVER_PERF_DIAG cover_id=%s size=%sx%s elapsed_ms=%.1f",
-                    cover_id,
-                    width,
-                    height,
-                    elapsed_ms,
-                )
-        return None
-
-    def _add_disabled_info_item(self, target_list: QListWidget, text: str) -> None:
-        info_item = QListWidgetItem(text)
-        info_item.setFlags(info_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
-        target_list.addItem(info_item)
-
-    def _create_circular_pixmap(self, pixmap: QPixmap, diameter: int) -> QPixmap:
-        if pixmap.isNull() or diameter <= 0:
-            return pixmap
-
-        scaled = pixmap.scaled(
-            diameter,
-            diameter,
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-
-        crop_x = max((scaled.width() - diameter) // 2, 0)
-        crop_y = max((scaled.height() - diameter) // 2, 0)
-        cropped = scaled.copy(crop_x, crop_y, diameter, diameter)
-
-        result = QPixmap(diameter, diameter)
-        result.fill(Qt.GlobalColor.transparent)
-
-        painter = QPainter(result)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        path = QPainterPath()
-        path.addEllipse(QRectF(0.0, 0.0, float(diameter), float(diameter)))
-        painter.setClipPath(path)
-        painter.drawPixmap(0, 0, cropped)
-        painter.end()
-
-        return result
-
-    def _prepare_keyword_icon_pixmap(
-        self,
-        list_widget: QListWidget,
-        target_item: QListWidgetItem,
-        pixmap: QPixmap,
-    ) -> QPixmap:
-        if pixmap.isNull():
-            return pixmap
-
-        if list_widget is self.top_results_list:
-            payload = target_item.data(Qt.ItemDataRole.UserRole)
-            if isinstance(payload, dict) and payload.get("type") == Type.Artist:
-                return self._create_circular_pixmap(
-                    pixmap, self._top_result_artist_avatar_size
-                )
-        return pixmap
-
-    def _queue_keyword_cover_load(
-        self,
-        target_list: QListWidget,
-        item: QListWidgetItem,
-        cover_id: Optional[str],
-        item_type: str,
-        item_id: str,
-        generation: int,
-        item_name: Optional[str] = None,
-    ) -> bool:
-        if not cover_id:
-            return False
-
-        request_key = TIDAL_API.getCoverUrl(str(cover_id), "320", "320") or str(cover_id)
-        cached = self.cover_cache.get(request_key)
-        if cached and not cached.isNull():
-            display_pixmap = self._prepare_keyword_icon_pixmap(target_list, item, cached)
-            item.setIcon(QIcon(display_pixmap))
-            return True
-
-        # Drop stale requests from older keyword searches.
-        if generation != self._keyword_cover_generation:
-            return False
-
-        subscribers = self._keyword_cover_subscribers.setdefault(request_key, [])
-        subscribers.append((target_list, item, generation))
-        if len(subscribers) > 1:
-            return True
-
-        worker = CoverArtWorker(
-            url=str(cover_id),
-            cache=self.cover_cache,
-            type=item_type,
-            item_id=str(item_id),
-            item_name=item_name,
-        )
-
-        def _on_ready(_signal_key: str, pixmap: QPixmap, req_key=request_key) -> None:
-            targets = self._keyword_cover_subscribers.pop(req_key, [])
-            self._keyword_cover_workers.pop(req_key, None)
-            for list_widget, target_item, target_generation in targets:
-                if target_generation != self._keyword_cover_generation:
-                    continue
-                if list_widget.row(target_item) < 0:
-                    continue
-                if not pixmap.isNull():
-                    display_pixmap = self._prepare_keyword_icon_pixmap(
-                        list_widget, target_item, pixmap
-                    )
-                    target_item.setIcon(QIcon(display_pixmap))
-
-        def _on_error(_signal_key: str, _error: str, req_key=request_key) -> None:
-            self._keyword_cover_subscribers.pop(req_key, None)
-            self._keyword_cover_workers.pop(req_key, None)
-
-        worker.signals.cover_ready.connect(_on_ready)
-        worker.signals.error.connect(_on_error)
-
-        self._keyword_cover_workers[request_key] = worker
-
-        pool = QThreadPool.globalInstance()
-        if pool:
-            pool.start(worker)
-        else:
-            self._keyword_cover_subscribers.pop(request_key, None)
-            self._keyword_cover_workers.pop(request_key, None)
-
-        return True
-
-    @pyqtSlot(str, list, list, list)
-    def _on_keyword_search_ready(
-        self,
-        query: str,
-        tracks: list,
-        albums: list,
-        artists: list,
-    ) -> None:
-        start = time.perf_counter()
-        self._keyword_cover_generation += 1
-        current_generation = self._keyword_cover_generation
-
-        # Invalidate any pending subscribers from older result sets.
-        self._keyword_cover_subscribers.clear()
-
-        self.top_results_list.clear()
-        self.albums_grid_list.clear()
-
-        self.search_results_tabs_widget.setVisible(True)
-
-        max_top_tracks = 6
-        max_top_albums = 6
-        max_top_artists = 6
-        cover_attempts = 0
-
-        for track in tracks[:max_top_tracks]:
-            track_title = getattr(track, "title", "Unknown Track")
-            track_artists = self._format_artist_names(getattr(track, "artists", None))
-            subtitle = f"Track • {track_artists}"
-            top_item = QListWidgetItem(f"{track_title}\n{subtitle}")
-            top_item.setData(
-                Qt.ItemDataRole.UserRole,
-                {"type": Type.Track, "id": getattr(track, "id", ""), "title": track_title},
-            )
-            top_item.setSizeHint(QSize(0, self._top_result_item_height))
-
-            album_obj = getattr(track, "album", None)
-            track_cover_id = getattr(album_obj, "cover", None) if album_obj else None
-            if track_cover_id:
-                cover_attempts += 1
-                self._queue_keyword_cover_load(
-                    self.top_results_list,
-                    top_item,
-                    track_cover_id,
-                    "Track",
-                    str(getattr(track, "id", "")),
-                    current_generation,
-                    item_name=track_title,
-                )
-            self.top_results_list.addItem(top_item)
-
-        for album in albums[:max_top_albums]:
-            album_title = getattr(album, "title", "Unknown Album")
-            album_artists = self._format_artist_names(
-                getattr(album, "artists", getattr(album, "artist", None))
-            )
-            subtitle = f"Album • {album_artists}"
-            top_item = QListWidgetItem(f"{album_title}\n{subtitle}")
-            top_item.setData(
-                Qt.ItemDataRole.UserRole,
-                {"type": Type.Album, "id": getattr(album, "id", ""), "title": album_title},
-            )
-            top_item.setSizeHint(QSize(0, self._top_result_item_height))
-
-            album_cover_id = getattr(album, "cover", None)
-            if album_cover_id:
-                cover_attempts += 1
-                self._queue_keyword_cover_load(
-                    self.top_results_list,
-                    top_item,
-                    album_cover_id,
-                    "Album",
-                    str(getattr(album, "id", "")),
-                    current_generation,
-                    item_name=album_title,
-                )
-            self.top_results_list.addItem(top_item)
-
-        for artist in artists[:max_top_artists]:
-            artist_name = getattr(artist, "name", "Unknown Artist")
-            subtitle = "Artist"
-            top_item = QListWidgetItem(f"{artist_name}\n{subtitle}")
-            top_item.setData(
-                Qt.ItemDataRole.UserRole,
-                {"type": Type.Artist, "id": getattr(artist, "id", ""), "name": artist_name},
-            )
-            top_item.setSizeHint(QSize(0, self._top_result_item_height))
-
-            artist_cover_id = getattr(artist, "picture", None)
-            if artist_cover_id:
-                cover_attempts += 1
-                self._queue_keyword_cover_load(
-                    self.top_results_list,
-                    top_item,
-                    artist_cover_id,
-                    "Artist",
-                    str(getattr(artist, "id", "")),
-                    current_generation,
-                    item_name=artist_name,
-                )
-            self.top_results_list.addItem(top_item)
-
-        if self.top_results_list.count() == 0:
-            self._add_disabled_info_item(self.top_results_list, "No top results available.")
-
-        for album in albums:
-            album_title = getattr(album, "title", "Unknown Album")
-            album_item = QListWidgetItem(album_title)
-            album_item.setTextAlignment(
-                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
-            )
-            album_item.setData(
-                Qt.ItemDataRole.UserRole,
-                {"type": Type.Album, "id": getattr(album, "id", ""), "title": album_title},
-            )
-            album_item.setSizeHint(QSize(176, 220))
-
-            album_cover_id = getattr(album, "cover", None)
-            if album_cover_id:
-                cover_attempts += 1
-                self._queue_keyword_cover_load(
-                    self.albums_grid_list,
-                    album_item,
-                    album_cover_id,
-                    "Album",
-                    str(getattr(album, "id", "")),
-                    current_generation,
-                    item_name=album_title,
-                )
-
-            self.albums_grid_list.addItem(album_item)
-
-        if self.albums_grid_list.count() == 0:
-            self._add_disabled_info_item(self.albums_grid_list, "No albums found.")
-
-        logger_gui.warning(
-            "SEARCH_UI_PERF_DIAG query='%s' tracks=%s albums=%s artists=%s cover_attempts=%s total_ms=%.1f",
-            query,
-            len(tracks),
-            len(albums),
-            len(artists),
-            cover_attempts,
-            (time.perf_counter() - start) * 1000.0,
-        )
-
-        self._set_search_results_page("top")
-
-    @pyqtSlot(QListWidgetItem)
-    def _on_keyword_result_item_clicked(self, item: QListWidgetItem) -> None:
-        payload = item.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(payload, dict):
-            return
-
-        item_type = payload.get("type")
-        item_id = payload.get("id")
-        if not item_type or not item_id:
-            return
-
-        self._set_search_results_page("tracks")
-        self.search_handler._on_result_item_clicked(payload)
-
     @pyqtSlot(dict)
     def _on_live_result_selected_for_view(self, result_data: Dict[str, Any]) -> None:
-        _ = result_data
-        self._reset_keyword_search_views()
+        self.keyword_results_controller.on_live_result_selected_for_view(result_data)
 
     @pyqtSlot(list, str)
     def _on_data_fetched_for_search_view(self, results: list, error_msg: str) -> None:
-        _ = (results, error_msg)
-        if self.search_results_tabs_widget.isVisible():
-            self._set_search_results_page("tracks")
+        self.keyword_results_controller.on_data_fetched_for_search_view(results, error_msg)
 
     def _reset_keyword_search_views(self) -> None:
-        self.search_results_tabs_widget.setVisible(False)
-        self.top_results_list.clear()
-        self.albums_grid_list.clear()
-        self._set_search_results_page("tracks")
+        self.keyword_results_controller.reset_keyword_search_views()
 
     @pyqtSlot(str)
     def _trigger_search(self, query: str):

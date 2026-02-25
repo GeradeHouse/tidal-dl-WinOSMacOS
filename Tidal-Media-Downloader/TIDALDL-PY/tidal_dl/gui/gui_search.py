@@ -9,13 +9,15 @@
 @Desc    :   Search bar widget for the Tidal-DL GUI
 """
 import logging
-from typing import TYPE_CHECKING, Optional
+import re
+import time
+from difflib import SequenceMatcher
+from typing import TYPE_CHECKING, Optional, Any, Dict, List, Tuple, Callable
 from PyQt6 import sip
 from PyQt6.QtWidgets import (
     QWidget,
     QLineEdit,
     QLabel,
-    QComboBox,
     QListWidget,
     QListWidgetItem,
     QHBoxLayout,
@@ -24,9 +26,12 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QStyleOption,
     QStyle,
+    QPushButton,
+    QStackedWidget,
 )
 from PyQt6.QtCore import (
     pyqtSignal,
+    pyqtSlot,
     QTimer,
     Qt,
     QEvent,
@@ -34,6 +39,7 @@ from PyQt6.QtCore import (
     QObject,
     QPoint,
     QThreadPool,
+    QRectF,
 )
 from PyQt6.QtGui import (
     QFocusEvent,
@@ -46,9 +52,11 @@ from PyQt6.QtGui import (
     QIcon,
     QPainter,
     QPaintEvent,
+    QPainterPath,
 )
 from tidal_dl.enums import Type
-from tidal_dl.model import Track, Album, Artist, Playlist
+from tidal_dl.model import Track, Album, Artist
+from tidal_dl.tidal import TIDAL_API
 from tidal_dl import paths
 from tidal_dl.gui.gui_cover_cache import CoverCache, CoverArtWorker
 
@@ -801,3 +809,513 @@ class SearchBarWidget(QWidget):
         self.setStyleSheet(style_sheet)
         # Ensure the input container also has a transparent background
         # self.search_input_container.setStyleSheet("background-color: transparent;") # Removed to test background issue
+
+
+class KeywordSearchResultsController(QObject):
+    """Encapsulates keyword/top-results UI state, ranking, and async cover loading."""
+
+    TOP_RESULT_ICON_SIZE = 60
+    TOP_RESULT_ARTIST_AVATAR_SIZE = 60
+    TOP_RESULT_ITEM_HEIGHT = 84
+
+    def __init__(
+        self,
+        parent: QWidget,
+        cover_cache: CoverCache,
+        top_results_list: QListWidget,
+        albums_grid_list: QListWidget,
+        search_results_tabs_widget: QWidget,
+        search_results_stack: QStackedWidget,
+        btn_tracks_results: QPushButton,
+        btn_top_results: QPushButton,
+        btn_albums_results: QPushButton,
+        on_result_selected: Callable[[Dict[str, Any]], None],
+    ) -> None:
+        super().__init__(parent)
+        self.cover_cache = cover_cache
+        self.top_results_list = top_results_list
+        self.albums_grid_list = albums_grid_list
+        self.search_results_tabs_widget = search_results_tabs_widget
+        self.search_results_stack = search_results_stack
+        self.btn_tracks_results = btn_tracks_results
+        self.btn_top_results = btn_top_results
+        self.btn_albums_results = btn_albums_results
+        self._on_result_selected = on_result_selected
+
+        self._keyword_cover_generation: int = 0
+        self._keyword_cover_subscribers: Dict[
+            str, List[Tuple[QListWidget, QListWidgetItem, int]]
+        ] = {}
+        self._keyword_cover_workers: Dict[str, CoverArtWorker] = {}
+
+        self.top_results_list.setIconSize(
+            QSize(self.TOP_RESULT_ICON_SIZE, self.TOP_RESULT_ICON_SIZE)
+        )
+        self.top_results_list.itemClicked.connect(self.on_keyword_result_item_clicked)
+        self.albums_grid_list.itemClicked.connect(self.on_keyword_result_item_clicked)
+
+    def set_search_results_page(self, page: str) -> None:
+        page_map = {"tracks": 0, "top": 1, "albums": 2}
+        page_index = page_map.get(page, 0)
+        self.search_results_stack.setCurrentIndex(page_index)
+
+        self.btn_tracks_results.setChecked(page == "tracks")
+        self.btn_top_results.setChecked(page == "top")
+        self.btn_albums_results.setChecked(page == "albums")
+
+    def _format_artist_names(self, artists_value: Any) -> str:
+        if isinstance(artists_value, list):
+            names = [
+                artist.name
+                for artist in artists_value
+                if hasattr(artist, "name") and getattr(artist, "name")
+            ]
+            return ", ".join(names) if names else "Unknown Artist"
+        if hasattr(artists_value, "name"):
+            return str(artists_value.name)
+        if isinstance(artists_value, str):
+            return artists_value
+        return "Unknown Artist"
+
+    def _normalize_search_text(self, value: Any) -> str:
+        if value is None:
+            return ""
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(value).lower())
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    def _contains_collab_term(self, normalized_text: str) -> bool:
+        if not normalized_text:
+            return False
+        padded = f" {normalized_text} "
+        collab_terms = (
+            " and ",
+            " & ",
+            " feat ",
+            " featuring ",
+            " with ",
+            " x ",
+            " + ",
+        )
+        return any(term in padded for term in collab_terms)
+
+    def _text_relevance_score(self, candidate_text: str, query: str) -> float:
+        query_norm = self._normalize_search_text(query)
+        candidate_norm = self._normalize_search_text(candidate_text)
+        if not query_norm or not candidate_norm:
+            return 0.0
+
+        score = 0.0
+        if candidate_norm == query_norm:
+            score += 220.0
+        if candidate_norm.startswith(query_norm):
+            score += 95.0
+        if query_norm in candidate_norm:
+            score += 60.0
+
+        query_tokens = [token for token in query_norm.split(" ") if token]
+        candidate_tokens = {token for token in candidate_norm.split(" ") if token}
+        if query_tokens:
+            token_hits = sum(1 for token in query_tokens if token in candidate_tokens)
+            score += (token_hits / len(query_tokens)) * 80.0
+
+        score += SequenceMatcher(None, query_norm, candidate_norm).ratio() * 75.0
+
+        extra_tokens = max(len(candidate_tokens) - len(query_tokens), 0)
+        score -= extra_tokens * 4.0
+        return score
+
+    def _score_artist_for_query(self, artist_name: str, query: str) -> float:
+        query_norm = self._normalize_search_text(query)
+        artist_norm = self._normalize_search_text(artist_name)
+        if not artist_norm:
+            return 0.0
+
+        score = self._text_relevance_score(artist_name, query) + 35.0
+
+        if artist_norm == query_norm and query_norm:
+            score += 160.0
+
+        if self._contains_collab_term(artist_norm) and not self._contains_collab_term(
+            query_norm
+        ):
+            score -= 165.0
+            if query_norm and query_norm in artist_norm:
+                score -= 85.0
+
+        query_tokens = [token for token in query_norm.split(" ") if token]
+        artist_tokens = {token for token in artist_norm.split(" ") if token}
+        if query_tokens:
+            token_hits = sum(1 for token in query_tokens if token in artist_tokens)
+            if token_hits == 0:
+                return 0.0
+            if token_hits < len(query_tokens):
+                score -= 60.0
+
+        return score
+
+    def _rank_artists_for_top_results(
+        self, artists: list, query: str, limit: int
+    ) -> List[Tuple[Any, float]]:
+        query_norm = self._normalize_search_text(query)
+        query_has_collab = self._contains_collab_term(query_norm)
+        ranked_by_name: Dict[str, Tuple[Any, float]] = {}
+
+        for artist in artists:
+            artist_name = str(getattr(artist, "name", "") or "").strip()
+            if not artist_name:
+                continue
+
+            artist_norm = self._normalize_search_text(artist_name)
+            if not artist_norm:
+                continue
+
+            if (
+                query_norm
+                and not query_has_collab
+                and self._contains_collab_term(artist_norm)
+                and query_norm in artist_norm
+            ):
+                # Hide collaboration aliases unless the query explicitly asks for them.
+                continue
+
+            score = self._score_artist_for_query(artist_name, query)
+            if score <= 0.0:
+                continue
+
+            existing = ranked_by_name.get(artist_norm)
+            if existing is None or score > existing[1]:
+                ranked_by_name[artist_norm] = (artist, score)
+
+        ranked = sorted(
+            ranked_by_name.values(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        return ranked[:limit]
+
+    def _add_disabled_info_item(self, target_list: QListWidget, text: str) -> None:
+        info_item = QListWidgetItem(text)
+        info_item.setFlags(info_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        target_list.addItem(info_item)
+
+    def _create_circular_pixmap(self, pixmap: QPixmap, diameter: int) -> QPixmap:
+        if pixmap.isNull() or diameter <= 0:
+            return pixmap
+
+        scaled = pixmap.scaled(
+            diameter,
+            diameter,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+        crop_x = max((scaled.width() - diameter) // 2, 0)
+        crop_y = max((scaled.height() - diameter) // 2, 0)
+        cropped = scaled.copy(crop_x, crop_y, diameter, diameter)
+
+        result = QPixmap(diameter, diameter)
+        result.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(result)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        path = QPainterPath()
+        path.addEllipse(QRectF(0.0, 0.0, float(diameter), float(diameter)))
+        painter.setClipPath(path)
+        painter.drawPixmap(0, 0, cropped)
+        painter.end()
+
+        return result
+
+    def _prepare_keyword_icon_pixmap(
+        self,
+        list_widget: QListWidget,
+        target_item: QListWidgetItem,
+        pixmap: QPixmap,
+    ) -> QPixmap:
+        if pixmap.isNull():
+            return pixmap
+
+        if list_widget is self.top_results_list:
+            payload = target_item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(payload, dict) and payload.get("type") == Type.Artist:
+                return self._create_circular_pixmap(
+                    pixmap, self.TOP_RESULT_ARTIST_AVATAR_SIZE
+                )
+        return pixmap
+
+    def _queue_keyword_cover_load(
+        self,
+        target_list: QListWidget,
+        item: QListWidgetItem,
+        cover_id: Optional[str],
+        item_type: str,
+        item_id: str,
+        generation: int,
+        item_name: Optional[str] = None,
+    ) -> bool:
+        if not cover_id:
+            return False
+
+        request_key = TIDAL_API.getCoverUrl(str(cover_id), "320", "320") or str(cover_id)
+        cached = self.cover_cache.get(request_key)
+        if cached and not cached.isNull():
+            display_pixmap = self._prepare_keyword_icon_pixmap(target_list, item, cached)
+            item.setIcon(QIcon(display_pixmap))
+            return True
+
+        # Drop stale requests from older keyword searches.
+        if generation != self._keyword_cover_generation:
+            return False
+
+        subscribers = self._keyword_cover_subscribers.setdefault(request_key, [])
+        subscribers.append((target_list, item, generation))
+        if len(subscribers) > 1:
+            return True
+
+        worker = CoverArtWorker(
+            url=str(cover_id),
+            cache=self.cover_cache,
+            type=item_type,
+            item_id=str(item_id),
+            item_name=item_name,
+        )
+
+        def _on_ready(_signal_key: str, pixmap: QPixmap, req_key=request_key) -> None:
+            targets = self._keyword_cover_subscribers.pop(req_key, [])
+            self._keyword_cover_workers.pop(req_key, None)
+            for list_widget, target_item, target_generation in targets:
+                if target_generation != self._keyword_cover_generation:
+                    continue
+                if list_widget.row(target_item) < 0:
+                    continue
+                if not pixmap.isNull():
+                    display_pixmap = self._prepare_keyword_icon_pixmap(
+                        list_widget, target_item, pixmap
+                    )
+                    target_item.setIcon(QIcon(display_pixmap))
+
+        def _on_error(_signal_key: str, _error: str, req_key=request_key) -> None:
+            self._keyword_cover_subscribers.pop(req_key, None)
+            self._keyword_cover_workers.pop(req_key, None)
+
+        worker.signals.cover_ready.connect(_on_ready)
+        worker.signals.error.connect(_on_error)
+
+        self._keyword_cover_workers[request_key] = worker
+
+        pool = QThreadPool.globalInstance()
+        if pool:
+            pool.start(worker)
+        else:
+            self._keyword_cover_subscribers.pop(request_key, None)
+            self._keyword_cover_workers.pop(request_key, None)
+
+        return True
+
+    @pyqtSlot(str, list, list, list)
+    def on_keyword_search_ready(
+        self,
+        query: str,
+        tracks: list,
+        albums: list,
+        artists: list,
+    ) -> None:
+        start = time.perf_counter()
+        self._keyword_cover_generation += 1
+        current_generation = self._keyword_cover_generation
+
+        # Invalidate any pending subscribers from older result sets.
+        self._keyword_cover_subscribers.clear()
+
+        self.top_results_list.clear()
+        self.albums_grid_list.clear()
+
+        self.search_results_tabs_widget.setVisible(True)
+
+        max_top_tracks = 6
+        max_top_albums = 6
+        max_top_artists = 6
+        max_top_results = 12
+        cover_attempts = 0
+
+        top_candidates: List[Dict[str, Any]] = []
+
+        for track in tracks[:max_top_tracks]:
+            track_title = str(getattr(track, "title", "Unknown Track") or "Unknown Track")
+            track_artists = self._format_artist_names(getattr(track, "artists", None))
+            subtitle = f"Track • {track_artists}"
+            track_score = (
+                self._text_relevance_score(track_artists, query) * 1.2
+                + self._text_relevance_score(track_title, query) * 0.45
+                + 15.0
+            )
+            album_obj = getattr(track, "album", None)
+            top_candidates.append(
+                {
+                    "score": track_score,
+                    "priority": 2,
+                    "text": f"{track_title}\n{subtitle}",
+                    "payload": {
+                        "type": Type.Track,
+                        "id": getattr(track, "id", ""),
+                        "title": track_title,
+                    },
+                    "cover_id": getattr(album_obj, "cover", None) if album_obj else None,
+                    "cover_type": "Track",
+                    "item_id": str(getattr(track, "id", "")),
+                    "item_name": track_title,
+                }
+            )
+
+        for album in albums[:max_top_albums]:
+            album_title = str(getattr(album, "title", "Unknown Album") or "Unknown Album")
+            album_artists = self._format_artist_names(
+                getattr(album, "artists", getattr(album, "artist", None))
+            )
+            subtitle = f"Album • {album_artists}"
+            album_score = (
+                self._text_relevance_score(album_artists, query) * 1.15
+                + self._text_relevance_score(album_title, query) * 0.5
+                + 12.0
+            )
+            top_candidates.append(
+                {
+                    "score": album_score,
+                    "priority": 1,
+                    "text": f"{album_title}\n{subtitle}",
+                    "payload": {
+                        "type": Type.Album,
+                        "id": getattr(album, "id", ""),
+                        "title": album_title,
+                    },
+                    "cover_id": getattr(album, "cover", None),
+                    "cover_type": "Album",
+                    "item_id": str(getattr(album, "id", "")),
+                    "item_name": album_title,
+                }
+            )
+
+        ranked_artists = self._rank_artists_for_top_results(artists, query, max_top_artists)
+        for artist, artist_score in ranked_artists:
+            artist_name = str(getattr(artist, "name", "Unknown Artist") or "Unknown Artist")
+            subtitle = "Artist"
+            top_candidates.append(
+                {
+                    "score": artist_score,
+                    "priority": 3,
+                    "text": f"{artist_name}\n{subtitle}",
+                    "payload": {
+                        "type": Type.Artist,
+                        "id": getattr(artist, "id", ""),
+                        "name": artist_name,
+                    },
+                    "cover_id": getattr(artist, "picture", None),
+                    "cover_type": "Artist",
+                    "item_id": str(getattr(artist, "id", "")),
+                    "item_name": artist_name,
+                }
+            )
+
+        top_candidates.sort(
+            key=lambda entry: (
+                float(entry.get("score", 0.0)),
+                int(entry.get("priority", 0)),
+            ),
+            reverse=True,
+        )
+
+        for candidate in top_candidates[:max_top_results]:
+            top_item = QListWidgetItem(str(candidate.get("text", "")))
+            top_item.setData(Qt.ItemDataRole.UserRole, candidate.get("payload", {}))
+            top_item.setSizeHint(QSize(0, self.TOP_RESULT_ITEM_HEIGHT))
+
+            cover_id = candidate.get("cover_id")
+            if cover_id:
+                cover_attempts += 1
+                self._queue_keyword_cover_load(
+                    self.top_results_list,
+                    top_item,
+                    str(cover_id),
+                    str(candidate.get("cover_type", "")),
+                    str(candidate.get("item_id", "")),
+                    current_generation,
+                    item_name=str(candidate.get("item_name", "")),
+                )
+
+            self.top_results_list.addItem(top_item)
+
+        if self.top_results_list.count() == 0:
+            self._add_disabled_info_item(self.top_results_list, "No top results available.")
+
+        for album in albums:
+            album_title = getattr(album, "title", "Unknown Album")
+            album_item = QListWidgetItem(album_title)
+            album_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+            )
+            album_item.setData(
+                Qt.ItemDataRole.UserRole,
+                {"type": Type.Album, "id": getattr(album, "id", ""), "title": album_title},
+            )
+            album_item.setSizeHint(QSize(176, 220))
+
+            album_cover_id = getattr(album, "cover", None)
+            if album_cover_id:
+                cover_attempts += 1
+                self._queue_keyword_cover_load(
+                    self.albums_grid_list,
+                    album_item,
+                    album_cover_id,
+                    "Album",
+                    str(getattr(album, "id", "")),
+                    current_generation,
+                    item_name=album_title,
+                )
+
+            self.albums_grid_list.addItem(album_item)
+
+        if self.albums_grid_list.count() == 0:
+            self._add_disabled_info_item(self.albums_grid_list, "No albums found.")
+
+        logger.warning(
+            "SEARCH_UI_PERF_DIAG query='%s' tracks=%s albums=%s artists=%s cover_attempts=%s total_ms=%.1f",
+            query,
+            len(tracks),
+            len(albums),
+            len(artists),
+            cover_attempts,
+            (time.perf_counter() - start) * 1000.0,
+        )
+
+        self.set_search_results_page("top")
+
+    @pyqtSlot(QListWidgetItem)
+    def on_keyword_result_item_clicked(self, item: QListWidgetItem) -> None:
+        payload = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(payload, dict):
+            return
+
+        item_type = payload.get("type")
+        item_id = payload.get("id")
+        if not item_type or not item_id:
+            return
+
+        self.set_search_results_page("tracks")
+        self._on_result_selected(payload)
+
+    @pyqtSlot(dict)
+    def on_live_result_selected_for_view(self, result_data: Dict[str, Any]) -> None:
+        _ = result_data
+        self.reset_keyword_search_views()
+
+    @pyqtSlot(list, str)
+    def on_data_fetched_for_search_view(self, results: list, error_msg: str) -> None:
+        _ = (results, error_msg)
+        if self.search_results_tabs_widget.isVisible():
+            self.set_search_results_page("tracks")
+
+    def reset_keyword_search_views(self) -> None:
+        self.search_results_tabs_widget.setVisible(False)
+        self.top_results_list.clear()
+        self.albums_grid_list.clear()
+        self.set_search_results_page("tracks")
