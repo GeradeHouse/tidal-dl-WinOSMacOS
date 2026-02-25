@@ -157,16 +157,30 @@ class CoverArtWorker(QRunnable):
     Fetches an image from a URL and emits a signal with the QPixmap.
     """
 
-    def __init__(self, url: Optional[str], cache: CoverCache, type: str, item_id: str):
+    def __init__(
+        self,
+        url: Optional[str],
+        cache: CoverCache,
+        type: str,
+        item_id: str,
+        item_name: Optional[str] = None,
+    ):
         super().__init__()
         self.url = url
         self.cache = cache
         self.type = type
         self.item_id = item_id
+        self.item_name = item_name or ""
         self.signals = CoverArtWorkerSignals()
 
     def run(self):
-        logger.debug(f"[CoverArtWorker] Starting run for URL: '{self.url}', Type: {self.type}, ID: {self.item_id}")
+        logger.debug(
+            "[CoverArtWorker] Starting run for URL: '%s', Type: %s, ID: %s, Name: %s",
+            self.url,
+            self.type,
+            self.item_id,
+            self.item_name,
+        )
         
         # Signal/cache key strategy:
         # - TIDAL playlist collage (type='tidal', url=None): synthetic playlist key
@@ -238,9 +252,10 @@ class CoverArtWorker(QRunnable):
                         return
 
                 logger.debug(
-                    "COVER_DIAG_WORKER type=%s item_id=%s resolved_source=%s signal_key=%s",
+                    "COVER_DIAG_WORKER type=%s item_id=%s item_name=%s resolved_source=%s signal_key=%s",
                     self.type,
                     self.item_id,
+                    self.item_name,
                     cover_sid_or_url,
                     signal_key,
                 )
@@ -256,9 +271,10 @@ class CoverArtWorker(QRunnable):
 
             if not image_data:
                 logger.warning(
-                    "COVER_DIAG_NO_IMAGE_DATA type=%s item_id=%s url=%s signal_key=%s",
+                    "COVER_DIAG_NO_IMAGE_DATA type=%s item_id=%s item_name=%s url=%s signal_key=%s",
                     self.type,
                     self.item_id,
+                    self.item_name,
                     self.url,
                     signal_key,
                 )

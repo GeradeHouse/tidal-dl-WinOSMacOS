@@ -145,6 +145,9 @@ class MainView(QWidget):
             str, List[Tuple[QListWidget, QListWidgetItem, int]]
         ] = {}
         self._keyword_cover_workers: Dict[str, CoverArtWorker] = {}
+        self._top_result_icon_size: int = 96
+        self._top_result_artist_avatar_size: int = 96
+        self._top_result_item_height: int = 118
         self.spotify_api = SpotifyAPI()
         self.player_logic = PlayerLogic(TIDAL_API, self)
 
@@ -450,20 +453,29 @@ class MainView(QWidget):
 
         self.top_results_list = QListWidget()
         self.top_results_list.setObjectName("keywordTopResultsList")
+        self.top_results_list.setIconSize(
+            QSize(self._top_result_icon_size, self._top_result_icon_size)
+        )
+        self.top_results_list.setSpacing(6)
         self.top_results_list.setStyleSheet(
             "QListWidget {"
             "background-color: transparent;"
             "border: 1px solid rgba(255, 255, 255, 0.1);"
             "border-radius: 8px;"
-            "padding: 6px;"
+            "padding: 10px;"
             "}"
             "QListWidget::item {"
-            "padding: 8px;"
-            "margin: 2px;"
-            "border-radius: 6px;"
+            "padding: 10px;"
+            "margin: 4px;"
+            "border-radius: 10px;"
+            "border: 1px solid rgba(255, 255, 255, 0.08);"
+            "}"
+            "QListWidget::item:hover {"
+            "background-color: rgba(255, 255, 255, 0.08);"
             "}"
             "QListWidget::item:selected {"
-            "background-color: rgba(255, 255, 255, 0.14);"
+            "background-color: rgba(255, 255, 255, 0.16);"
+            "border: 1px solid rgba(255, 255, 255, 0.22);"
             "}"
         )
         self.top_results_list.itemClicked.connect(self._on_keyword_result_item_clicked)
@@ -938,6 +950,51 @@ class MainView(QWidget):
         info_item.setFlags(info_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         target_list.addItem(info_item)
 
+    def _create_circular_pixmap(self, pixmap: QPixmap, diameter: int) -> QPixmap:
+        if pixmap.isNull() or diameter <= 0:
+            return pixmap
+
+        scaled = pixmap.scaled(
+            diameter,
+            diameter,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+        crop_x = max((scaled.width() - diameter) // 2, 0)
+        crop_y = max((scaled.height() - diameter) // 2, 0)
+        cropped = scaled.copy(crop_x, crop_y, diameter, diameter)
+
+        result = QPixmap(diameter, diameter)
+        result.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(result)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        path = QPainterPath()
+        path.addEllipse(QRectF(0.0, 0.0, float(diameter), float(diameter)))
+        painter.setClipPath(path)
+        painter.drawPixmap(0, 0, cropped)
+        painter.end()
+
+        return result
+
+    def _prepare_keyword_icon_pixmap(
+        self,
+        list_widget: QListWidget,
+        target_item: QListWidgetItem,
+        pixmap: QPixmap,
+    ) -> QPixmap:
+        if pixmap.isNull():
+            return pixmap
+
+        if list_widget is self.top_results_list:
+            payload = target_item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(payload, dict) and payload.get("type") == Type.Artist:
+                return self._create_circular_pixmap(
+                    pixmap, self._top_result_artist_avatar_size
+                )
+        return pixmap
+
     def _queue_keyword_cover_load(
         self,
         target_list: QListWidget,
@@ -946,6 +1003,7 @@ class MainView(QWidget):
         item_type: str,
         item_id: str,
         generation: int,
+        item_name: Optional[str] = None,
     ) -> bool:
         if not cover_id:
             return False
@@ -953,7 +1011,8 @@ class MainView(QWidget):
         request_key = TIDAL_API.getCoverUrl(str(cover_id), "320", "320") or str(cover_id)
         cached = self.cover_cache.get(request_key)
         if cached and not cached.isNull():
-            item.setIcon(QIcon(cached))
+            display_pixmap = self._prepare_keyword_icon_pixmap(target_list, item, cached)
+            item.setIcon(QIcon(display_pixmap))
             return True
 
         # Drop stale requests from older keyword searches.
@@ -970,6 +1029,7 @@ class MainView(QWidget):
             cache=self.cover_cache,
             type=item_type,
             item_id=str(item_id),
+            item_name=item_name,
         )
 
         def _on_ready(_signal_key: str, pixmap: QPixmap, req_key=request_key) -> None:
@@ -981,7 +1041,10 @@ class MainView(QWidget):
                 if list_widget.row(target_item) < 0:
                     continue
                 if not pixmap.isNull():
-                    target_item.setIcon(QIcon(pixmap))
+                    display_pixmap = self._prepare_keyword_icon_pixmap(
+                        list_widget, target_item, pixmap
+                    )
+                    target_item.setIcon(QIcon(display_pixmap))
 
         def _on_error(_signal_key: str, _error: str, req_key=request_key) -> None:
             self._keyword_cover_subscribers.pop(req_key, None)
@@ -1035,6 +1098,7 @@ class MainView(QWidget):
                 Qt.ItemDataRole.UserRole,
                 {"type": Type.Track, "id": getattr(track, "id", ""), "title": track_title},
             )
+            top_item.setSizeHint(QSize(0, self._top_result_item_height))
 
             album_obj = getattr(track, "album", None)
             track_cover_id = getattr(album_obj, "cover", None) if album_obj else None
@@ -1047,6 +1111,7 @@ class MainView(QWidget):
                     "Track",
                     str(getattr(track, "id", "")),
                     current_generation,
+                    item_name=track_title,
                 )
             self.top_results_list.addItem(top_item)
 
@@ -1061,6 +1126,7 @@ class MainView(QWidget):
                 Qt.ItemDataRole.UserRole,
                 {"type": Type.Album, "id": getattr(album, "id", ""), "title": album_title},
             )
+            top_item.setSizeHint(QSize(0, self._top_result_item_height))
 
             album_cover_id = getattr(album, "cover", None)
             if album_cover_id:
@@ -1072,6 +1138,7 @@ class MainView(QWidget):
                     "Album",
                     str(getattr(album, "id", "")),
                     current_generation,
+                    item_name=album_title,
                 )
             self.top_results_list.addItem(top_item)
 
@@ -1083,6 +1150,7 @@ class MainView(QWidget):
                 Qt.ItemDataRole.UserRole,
                 {"type": Type.Artist, "id": getattr(artist, "id", ""), "name": artist_name},
             )
+            top_item.setSizeHint(QSize(0, self._top_result_item_height))
 
             artist_cover_id = getattr(artist, "picture", None)
             if artist_cover_id:
@@ -1094,6 +1162,7 @@ class MainView(QWidget):
                     "Artist",
                     str(getattr(artist, "id", "")),
                     current_generation,
+                    item_name=artist_name,
                 )
             self.top_results_list.addItem(top_item)
 
@@ -1122,6 +1191,7 @@ class MainView(QWidget):
                     "Album",
                     str(getattr(album, "id", "")),
                     current_generation,
+                    item_name=album_title,
                 )
 
             self.albums_grid_list.addItem(album_item)

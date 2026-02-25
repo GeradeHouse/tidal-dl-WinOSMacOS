@@ -464,7 +464,11 @@ class SearchBarWidget(QWidget):
                         cover_url = result.album.cover
                         if cover_url:
                             self._start_cover_art_download(
-                                item, cover_url, item_type_str, result.id
+                                item,
+                                cover_url,
+                                item_type_str,
+                                result.id,
+                                item_name=primary_text,
                             )
                 elif isinstance(result, Album):
                     primary_text = result.title
@@ -479,7 +483,11 @@ class SearchBarWidget(QWidget):
                     }
                     if hasattr(result, "cover"):
                         self._start_cover_art_download(
-                            item, result.cover, item_type_str, result.id
+                            item,
+                            result.cover,
+                            item_type_str,
+                            result.id,
+                            item_name=primary_text,
                         )
                 elif isinstance(result, Artist):
                     primary_text = result.name
@@ -492,7 +500,11 @@ class SearchBarWidget(QWidget):
                     }
                     if hasattr(result, "picture"):
                         self._start_cover_art_download(
-                            item, result.picture, item_type_str, result.id
+                            item,
+                            result.picture,
+                            item_type_str,
+                            result.id,
+                            item_name=primary_text,
                         )
 
                 widget = SearchResultItemWidget(
@@ -572,8 +584,21 @@ class SearchBarWidget(QWidget):
         # Reposition the results list if it's visible
         self._update_results_list_geometry()
 
-    def _start_cover_art_download(self, item, url, item_type, item_id):
-        worker = CoverArtWorker(url, self.cover_cache, item_type, item_id)
+    def _start_cover_art_download(
+        self,
+        item,
+        url,
+        item_type,
+        item_id,
+        item_name: Optional[str] = None,
+    ):
+        worker = CoverArtWorker(
+            url,
+            self.cover_cache,
+            item_type,
+            item_id,
+            item_name=item_name,
+        )
         worker.signals.cover_ready.connect(
             lambda u, p, i=item: self._on_cover_art_ready(i, u, p)
         )

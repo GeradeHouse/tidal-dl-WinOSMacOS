@@ -1339,6 +1339,7 @@ class PlaylistTreeHandler(QObject):
                 cache=self.cover_cache,
                 type=service,
                 item_id=item_id,
+                item_name=item_name,
             )
             worker.signals.cover_ready.connect(self._set_playlist_icon_from_worker)
             worker.signals.error.connect(self._handle_icon_error_from_worker)
