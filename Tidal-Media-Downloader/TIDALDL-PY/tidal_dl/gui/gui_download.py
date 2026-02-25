@@ -553,6 +553,34 @@ class DownloadHandler(QObject):
                 "requested_quality": quality_arg_str,
                 "tooltip": f"Position {i+1} of {len(tracks_to_start)} in queue.",
             }
+
+        table_handler = getattr(self.main_view, "table_handler", None)
+        if table_handler and playlist_id and playlist_context:
+            try:
+                sample_track = tracks_to_start[0] if tracks_to_start else None
+                if isinstance(sample_track, Track):
+                    sample_path = table_handler._build_candidate_track_paths(
+                        sample_track,
+                        playlist_context,
+                    )[0]
+                    root_and_relative = table_handler._extract_download_root_and_relative_playlist_dir(
+                        sample_path
+                    )
+                    if root_and_relative[1]:
+                        _, extracted_playlist_name = table_handler._extract_playlist_identity(
+                            playlist_context
+                        )
+                        self.main_view.link_persistence_manager.set_playlist_folder_hint(
+                            str(playlist_id),
+                            root_and_relative[1],
+                            extracted_playlist_name,
+                        )
+            except Exception as ex:
+                logger.debug(
+                    f"Failed to persist playlist folder hint for playlist {playlist_id}: {ex}",
+                    exc_info=True,
+                )
+
         logger.debug(
             f"[DownloadHandler] Populating active_downloads with {len(tracks_to_start)} pending tracks."
         )

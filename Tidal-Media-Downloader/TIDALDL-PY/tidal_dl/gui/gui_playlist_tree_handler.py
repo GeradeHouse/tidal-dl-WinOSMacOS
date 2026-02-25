@@ -16,7 +16,7 @@ import sys
 from functools import partial
 import threading
 import datetime
-from typing import TYPE_CHECKING, List, Dict, Optional, Any, cast
+from typing import TYPE_CHECKING, List, Dict, Optional, Any, Set, cast
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtCore import (
@@ -309,6 +309,11 @@ class PlaylistTreeHandler(QObject):
         self.original_item_data: Dict[str, Dict[str, Any]] = {}
         self.active_job_actions: Dict[str, str] = {}  # Track active job actions per playlist ID
         self.active_job_totals: Dict[str, int] = {}   # Track total items per playlist ID
+        self._pending_geometry_playlist_ids: Set[str] = set()
+        self._geometry_update_timer = QTimer(self)
+        self._geometry_update_timer.setSingleShot(True)
+        self._geometry_update_timer.setInterval(16)
+        self._geometry_update_timer.timeout.connect(self._flush_pending_geometry_updates)
 
         # --- Load Default Playlist Icon ---
         self.default_playlist_icon = QIcon(QPixmap())
@@ -595,6 +600,7 @@ class PlaylistTreeHandler(QObject):
                 widget.geometryRequest.connect(partial(self._on_widget_geometry_request, str(playlist_uuid)))
                 
                 widget.updateGeometry()
+                item.setSizeHint(0, widget.sizeHint())
                 widget.set_icon(self.default_music_icon)
 
                 font_child = item.font(0)
@@ -1530,13 +1536,12 @@ class PlaylistTreeHandler(QObject):
             widget = self.item_widgets[playlist_id]
             widget.set_queued()
             
-            # Ensure item is visible
+            # Keep the parent expanded, but avoid aggressive auto-scrolling for large multi-select queues.
             if playlist_id in self.id_to_item:
                 item = self.id_to_item[playlist_id]
                 parent = item.parent()
                 if parent and not parent.isExpanded():
                     parent.setExpanded(True)
-                self.tree_widget.scrollToItem(item)
 
     @pyqtSlot(str)
     def _on_widget_geometry_request(self, playlist_id: str):
@@ -1544,14 +1549,38 @@ class PlaylistTreeHandler(QObject):
         Slot called when a widget requests a geometry update (e.g. expanded/collapsed).
         Forces the tree item to resize to fit the widget's new size.
         """
-        if playlist_id in self.id_to_item and playlist_id in self.item_widgets:
+        normalized_playlist_id = str(playlist_id or "").strip()
+        if not normalized_playlist_id:
+            return
+
+        self._pending_geometry_playlist_ids.add(normalized_playlist_id)
+        if not self._geometry_update_timer.isActive():
+            self._geometry_update_timer.start()
+
+    @pyqtSlot()
+    def _flush_pending_geometry_updates(self) -> None:
+        if not self._pending_geometry_playlist_ids:
+            return
+
+        pending_ids = list(self._pending_geometry_playlist_ids)
+        self._pending_geometry_playlist_ids.clear()
+
+        updated_any = False
+        for playlist_id in pending_ids:
+            if playlist_id not in self.id_to_item or playlist_id not in self.item_widgets:
+                continue
             item = self.id_to_item[playlist_id]
             widget = self.item_widgets[playlist_id]
-            
-            # Update the size hint for the item based on the widget's new size
             item.setSizeHint(0, widget.sizeHint())
-            
-            # Force the tree to re-layout items to accommodate the new height
+            updated_any = True
+
+        if updated_any:
             self.tree_widget.doItemsLayout()  # type: ignore
+            try:
+                viewport = self.tree_widget.viewport()
+                if viewport is not None:
+                    viewport.update()
+            except (AttributeError, RuntimeError):
+                pass
 
 

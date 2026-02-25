@@ -326,6 +326,93 @@ class LinkPersistenceManager:
                 f"Failed to save track quality cache for track {track_id}"
             )
 
+    def get_playlist_folder_hint(self, playlist_id: str) -> Optional[str]:
+        """
+        Retrieves a cached playlist folder path hint for a playlist ID.
+
+        The returned value is expected to be a path relative to the download root,
+        e.g. ``Playlists/My Playlist``.
+        """
+        normalized_playlist_id = str(playlist_id or "").strip()
+        if not normalized_playlist_id:
+            return None
+
+        if self.links_data is None:
+            self.load_links()
+
+        links_data_dict = cast(Dict[str, Any], self.links_data)
+        folder_cache = links_data_dict.get("playlist_folder_cache", {})
+        if not isinstance(folder_cache, dict):
+            return None
+
+        entry = folder_cache.get(normalized_playlist_id, {})
+        if not isinstance(entry, dict):
+            return None
+
+        relative_path = entry.get("relative_path")
+        if not isinstance(relative_path, str) or not relative_path.strip():
+            return None
+
+        return os.path.normpath(relative_path.strip())
+
+    def set_playlist_folder_hint(
+        self,
+        playlist_id: str,
+        relative_folder_path: str,
+        playlist_name: Optional[str] = None,
+    ) -> None:
+        """
+        Stores (or updates) a cached playlist folder path hint.
+
+        Args:
+            playlist_id (str): Stable playlist identifier (Spotify/Tidal ID).
+            relative_folder_path (str): Folder path relative to download root.
+            playlist_name (Optional[str]): Human-readable playlist name for diagnostics.
+        """
+        normalized_playlist_id = str(playlist_id or "").strip()
+        normalized_relative_path = os.path.normpath(
+            str(relative_folder_path or "").strip().lstrip("/\\")
+        )
+
+        if (
+            not normalized_playlist_id
+            or not normalized_relative_path
+            or normalized_relative_path in {".", ""}
+        ):
+            return
+
+        if self.links_data is None:
+            self.load_links()
+
+        links_data_dict = cast(Dict[str, Any], self.links_data)
+
+        folder_cache = links_data_dict.get("playlist_folder_cache")
+        if not isinstance(folder_cache, dict):
+            folder_cache = {}
+            links_data_dict["playlist_folder_cache"] = folder_cache
+
+        existing_entry = folder_cache.get(normalized_playlist_id)
+        if isinstance(existing_entry, dict):
+            existing_relative = str(existing_entry.get("relative_path", "")).strip()
+            existing_name = str(existing_entry.get("playlist_name", "")).strip()
+            incoming_name = str(playlist_name or "").strip()
+            if (
+                os.path.normpath(existing_relative) == normalized_relative_path
+                and existing_name == incoming_name
+            ):
+                return
+
+        folder_cache[normalized_playlist_id] = {
+            "relative_path": normalized_relative_path,
+            "playlist_name": str(playlist_name or "").strip() or None,
+            "last_seen": self._get_current_timestamp(),
+        }
+
+        if not self.save_links():
+            logger.error(
+                f"Failed to save playlist folder hint for playlist {normalized_playlist_id}"
+            )
+
     def add_or_update_link(
         self,
         playlist_id: str,

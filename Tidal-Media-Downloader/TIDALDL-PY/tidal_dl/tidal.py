@@ -19,6 +19,7 @@ import os
 import random
 import re
 import requests
+import threading
 import time
 import urllib3
 from io import BytesIO
@@ -58,6 +59,8 @@ from tidal_dl.settings import SETTINGS
 # Create a logger instance for this module
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
+
+TIDAL_COVER_ALLOWED_SIZES: Tuple[int, ...] = (80, 160, 320, 640, 1280)
 
 # Set up GUI logging with INFO level for this modul- LAZY LOADED
 def _setup_gui_logging():
@@ -108,7 +111,28 @@ class TidalAPI(object):
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:83.0) Gecko/20100101 Firefox/83.0"
         })
+        self._cover_failure_lock = threading.Lock()
+        self._cover_failure_until: Dict[str, float] = {}
         # --- END MODIFICATION ---
+
+    def _is_cover_temporarily_blocked(self, cover_key: str) -> bool:
+        now = time.monotonic()
+        with self._cover_failure_lock:
+            blocked_until = self._cover_failure_until.get(cover_key)
+            if not blocked_until:
+                return False
+            if blocked_until <= now:
+                self._cover_failure_until.pop(cover_key, None)
+                return False
+            return True
+
+    def _mark_cover_failure(self, cover_key: str, ttl_seconds: int = 120) -> None:
+        with self._cover_failure_lock:
+            self._cover_failure_until[cover_key] = time.monotonic() + max(1, ttl_seconds)
+
+    def _clear_cover_failure(self, cover_key: str) -> None:
+        with self._cover_failure_lock:
+            self._cover_failure_until.pop(cover_key, None)
 
     def _is_token_expired_response(self, response: requests.Response) -> bool:
         """Detects whether a 401 response indicates an expired access token."""
@@ -1142,11 +1166,27 @@ class TidalAPI(object):
         if not width.isdigit() or not height.isdigit():
             logger.warning(f"Invalid width/height for cover URL: {width}x{height}")
             width, height = "320", "320"
+
+        requested_size = max(int(width), int(height))
+        normalized_size = next(
+            (size for size in TIDAL_COVER_ALLOWED_SIZES if size >= requested_size),
+            TIDAL_COVER_ALLOWED_SIZES[-1],
+        )
+
+        if normalized_size != int(width) or normalized_size != int(height):
+            logger.debug(
+                "Normalizing cover size request from %sx%s to %sx%s for SID %s",
+                width,
+                height,
+                normalized_size,
+                normalized_size,
+                sid,
+            )
         
         # The final URL requires slashes and should be lowercase.
         url_path_sid = hyphenated_sid.lower().replace('-', '/')
         
-        return f"https://resources.tidal.com/images/{url_path_sid}/{width}x{height}.jpg"
+        return f"https://resources.tidal.com/images/{url_path_sid}/{normalized_size}x{normalized_size}.jpg"
     
     def getCoverData(
         self, sid: Optional[str], width: str = "320", height: str = "320"
@@ -1154,12 +1194,29 @@ class TidalAPI(object):
         url = self.getCoverUrl(sid, width, height)
         if not url:
             return b""
+
+        cover_key = f"{url}"
+        if self._is_cover_temporarily_blocked(cover_key):
+            logger.debug("Skipping cover fetch due to temporary failure cache: %s", cover_key)
+            return b""
         try:
-            # --- START OF MODIFICATION ---
-            # Use the main, authenticated session to download the cover.
-            # This automatically includes the User-Agent and Authorization: Bearer token.
-            response = self.session.get(url, timeout=15)
-            # --- END MODIFICATION ---
+            # NOTE: TIDAL cover CDN can reject authenticated requests.
+            # Fetch images without Authorization while keeping a browser-like User-Agent.
+            if url.startswith("https://resources.tidal.com/images/"):
+                ua = self.session.headers.get(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:83.0) Gecko/20100101 Firefox/83.0",
+                )
+                response = requests.get(
+                    url,
+                    timeout=15,
+                    headers={
+                        "User-Agent": ua,
+                        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    },
+                )
+            else:
+                response = self.session.get(url, timeout=15)
 
             response.raise_for_status()
             content_type = response.headers.get("content-type", "").lower()
@@ -1171,23 +1228,62 @@ class TidalAPI(object):
             content = response.content
             if not content:
                 logger.warning(f"Empty response content for cover URL: {url}")
+                self._mark_cover_failure(cover_key, ttl_seconds=60)
                 return b""
+            self._clear_cover_failure(cover_key)
             return content
         except requests.exceptions.Timeout:
             logger.error(f"Timeout fetching cover data for {sid} from {url}")
+            self._mark_cover_failure(cover_key, ttl_seconds=45)
             return b""
         except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else "unknown"
+            if status_code == 403 and e.response is not None:
+                request_headers = (
+                    e.response.request.headers
+                    if getattr(e.response, "request", None) is not None
+                    else {}
+                )
+                req_auth_present = any(
+                    k.lower() == "authorization" for k in request_headers.keys()
+                )
+                req_user_agent = request_headers.get("User-Agent", "")
+                req_auth_prefix = request_headers.get("authorization", "")[:24]
+                resp_content_type = e.response.headers.get("content-type", "")
+                resp_server = e.response.headers.get("server", "")
+                resp_text_snippet = (e.response.text or "").replace("\n", " ")[:180]
+
+                logger.warning(
+                    "COVER_DIAG_403 sid=%s size=%sx%s url=%s auth_present=%s auth_prefix=%s ua=%s resp_ct=%s resp_server=%s resp_body=%s",
+                    sid,
+                    width,
+                    height,
+                    url,
+                    req_auth_present,
+                    req_auth_prefix,
+                    req_user_agent,
+                    resp_content_type,
+                    resp_server,
+                    resp_text_snippet,
+                )
+                self._mark_cover_failure(cover_key, ttl_seconds=180)
+            elif status_code == 404:
+                self._mark_cover_failure(cover_key, ttl_seconds=600)
+            else:
+                self._mark_cover_failure(cover_key, ttl_seconds=90)
             logger.error(
-                f"HTTP error {e.response.status_code} fetching cover data for {sid} from {url}: {e}"
+                f"HTTP error {status_code} fetching cover data for {sid} from {url}: {e}"
             )
             return b""
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching cover data for {sid} from {url}: {e}")
+            self._mark_cover_failure(cover_key, ttl_seconds=90)
             return b""
         except Exception as e:
             logger.error(
                 f"Unexpected error in getCoverData for {sid}: {e}", exc_info=True
             )
+            self._mark_cover_failure(cover_key, ttl_seconds=60)
             return b""
 
     def getPlaylistCoverData(

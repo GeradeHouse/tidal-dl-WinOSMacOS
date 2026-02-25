@@ -16,11 +16,14 @@ import asyncio
 import json
 import logging
 import os
+import re
 import stat
 import subprocess
 import tempfile
 import time
 import traceback
+import unicodedata
+from contextlib import suppress
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
@@ -35,6 +38,7 @@ from .metadata.album import AlbumMetadata
 from .metadata.track import TrackMetadata
 from .metadata.tagger import tag_file
 from .model import Album, Artist, Playlist, StreamUrl, Track
+from .paths import get_user_download_path
 from .printf import *
 from .tidal import TIDAL_API, SETTINGS, AudioQuality, Type
 
@@ -110,6 +114,339 @@ def __isSkip__(finalpath: str, url: str) -> bool:
         return False
     netSize = aigpy.net.getSize(url)
     return curSize >= netSize
+
+
+def _extract_playlist_identity(
+    playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
+) -> tuple[Optional[str], Optional[str]]:
+    playlist_id: Optional[str] = None
+    playlist_name: Optional[str] = None
+
+    if isinstance(playlist_context, Playlist):
+        playlist_id = str(getattr(playlist_context, "uuid", "") or "").strip() or None
+        playlist_name = str(getattr(playlist_context, "title", "") or "").strip() or None
+        return playlist_id, playlist_name
+
+    if isinstance(playlist_context, dict):
+        p_type = playlist_context.get("type")
+        p_data = playlist_context.get("data")
+
+        if p_type == "spotify" and isinstance(p_data, dict):
+            playlist_id = str(p_data.get("id", "") or "").strip() or None
+            playlist_name = str(p_data.get("name", "") or "").strip() or None
+            return playlist_id, playlist_name
+
+        if p_type == "tidal" and isinstance(p_data, Playlist):
+            playlist_id = str(getattr(p_data, "uuid", "") or "").strip() or None
+            playlist_name = str(getattr(p_data, "title", "") or "").strip() or None
+            return playlist_id, playlist_name
+
+        if isinstance(p_data, dict):
+            playlist_id = str(
+                p_data.get("id", p_data.get("uuid", "")) or ""
+            ).strip() or None
+            playlist_name = str(
+                p_data.get("name", p_data.get("title", "")) or ""
+            ).strip() or None
+            return playlist_id, playlist_name
+
+    return None, None
+
+
+def _extract_download_root_and_relative_playlist_dir(
+    candidate_path: str,
+) -> tuple[Optional[str], Optional[str]]:
+    normalized_path = os.path.normpath(os.path.abspath(candidate_path))
+    path_parts = normalized_path.split(os.sep)
+
+    if "Playlists" in path_parts:
+        playlists_index = path_parts.index("Playlists")
+        if playlists_index >= len(path_parts) - 1:
+            return None, None
+
+        if playlists_index == 0:
+            return None, None
+
+        download_root = os.sep.join(path_parts[:playlists_index])
+        if not download_root:
+            return None, None
+
+        relative_playlist_dir = os.path.join(*path_parts[playlists_index:-1])
+        return download_root, relative_playlist_dir
+
+    # Fallback for custom playlist folder formats that do not include a "Playlists" segment.
+    configured_download_root = os.path.normpath(
+        os.path.abspath(get_user_download_path(SETTINGS.downloadPath))
+    )
+    candidate_dir = os.path.dirname(normalized_path)
+
+    try:
+        relative_playlist_dir = os.path.relpath(candidate_dir, configured_download_root)
+    except ValueError:
+        # Different drive letters (Windows): cannot build a stable relative path.
+        return None, None
+
+    if relative_playlist_dir in {"", "."} or relative_playlist_dir.startswith(".."):
+        return None, None
+
+    return configured_download_root, os.path.normpath(relative_playlist_dir)
+
+
+def _extract_track_id_from_audio_tags(file_path: str) -> Optional[str]:
+    with suppress(Exception):
+        audio_file = MutagenFile(file_path)
+        if not audio_file or not getattr(audio_file, "tags", None):
+            return None
+
+        tags = audio_file.tags
+        candidate_values: List[Any] = []
+
+        if isinstance(tags, dict):
+            for tag_key in (
+                "TIDAL_TRACK",
+                "TXXX:TIDAL_TRACK",
+                "----:com.apple.iTunes:TIDAL_TRACK",
+                "TIDAL_TRACK_ID",
+                "TXXX:TIDAL_TRACK_ID",
+                "----:com.apple.iTunes:TIDAL_TRACK_ID",
+            ):
+                if tag_key in tags:
+                    candidate_values.append(tags.get(tag_key))
+
+            for tag_key, tag_value in tags.items():
+                key_upper = str(tag_key).upper()
+                if "TIDAL_TRACK" in key_upper:
+                    candidate_values.append(tag_value)
+
+        for raw_value in candidate_values:
+            if isinstance(raw_value, list) and raw_value:
+                raw_value = raw_value[0]
+
+            if isinstance(raw_value, bytes):
+                raw_text = raw_value.decode("utf-8", errors="ignore").strip()
+            else:
+                raw_text = str(raw_value).strip()
+
+            if raw_text and raw_text.isdigit():
+                return raw_text
+
+    return None
+
+
+def _normalize_stem_for_match(stem: str) -> str:
+    """Normalizes file stems to improve matching across punctuation/unicode variants."""
+    raw_stem = str(stem or "")
+    if not raw_stem:
+        return ""
+
+    normalized = unicodedata.normalize("NFKD", raw_stem)
+    normalized = "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    )
+    normalized = normalized.replace("’", "'").replace("`", "'")
+    normalized = re.sub(
+        r"\((feat\.?|ft\.?)\s+[^)]*\)",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(r"[^a-zA-Z0-9]+", " ", normalized).strip().lower()
+    return " ".join(normalized.split())
+
+
+def _scan_single_playlist_folder_for_track(
+    folder_path: str,
+    expected_stems: set[str],
+    expected_extensions: set[str],
+    track_id_str: str,
+    allow_stem_match: bool,
+) -> Optional[str]:
+    normalized_expected_stems = {
+        _normalize_stem_for_match(expected_stem)
+        for expected_stem in expected_stems
+        if expected_stem
+    }
+
+    with suppress(OSError):
+        for entry in os.scandir(folder_path):
+            if not entry.is_file():
+                continue
+
+            _, extension = os.path.splitext(entry.name)
+            extension_lower = extension.lower()
+            if extension_lower not in expected_extensions:
+                continue
+
+            file_size = aigpy.file.getSize(entry.path)
+            if file_size <= 0:
+                continue
+
+            if allow_stem_match:
+                file_stem = os.path.splitext(entry.name)[0]
+                normalized_file_stem = _normalize_stem_for_match(file_stem)
+                if (
+                    file_stem in expected_stems
+                    or (
+                        normalized_file_stem
+                        and normalized_file_stem in normalized_expected_stems
+                    )
+                ):
+                    return entry.path
+
+            tags_track_id = _extract_track_id_from_audio_tags(entry.path)
+            if tags_track_id and tags_track_id == track_id_str:
+                return entry.path
+
+    return None
+
+
+def _find_existing_playlist_track_path(
+    track: Track,
+    stream: StreamUrl,
+    artist: str,
+    artists: str,
+    album: Optional[Album],
+    playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
+    main_view_instance: "MainView",
+) -> Optional[str]:
+    if not playlist_context:
+        return None
+
+    playlist_base_path = getTrackPath(track, stream, artist, artists, album, playlist_context)
+    base_stem, _ = os.path.splitext(os.path.normpath(playlist_base_path))
+    extensions = [".flac", ".mp3", ".m4a", ".mp4"]
+    candidate_paths = [f"{base_stem}{ext}" for ext in extensions]
+
+    expected_stems = {
+        os.path.splitext(os.path.basename(candidate_path))[0]
+        for candidate_path in candidate_paths
+    }
+    expected_extensions = {
+        os.path.splitext(candidate_path)[1].lower() for candidate_path in candidate_paths
+    }
+
+    for candidate_path in candidate_paths:
+        if os.path.exists(candidate_path) and aigpy.file.getSize(candidate_path) > 0:
+            return candidate_path
+
+    download_root, computed_relative_playlist_dir = _extract_download_root_and_relative_playlist_dir(
+        playlist_base_path
+    )
+    if not download_root or not computed_relative_playlist_dir:
+        return None
+
+    track_id_str = str(getattr(track, "id", "") or "").strip()
+    if not track_id_str:
+        return None
+
+    playlist_id, playlist_name = _extract_playlist_identity(playlist_context)
+
+    persistence_manager = getattr(main_view_instance, "link_persistence_manager", None)
+    persisted_relative_playlist_dir: Optional[str] = None
+    if persistence_manager and playlist_id and hasattr(persistence_manager, "get_playlist_folder_hint"):
+        with suppress(Exception):
+            persisted_relative_playlist_dir = persistence_manager.get_playlist_folder_hint(playlist_id)
+
+    preferred_relative_dirs = [
+        computed_relative_playlist_dir,
+        persisted_relative_playlist_dir,
+    ]
+
+    searched_relative_dirs: set[str] = set()
+    for relative_dir in preferred_relative_dirs:
+        if not relative_dir:
+            continue
+        normalized_relative_dir = os.path.normpath(relative_dir)
+        if normalized_relative_dir in searched_relative_dirs:
+            continue
+        searched_relative_dirs.add(normalized_relative_dir)
+        candidate_dir = os.path.join(download_root, normalized_relative_dir)
+        if not os.path.isdir(candidate_dir):
+            continue
+
+        matched = _scan_single_playlist_folder_for_track(
+            candidate_dir,
+            expected_stems,
+            expected_extensions,
+            track_id_str,
+            allow_stem_match=True,
+        )
+        if matched:
+            return matched
+
+    playlists_root = os.path.join(download_root, "Playlists")
+    if not os.path.isdir(playlists_root):
+        return None
+
+    prioritized_dirs: List[str] = []
+    remaining_dirs: List[str] = []
+    playlist_name_key = (playlist_name or "").strip().lower()
+
+    with suppress(OSError):
+        for entry in os.scandir(playlists_root):
+            if not entry.is_dir():
+                continue
+
+            entry_name_key = entry.name.strip().lower()
+            if (
+                playlist_name_key
+                and (
+                    playlist_name_key == entry_name_key
+                    or playlist_name_key in entry_name_key
+                    or entry_name_key in playlist_name_key
+                )
+            ):
+                prioritized_dirs.append(entry.path)
+            else:
+                remaining_dirs.append(entry.path)
+
+    for folder_path in prioritized_dirs:
+        matched = _scan_single_playlist_folder_for_track(
+            folder_path,
+            expected_stems,
+            expected_extensions,
+            track_id_str,
+            allow_stem_match=True,
+        )
+        if matched:
+            if (
+                persistence_manager
+                and playlist_id
+                and hasattr(persistence_manager, "set_playlist_folder_hint")
+            ):
+                with suppress(Exception):
+                    relative_dir = os.path.relpath(folder_path, download_root)
+                    persistence_manager.set_playlist_folder_hint(
+                        playlist_id,
+                        relative_dir,
+                        playlist_name,
+                    )
+            return matched
+
+    for folder_path in remaining_dirs:
+        matched = _scan_single_playlist_folder_for_track(
+            folder_path,
+            expected_stems,
+            expected_extensions,
+            track_id_str,
+            allow_stem_match=False,
+        )
+        if matched:
+            if (
+                persistence_manager
+                and playlist_id
+                and hasattr(persistence_manager, "set_playlist_folder_hint")
+            ):
+                with suppress(Exception):
+                    relative_dir = os.path.relpath(folder_path, download_root)
+                    persistence_manager.set_playlist_folder_hint(
+                        playlist_id,
+                        relative_dir,
+                        playlist_name,
+                    )
+            return matched
+
+    return None
 
 
 def __encrypted__(stream: StreamUrl, srcPath: str, descPath: str):
@@ -584,6 +921,22 @@ def downloadTrack(
         # The aigpy DownloadTool natively supports a list of URLs for concatenation.
         logger.info(f"[DL Track] name='{os.path.basename(path)}'. Preparing to download {len(url_list)} segment(s).")
         ### END DASH INTEGRATION ###
+
+        if playlist_context:
+            existing_playlist_track_path = _find_existing_playlist_track_path(
+                track,
+                stream,
+                artist,
+                artists,
+                album,
+                playlist_context,
+                main_view_instance,
+            )
+            if existing_playlist_track_path:
+                logger.info(
+                    f"{os.path.basename(existing_playlist_track_path)} (skip:already exists in playlist folder!)"
+                )
+                return True, ""
 
         if __isSkip__(path, url_list[0]):
             logger.info(f"{os.path.basename(path)} (skip:already exists!)")

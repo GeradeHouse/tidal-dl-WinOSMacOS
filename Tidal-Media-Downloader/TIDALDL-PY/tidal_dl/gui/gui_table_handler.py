@@ -12,8 +12,12 @@
 
 import logging
 import os
+import re
 import threading
+import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from typing import List, Dict, Optional, Any, Union, cast, TYPE_CHECKING, Set
 
 from PyQt6 import QtCore, QtWidgets, QtGui
@@ -21,11 +25,12 @@ from PyQt6.QtCore import QTimer, QObject, pyqtSlot, Qt, QPoint, pyqtSignal
 from PyQt6.QtWidgets import QTableWidgetItem, QProgressBar, QMenu
 
 from tidal_dl.gui.gui_table import SplitterTable
-from tidal_dl.tidal import Type, Track, Playlist, Album, AudioQuality, TIDAL_API
+from tidal_dl.tidal import Type, Track, Playlist, Album, AudioQuality, TIDAL_API, SETTINGS
 from tidal_dl.printf import Printf
 from tidal_dl.gui.gui_utils import format_duration_ms
 from tidal_dl.persistence import LinkPersistenceManager
 from tidal_dl.format import getTrackPath
+from tidal_dl.paths import get_user_download_path
 from tidal_dl.model import StreamUrl
 
 # Robust import alias for aigpy dictToModel
@@ -62,6 +67,7 @@ class TableHandler(QObject):
     """
 
     trackQualityResolved = pyqtSignal(str, str)
+    completedStatusResolved = pyqtSignal(str, str, str)
 
     def __init__(
         self,
@@ -86,6 +92,12 @@ class TableHandler(QObject):
         self._quality_cache_access_lock = threading.Lock()
         self._quality_inflight_track_ids: Set[str] = set()
         self._quality_attempted_track_ids: Set[str] = set()
+        self._completed_status_executor = ThreadPoolExecutor(max_workers=2)
+        self._completed_status_lock = threading.Lock()
+        self._completed_status_inflight_keys: Set[str] = set()
+        self._completed_status_cache: Dict[str, Optional[str]] = {}
+        self._active_table_playlist_context_key: str = ""
+        self._executors_shutdown: bool = False
         self._visible_quality_refresh_timer = QTimer(self)
         self._visible_quality_refresh_timer.setSingleShot(True)
         self._visible_quality_refresh_timer.setInterval(120)
@@ -93,6 +105,7 @@ class TableHandler(QObject):
             self._resolve_visible_rows_quality
         )
         self.trackQualityResolved.connect(self._on_track_quality_resolved)
+        self.completedStatusResolved.connect(self._on_completed_status_resolved)
 
         if self.table_widget:
             self._connect_table_signals()
@@ -144,6 +157,10 @@ class TableHandler(QObject):
         with self._quality_state_lock:
             self._quality_inflight_track_ids.clear()
             self._quality_attempted_track_ids.clear()
+        with self._completed_status_lock:
+            self._completed_status_inflight_keys.clear()
+            self._completed_status_cache.clear()
+        self._active_table_playlist_context_key = ""
         self.table_widget.clearRows()
         if self.download_handler:
             self.download_handler._update_download_button_text()
@@ -206,6 +223,8 @@ class TableHandler(QObject):
             return
 
         with self._quality_state_lock:
+            if self._executors_shutdown:
+                return
             if track_id in self._quality_attempted_track_ids:
                 return
             if track_id in self._quality_inflight_track_ids:
@@ -213,7 +232,11 @@ class TableHandler(QObject):
             self._quality_attempted_track_ids.add(track_id)
             self._quality_inflight_track_ids.add(track_id)
 
-        self._quality_executor.submit(self._resolve_track_quality_in_background, track_id)
+        try:
+            self._quality_executor.submit(self._resolve_track_quality_in_background, track_id)
+        except RuntimeError:
+            with self._quality_state_lock:
+                self._quality_inflight_track_ids.discard(track_id)
 
     def _resolve_track_quality_in_background(self, track_id: str) -> None:
         quality_text: Optional[str] = None
@@ -349,6 +372,34 @@ class TableHandler(QObject):
     ):
         if not self.table_widget:
             return
+
+        current_playlist_obj = cast(
+            Optional[Union[Playlist, Dict[str, Any]]],
+            getattr(self.main_view, "s_playlist_obj", None),
+        )
+        current_playlist_id: Optional[str] = None
+        if isinstance(current_playlist_obj, dict) and current_playlist_obj.get("type") == "spotify":
+            current_data = current_playlist_obj.get("data")
+            if isinstance(current_data, dict):
+                current_playlist_id = str(current_data.get("id") or "").strip() or None
+
+        normalized_received_id = str(playlist_id or "").strip() or None
+        is_active_spotify_selection = bool(
+            isinstance(current_playlist_obj, dict)
+            and current_playlist_obj.get("type") == "spotify"
+            and current_playlist_id
+        )
+        if normalized_received_id and (
+            (not is_active_spotify_selection)
+            or (current_playlist_id != normalized_received_id)
+        ):
+            logger.info(
+                "Ignoring stale Spotify tracks payload (received playlist_id=%s, active playlist_id=%s)",
+                normalized_received_id,
+                current_playlist_id,
+            )
+            return
+
         if tracks is None:
             self.show_error_message("Error fetching Spotify tracks.")
             tracks = []
@@ -448,9 +499,9 @@ class TableHandler(QObject):
         return None
 
     def _format_completed_status_text(self, quality_text: Optional[str]) -> str:
-        cleaned_quality = (quality_text or "").strip()
+        cleaned_quality = " ".join((quality_text or "").split())
         if cleaned_quality:
-            return f"Completed:\n{cleaned_quality}"
+            return f"Completed: {cleaned_quality}"
         return "Completed"
 
     def _normalize_completed_quality_text(self, quality_text: Optional[str]) -> str:
@@ -504,6 +555,413 @@ class TableHandler(QObject):
         extensions_in_priority_order = [".flac", ".mp3", ".m4a", ".mp4"]
         return [f"{base_stem}{ext}" for ext in extensions_in_priority_order]
 
+    def _extract_playlist_identity(
+        self,
+        playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        playlist_id: Optional[str] = None
+        playlist_name: Optional[str] = None
+
+        if isinstance(playlist_context, Playlist):
+            playlist_id = str(getattr(playlist_context, "uuid", "") or "").strip() or None
+            playlist_name = str(getattr(playlist_context, "title", "") or "").strip() or None
+            return playlist_id, playlist_name
+
+        if isinstance(playlist_context, dict):
+            p_type = playlist_context.get("type")
+            p_data = playlist_context.get("data")
+
+            if p_type == "spotify" and isinstance(p_data, dict):
+                playlist_id = str(p_data.get("id", "") or "").strip() or None
+                playlist_name = str(p_data.get("name", "") or "").strip() or None
+                return playlist_id, playlist_name
+
+            if p_type == "tidal" and isinstance(p_data, Playlist):
+                playlist_id = str(getattr(p_data, "uuid", "") or "").strip() or None
+                playlist_name = str(getattr(p_data, "title", "") or "").strip() or None
+                return playlist_id, playlist_name
+
+            if isinstance(p_data, dict):
+                playlist_id = str(
+                    p_data.get("id", p_data.get("uuid", "")) or ""
+                ).strip() or None
+                playlist_name = str(
+                    p_data.get("name", p_data.get("title", "")) or ""
+                ).strip() or None
+                return playlist_id, playlist_name
+
+        return None, None
+
+    def _extract_download_root_and_relative_playlist_dir(
+        self,
+        candidate_path: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        normalized_path = os.path.normpath(os.path.abspath(candidate_path))
+        path_parts = normalized_path.split(os.sep)
+
+        if "Playlists" in path_parts:
+            playlists_index = path_parts.index("Playlists")
+            if playlists_index >= len(path_parts) - 1:
+                return None, None
+
+            if playlists_index == 0:
+                return None, None
+
+            download_root = os.sep.join(path_parts[:playlists_index])
+            if not download_root:
+                return None, None
+
+            relative_playlist_dir = os.path.join(*path_parts[playlists_index:-1])
+            return download_root, relative_playlist_dir
+
+        # Fallback for custom playlist folder formats that do not include a "Playlists" segment.
+        # Example: F:\Muziek\FLAC\GeradeHouse - Deeper House\...
+        configured_download_root = os.path.normpath(
+            os.path.abspath(get_user_download_path(SETTINGS.downloadPath))
+        )
+        candidate_dir = os.path.dirname(normalized_path)
+
+        try:
+            relative_playlist_dir = os.path.relpath(candidate_dir, configured_download_root)
+        except ValueError:
+            # Different drive letters (Windows): cannot build a stable relative path.
+            return None, None
+
+        if relative_playlist_dir in {"", "."} or relative_playlist_dir.startswith(".."):
+            return None, None
+
+        return configured_download_root, os.path.normpath(relative_playlist_dir)
+
+    def _build_existing_playlist_file_index(
+        self,
+        tracks: List[Track],
+        playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None,
+    ) -> tuple[Set[str], Set[str]]:
+        """Builds a one-pass file index for playlist existence checks to avoid repeated O(n²) scans."""
+        if not playlist_context:
+            return set(), set()
+
+        sample_track = next((track for track in tracks if isinstance(track, Track)), None)
+        if not sample_track:
+            return set(), set()
+
+        candidate_paths = self._build_candidate_track_paths(sample_track, playlist_context)
+        if not candidate_paths:
+            return set(), set()
+
+        download_root, computed_relative_playlist_dir = self._extract_download_root_and_relative_playlist_dir(
+            candidate_paths[0]
+        )
+        if not download_root or not computed_relative_playlist_dir:
+            return set(), set()
+
+        playlist_id, _ = self._extract_playlist_identity(playlist_context)
+        persisted_relative_playlist_dir = (
+            self.persistence_manager.get_playlist_folder_hint(playlist_id)
+            if playlist_id
+            else None
+        )
+
+        preferred_relative_dirs = [
+            computed_relative_playlist_dir,
+            persisted_relative_playlist_dir,
+        ]
+
+        target_dir: Optional[str] = None
+        searched_relative_dirs: Set[str] = set()
+        for relative_dir in preferred_relative_dirs:
+            if not relative_dir:
+                continue
+            normalized_relative_dir = os.path.normpath(relative_dir)
+            if normalized_relative_dir in searched_relative_dirs:
+                continue
+            searched_relative_dirs.add(normalized_relative_dir)
+            candidate_dir = os.path.join(download_root, normalized_relative_dir)
+            if os.path.isdir(candidate_dir):
+                target_dir = candidate_dir
+                break
+
+        if not target_dir:
+            return set(), set()
+
+        indexed_stems: Set[str] = set()
+        indexed_track_ids: Set[str] = set()
+        allowed_extensions = {".flac", ".mp3", ".m4a", ".mp4"}
+
+        with suppress(OSError):
+            for entry in os.scandir(target_dir):
+                if not entry.is_file():
+                    continue
+
+                stem, extension = os.path.splitext(entry.name)
+                if extension.lower() not in allowed_extensions:
+                    continue
+
+                normalized_stem = self._normalize_stem_for_match(stem)
+                if normalized_stem:
+                    indexed_stems.add(normalized_stem)
+
+                tags_track_id = self._extract_track_id_from_audio_tags(entry.path)
+                if tags_track_id:
+                    indexed_track_ids.add(tags_track_id)
+
+        return indexed_stems, indexed_track_ids
+
+    def _extract_track_id_from_audio_tags(self, file_path: str) -> Optional[str]:
+        try:
+            from mutagen import File as MutagenFile
+        except Exception:
+            return None
+
+        with suppress(Exception):
+            audio_file = MutagenFile(file_path)
+            if not audio_file or not getattr(audio_file, "tags", None):
+                return None
+
+            tags = audio_file.tags
+            candidate_values: List[Any] = []
+
+            if isinstance(tags, dict):
+                for tag_key in (
+                    "TIDAL_TRACK",
+                    "TXXX:TIDAL_TRACK",
+                    "----:com.apple.iTunes:TIDAL_TRACK",
+                    "TIDAL_TRACK_ID",
+                    "TXXX:TIDAL_TRACK_ID",
+                    "----:com.apple.iTunes:TIDAL_TRACK_ID",
+                ):
+                    if tag_key in tags:
+                        candidate_values.append(tags.get(tag_key))
+
+                for tag_key, tag_value in tags.items():
+                    key_upper = str(tag_key).upper()
+                    if "TIDAL_TRACK" in key_upper:
+                        candidate_values.append(tag_value)
+
+            for raw_value in candidate_values:
+                if isinstance(raw_value, list) and raw_value:
+                    raw_value = raw_value[0]
+
+                if isinstance(raw_value, bytes):
+                    raw_text = raw_value.decode("utf-8", errors="ignore").strip()
+                else:
+                    raw_text = str(raw_value).strip()
+
+                if not raw_text:
+                    continue
+
+                if raw_text.isdigit():
+                    return raw_text
+
+        return None
+
+    def _normalize_stem_for_match(self, stem: str) -> str:
+        """Normalizes file stems to improve cross-version/path-format matching robustness."""
+        raw_stem = str(stem or "")
+        if not raw_stem:
+            return ""
+
+        # Normalize unicode accents and apostrophe variants.
+        normalized = unicodedata.normalize("NFKD", raw_stem)
+        normalized = "".join(
+            char for char in normalized if not unicodedata.combining(char)
+        )
+        normalized = normalized.replace("’", "'").replace("`", "'")
+
+        # Normalize common feature annotations and punctuation differences.
+        normalized = re.sub(
+            r"\((feat\.?|ft\.?)\s+[^)]*\)",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        normalized = re.sub(r"[^a-zA-Z0-9]+", " ", normalized).strip().lower()
+        return " ".join(normalized.split())
+
+    def _build_playlist_context_key(
+        self,
+        playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
+    ) -> str:
+        playlist_id, playlist_name = self._extract_playlist_identity(playlist_context)
+        context_type = type(playlist_context).__name__ if playlist_context is not None else "None"
+
+        if isinstance(playlist_context, dict):
+            context_type = str(playlist_context.get("type") or context_type)
+
+        if playlist_id:
+            return f"{context_type}:{playlist_id}"
+        if playlist_name:
+            return f"{context_type}:name:{playlist_name.lower()}"
+        return f"{context_type}:none"
+
+    def _find_existing_track_file_path_by_playlist_scan(
+        self,
+        track: Track,
+        playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None,
+    ) -> Optional[str]:
+        candidate_paths = self._build_candidate_track_paths(track, playlist_context)
+        if not candidate_paths:
+            return None
+
+        download_root, computed_relative_playlist_dir = self._extract_download_root_and_relative_playlist_dir(
+            candidate_paths[0]
+        )
+        if not download_root or not computed_relative_playlist_dir:
+            return None
+
+        expected_stems = {
+            os.path.splitext(os.path.basename(candidate_path))[0]
+            for candidate_path in candidate_paths
+        }
+
+        expected_extensions = {
+            os.path.splitext(candidate_path)[1].lower() for candidate_path in candidate_paths
+        }
+
+        track_id_str = str(getattr(track, "id", "") or "").strip()
+        if not track_id_str:
+            return None
+
+        playlist_id, playlist_name = self._extract_playlist_identity(playlist_context)
+        persisted_relative_playlist_dir = (
+            self.persistence_manager.get_playlist_folder_hint(playlist_id)
+            if playlist_id
+            else None
+        )
+
+        preferred_relative_dirs = [
+            computed_relative_playlist_dir,
+            persisted_relative_playlist_dir,
+        ]
+        searched_relative_dirs: Set[str] = set()
+
+        for relative_dir in preferred_relative_dirs:
+            if not relative_dir:
+                continue
+            normalized_relative_dir = os.path.normpath(relative_dir)
+            if normalized_relative_dir in searched_relative_dirs:
+                continue
+            searched_relative_dirs.add(normalized_relative_dir)
+            candidate_dir = os.path.join(download_root, normalized_relative_dir)
+            if not os.path.isdir(candidate_dir):
+                continue
+            matched = self._scan_single_playlist_folder_for_track(
+                candidate_dir,
+                expected_stems,
+                expected_extensions,
+                track_id_str,
+                allow_stem_match=True,
+            )
+            if matched:
+                return matched
+
+        playlists_root = os.path.join(download_root, "Playlists")
+        if not os.path.isdir(playlists_root):
+            return None
+
+        prioritized_dirs: List[str] = []
+        remaining_dirs: List[str] = []
+        playlist_name_key = (playlist_name or "").strip().lower()
+
+        with suppress(OSError):
+            for entry in os.scandir(playlists_root):
+                if not entry.is_dir():
+                    continue
+
+                if playlist_name_key:
+                    entry_name_key = entry.name.strip().lower()
+                    if (
+                        playlist_name_key == entry_name_key
+                        or playlist_name_key in entry_name_key
+                        or entry_name_key in playlist_name_key
+                    ):
+                        prioritized_dirs.append(entry.path)
+                        continue
+
+                remaining_dirs.append(entry.path)
+
+        for folder_path in prioritized_dirs:
+            matched = self._scan_single_playlist_folder_for_track(
+                folder_path,
+                expected_stems,
+                expected_extensions,
+                track_id_str,
+                allow_stem_match=True,
+            )
+            if matched:
+                if playlist_id:
+                    with suppress(ValueError):
+                        relative_dir = os.path.relpath(folder_path, download_root)
+                        self.persistence_manager.set_playlist_folder_hint(
+                            playlist_id,
+                            relative_dir,
+                            playlist_name,
+                        )
+                return matched
+
+        for folder_path in remaining_dirs:
+            matched = self._scan_single_playlist_folder_for_track(
+                folder_path,
+                expected_stems,
+                expected_extensions,
+                track_id_str,
+                allow_stem_match=False,
+            )
+            if matched:
+                if playlist_id:
+                    with suppress(ValueError):
+                        relative_dir = os.path.relpath(folder_path, download_root)
+                        self.persistence_manager.set_playlist_folder_hint(
+                            playlist_id,
+                            relative_dir,
+                            playlist_name,
+                        )
+                return matched
+
+        return None
+
+    def _scan_single_playlist_folder_for_track(
+        self,
+        folder_path: str,
+        expected_stems: Set[str],
+        expected_extensions: Set[str],
+        track_id_str: str,
+        allow_stem_match: bool,
+    ) -> Optional[str]:
+        normalized_expected_stems = {
+            self._normalize_stem_for_match(expected_stem)
+            for expected_stem in expected_stems
+            if expected_stem
+        }
+
+        with suppress(OSError):
+            for entry in os.scandir(folder_path):
+                if not entry.is_file():
+                    continue
+
+                _, extension = os.path.splitext(entry.name)
+                extension_lower = extension.lower()
+                if extension_lower not in expected_extensions:
+                    continue
+
+                if allow_stem_match:
+                    file_stem = os.path.splitext(entry.name)[0]
+                    normalized_file_stem = self._normalize_stem_for_match(file_stem)
+                    if (
+                        file_stem in expected_stems
+                        or (
+                            normalized_file_stem
+                            and normalized_file_stem in normalized_expected_stems
+                        )
+                    ):
+                        return entry.path
+
+                tags_track_id = self._extract_track_id_from_audio_tags(entry.path)
+                if tags_track_id and tags_track_id == track_id_str:
+                    return entry.path
+
+        return None
+
     def _find_existing_track_file_path(
         self,
         track: Track,
@@ -512,6 +970,15 @@ class TableHandler(QObject):
         for candidate_path in self._build_candidate_track_paths(track, playlist_context):
             if os.path.exists(candidate_path):
                 return candidate_path
+
+        if playlist_context:
+            robust_match = self._find_existing_track_file_path_by_playlist_scan(
+                track,
+                playlist_context,
+            )
+            if robust_match:
+                return robust_match
+
         return None
 
     def _quality_text_from_existing_file(self, track: Track, existing_file_path: str) -> str:
@@ -548,6 +1015,177 @@ class TableHandler(QObject):
             return None
         return self._quality_text_from_existing_file(track, existing_path)
 
+    def _get_completed_quality_with_diagnostics(
+        self,
+        track: Track,
+        playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
+        *,
+        reason: str,
+        row: Optional[int] = None,
+    ) -> Optional[str]:
+        start = time.perf_counter()
+        quality_text = self.get_completed_quality_for_track(track, playlist_context)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+        if elapsed_ms >= 250.0:
+            playlist_type = type(playlist_context).__name__ if playlist_context is not None else "None"
+            track_id = str(getattr(track, "id", ""))
+            logger.warning(
+                "[DIAGNOSIS] Slow completed-quality lookup detected | reason=%s row=%s track_id=%s elapsed_ms=%.1f playlist_context_type=%s",
+                reason,
+                row,
+                track_id,
+                elapsed_ms,
+                playlist_type,
+            )
+
+        return quality_text
+
+    def _enqueue_completed_status_resolution(
+        self,
+        track: Track,
+        playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
+        *,
+        row: Optional[int],
+        reason: str,
+    ) -> None:
+        track_id = str(getattr(track, "id", "") or "").strip()
+        if not track_id:
+            return
+
+        context_key = self._build_playlist_context_key(playlist_context)
+        cache_key = f"{context_key}|{track_id}"
+
+        with self._completed_status_lock:
+            if self._executors_shutdown:
+                return
+            if cache_key in self._completed_status_cache:
+                cached_quality = self._completed_status_cache.get(cache_key)
+                if cached_quality:
+                    self.completedStatusResolved.emit(track_id, context_key, cached_quality)
+                return
+
+            if cache_key in self._completed_status_inflight_keys:
+                return
+
+            self._completed_status_inflight_keys.add(cache_key)
+
+        try:
+            self._completed_status_executor.submit(
+                self._resolve_completed_status_in_background,
+                track,
+                playlist_context,
+                context_key,
+                cache_key,
+                row,
+                reason,
+            )
+        except RuntimeError:
+            with self._completed_status_lock:
+                self._completed_status_inflight_keys.discard(cache_key)
+
+    def shutdown_background_workers(self, wait: bool = False) -> None:
+        self._visible_quality_refresh_timer.stop()
+
+        with self._quality_state_lock:
+            self._executors_shutdown = True
+            self._quality_inflight_track_ids.clear()
+
+        with self._completed_status_lock:
+            self._completed_status_inflight_keys.clear()
+
+        try:
+            self._quality_executor.shutdown(wait=wait, cancel_futures=True)
+        except TypeError:
+            self._quality_executor.shutdown(wait=wait)
+        except Exception:
+            logger.debug("Failed to shut down quality executor cleanly.", exc_info=True)
+
+        try:
+            self._completed_status_executor.shutdown(wait=wait, cancel_futures=True)
+        except TypeError:
+            self._completed_status_executor.shutdown(wait=wait)
+        except Exception:
+            logger.debug("Failed to shut down completed-status executor cleanly.", exc_info=True)
+
+    def _resolve_completed_status_in_background(
+        self,
+        track: Track,
+        playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
+        context_key: str,
+        cache_key: str,
+        row: Optional[int],
+        reason: str,
+    ) -> None:
+        track_id = str(getattr(track, "id", "") or "").strip()
+        resolved_quality: Optional[str] = None
+        try:
+            resolved_quality = self._get_completed_quality_with_diagnostics(
+                track,
+                playlist_context,
+                reason=reason,
+                row=row,
+            )
+        except Exception as ex:
+            logger.debug(
+                "Completed-status background resolution failed for track_id=%s: %s",
+                track_id,
+                ex,
+                exc_info=True,
+            )
+        finally:
+            cleaned_quality = (resolved_quality or "").strip() or None
+            with self._completed_status_lock:
+                self._completed_status_cache[cache_key] = cleaned_quality
+                self._completed_status_inflight_keys.discard(cache_key)
+
+            if cleaned_quality:
+                self.completedStatusResolved.emit(track_id, context_key, cleaned_quality)
+
+    @pyqtSlot(str, str, str)
+    def _on_completed_status_resolved(
+        self,
+        track_id: str,
+        context_key: str,
+        quality_text: str,
+    ) -> None:
+        if (
+            not self.table_widget
+            or not self.download_handler
+            or "Status" not in self.column_indices
+        ):
+            return
+
+        if not quality_text:
+            return
+
+        if context_key != self._active_table_playlist_context_key:
+            logger.debug(
+                "Ignoring completed-status result for stale context: track_id=%s context=%s active=%s",
+                track_id,
+                context_key,
+                self._active_table_playlist_context_key,
+            )
+            return
+
+        status_col = self.column_indices["Status"]
+        for row in range(self.table_widget.rowCount()):
+            row_track_id = self._extract_tidal_track_id_from_row(row)
+            if row_track_id != track_id:
+                continue
+
+            active_state = self.download_handler.active_downloads.get(track_id)
+            if active_state and active_state.get("status") in {"pending", "downloading", "failed"}:
+                continue
+
+            status_item = self.table_widget.item(row, status_col)
+            if not status_item:
+                status_item = QTableWidgetItem()
+                self.table_widget.setItem(row, status_col, status_item)
+
+            status_item.setText(self._format_completed_status_text(quality_text))
+            status_item.setToolTip(quality_text)
+
     def is_track_completed(
         self,
         track: Track,
@@ -560,12 +1198,34 @@ class TableHandler(QObject):
         tracks: List[Track],
         playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None,
     ) -> List[Track]:
-        return [
-            track
-            for track in tracks
-            if isinstance(track, Track)
-            and not self.is_track_completed(track, playlist_context)
-        ]
+        indexed_stems, indexed_track_ids = self._build_existing_playlist_file_index(
+            tracks,
+            playlist_context,
+        )
+
+        non_completed_tracks: List[Track] = []
+        for track in tracks:
+            if not isinstance(track, Track):
+                continue
+
+            if indexed_stems:
+                candidate_stems = {
+                    self._normalize_stem_for_match(
+                        os.path.splitext(os.path.basename(candidate_path))[0]
+                    )
+                    for candidate_path in self._build_candidate_track_paths(track, playlist_context)
+                }
+                if candidate_stems.intersection(indexed_stems):
+                    continue
+
+            track_id_str = str(getattr(track, "id", "") or "").strip()
+            if track_id_str and track_id_str in indexed_track_ids:
+                continue
+
+            if not self.is_track_completed(track, playlist_context):
+                non_completed_tracks.append(track)
+
+        return non_completed_tracks
 
     def _resolve_completed_quality_for_row(
         self,
@@ -581,7 +1241,12 @@ class TableHandler(QObject):
         track = self._extract_tidal_track_from_item_data(item_data)
         if not track:
             return None
-        return self.get_completed_quality_for_track(track, playlist_context)
+        return self._get_completed_quality_with_diagnostics(
+            track,
+            playlist_context,
+            reason="resolve_completed_quality_for_row",
+            row=row,
+        )
 
     def _populate_table_generic(
         self,
@@ -591,6 +1256,7 @@ class TableHandler(QObject):
     ):
         if not self.table_widget or not self.download_handler:
             return
+        populate_start = time.perf_counter()
         table = self.table_widget
         table.clearRows()
         with self._quality_state_lock:
@@ -627,6 +1293,9 @@ class TableHandler(QObject):
         )
 
         playlist_context_for_display = getattr(self.main_view, "s_playlist_obj", None)
+        self._active_table_playlist_context_key = self._build_playlist_context_key(
+            cast(Optional[Union[Playlist, Album, Dict[str, Any]]], playlist_context_for_display)
+        )
 
         for index, item in enumerate(results_array):
             rowData: Optional[List[str]] = None
@@ -817,15 +1486,14 @@ class TableHandler(QObject):
                                 if not completed_quality:
                                     track_for_completion = self._extract_tidal_track_from_item_data(item_metadata)
                                     if track_for_completion:
-                                        completed_quality = (
-                                            self.get_completed_quality_for_track(
-                                                track_for_completion,
-                                                cast(
-                                                    Optional[Union[Playlist, Album, Dict[str, Any]]],
-                                                    download_state.get("playlist_context", playlist_context_for_display),
-                                                ),
-                                            )
-                                            or ""
+                                        self._enqueue_completed_status_resolution(
+                                            track_for_completion,
+                                            cast(
+                                                Optional[Union[Playlist, Album, Dict[str, Any]]],
+                                                download_state.get("playlist_context", playlist_context_for_display),
+                                            ),
+                                            row=index,
+                                            reason="populate_table_active_completed_fallback",
                                         )
                                 status_item.setText(self._format_completed_status_text(completed_quality))
                                 status_item.setToolTip(completed_quality)
@@ -835,13 +1503,12 @@ class TableHandler(QObject):
                         else:
                             track_for_completion = self._extract_tidal_track_from_item_data(item_metadata)
                             if track_for_completion:
-                                completed_quality = self.get_completed_quality_for_track(
+                                self._enqueue_completed_status_resolution(
                                     track_for_completion,
                                     cast(Optional[Union[Playlist, Album, Dict[str, Any]]], playlist_context_for_display),
+                                    row=index,
+                                    reason="populate_table_idle_row",
                                 )
-                                if completed_quality:
-                                    status_item.setText(self._format_completed_status_text(completed_quality))
-                                    status_item.setToolTip(completed_quality)
 
             except Exception as e:
                 logger.error(
@@ -852,7 +1519,14 @@ class TableHandler(QObject):
         table.adjustColumnWidths()
         table.update()
         self._schedule_visible_quality_resolution()
-        logger.info(f"Table populated with {table.rowCount()} items.")
+        elapsed_ms = (time.perf_counter() - populate_start) * 1000.0
+        logger.info(
+            "Table populated with %s items in %.1fms (spotify=%s, playlist_id=%s)",
+            table.rowCount(),
+            elapsed_ms,
+            is_spotify_track_list,
+            playlist_id,
+        )
         if self.download_handler:
             self.download_handler._update_download_button_text()
 
@@ -1167,16 +1841,23 @@ class TableHandler(QObject):
         if ok:
             normalized_quality = self._normalize_completed_quality_text(quality_text)
             if not normalized_quality:
-                normalized_quality = (
-                    self._resolve_completed_quality_for_row(
-                        row,
-                        cast(
-                            Optional[Union[Playlist, Album, Dict[str, Any]]],
-                            getattr(self.main_view, "s_playlist_obj", None),
-                        ),
-                    )
-                    or ""
+                title_item = self.table_widget.item(row, 1)
+                track_obj: Optional[Track] = None
+                if title_item:
+                    item_data = title_item.data(Qt.ItemDataRole.UserRole)
+                    track_obj = self._extract_tidal_track_from_item_data(item_data)
+
+                current_context = cast(
+                    Optional[Union[Playlist, Album, Dict[str, Any]]],
+                    getattr(self.main_view, "s_playlist_obj", None),
                 )
+                if track_obj:
+                    self._enqueue_completed_status_resolution(
+                        track_obj,
+                        current_context,
+                        row=row,
+                        reason="mark_track_completed_fallback",
+                    )
             item.setText(self._format_completed_status_text(normalized_quality))
             item.setToolTip(normalized_quality)
         else:
@@ -1217,6 +1898,9 @@ class TableHandler(QObject):
         current_playlist_context = cast(
             Optional[Union[Playlist, Album, Dict[str, Any]]],
             getattr(self.main_view, "s_playlist_obj", None),
+        )
+        self._active_table_playlist_context_key = self._build_playlist_context_key(
+            current_playlist_context
         )
         # Clear all widgets and text/tooltips first
         for row in range(self.table_widget.rowCount()):
@@ -1272,14 +1956,12 @@ class TableHandler(QObject):
             state = self.download_handler.active_downloads.get(track_id)
             if not state:
                 if track_obj:
-                    completed_quality = self.get_completed_quality_for_track(
+                    self._enqueue_completed_status_resolution(
                         track_obj,
                         current_playlist_context,
+                        row=row,
+                        reason="rebuild_status_idle_row",
                     )
-                    if completed_quality:
-                        status_item.setText(self._format_completed_status_text(completed_quality))
-                        status_item.setToolTip(completed_quality)
-                        continue
 
                 # Restore link-state text for non-active rows
                 link_text = ""
@@ -1317,15 +1999,14 @@ class TableHandler(QObject):
                     or cast(Optional[str], state.get("requested_quality"))
                 )
                 if not completed_quality and track_obj:
-                    completed_quality = (
-                        self.get_completed_quality_for_track(
-                            track_obj,
-                            cast(
-                                Optional[Union[Playlist, Album, Dict[str, Any]]],
-                                state.get("playlist_context", current_playlist_context),
-                            ),
-                        )
-                        or ""
+                    self._enqueue_completed_status_resolution(
+                        track_obj,
+                        cast(
+                            Optional[Union[Playlist, Album, Dict[str, Any]]],
+                            state.get("playlist_context", current_playlist_context),
+                        ),
+                        row=row,
+                        reason="rebuild_status_completed_fallback",
                     )
                 status_item.setText(self._format_completed_status_text(completed_quality))
                 status_item.setToolTip(completed_quality)

@@ -31,6 +31,9 @@ class SpotifyGuiHandler(QObject):
         super().__init__()
         self.main_view = main_view
         self.spotify_api = spotify_api
+        self._tracks_request_lock = threading.Lock()
+        self._latest_tracks_request_token = 0
+        self._latest_tracks_playlist_id: Optional[str] = None
 
     def loginSpotify(self, check_cache_only: bool = False):
         from tidal_dl.settings import SETTINGS
@@ -162,6 +165,12 @@ class SpotifyGuiHandler(QObject):
         table_widget.clearRows()
         table_widget.addRow(["Loading Spotify tracks..."], None)
 
+        normalized_playlist_id = str(playlist_id or "").strip()
+        with self._tracks_request_lock:
+            self._latest_tracks_request_token += 1
+            request_token = self._latest_tracks_request_token
+            self._latest_tracks_playlist_id = normalized_playlist_id
+
         def _spotify_track_thread():
             fetched_tracks: Optional[list] = None
             try:
@@ -172,6 +181,20 @@ class SpotifyGuiHandler(QObject):
                     exc_info=True,
                 )
             finally:
+                with self._tracks_request_lock:
+                    is_stale = (
+                        request_token != self._latest_tracks_request_token
+                        or normalized_playlist_id != self._latest_tracks_playlist_id
+                    )
+
+                if is_stale:
+                    logger.info(
+                        "Dropping stale Spotify track fetch result for playlist_id=%s (token=%s)",
+                        normalized_playlist_id,
+                        request_token,
+                    )
+                    return
+
                 self.main_view.s_spotifyTracksFetched.emit(
                     playlist_id, fetched_tracks or []
                 )

@@ -624,8 +624,10 @@ class SearchBarWidget(QWidget):
                 "CRITICAL: Exception caught directly in _on_result_item_clicked!",
                 exc_info=True,
             )
-            # Re-raise the exception to allow the global handler to also process it
-            raise
+            # Fail-safe: do not re-raise from a direct UI event handler.
+            # Re-raising here can crash the app for a single malformed list item.
+            self._hide_results_list()
+            return
 
     def _hide_results_list(self):
         """Hides the results list."""

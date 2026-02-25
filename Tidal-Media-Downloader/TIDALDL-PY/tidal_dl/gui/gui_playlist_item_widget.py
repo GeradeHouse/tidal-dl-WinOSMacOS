@@ -37,6 +37,7 @@ class PlaylistItemProgressWidget(QWidget):
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 3, 5, 3)
         self.main_layout.setSpacing(2)
+        self.main_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize)
 
         # --- Top Row Horizontal Layout (for Icon and Name) ---
         top_row_widget = QWidget()
@@ -84,6 +85,7 @@ class PlaylistItemProgressWidget(QWidget):
         font.setPointSize(font.pointSize() - 2)
         self.status_label.setFont(font)
         self.status_label.setStyleSheet("color: #bbb;")
+        self.status_label.setWordWrap(False)
         self.status_label.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed
@@ -133,6 +135,14 @@ class PlaylistItemProgressWidget(QWidget):
         # Initially hide the status part
         self.status_container.setVisible(False)
 
+    def _refresh_geometry(self) -> None:
+        """Refresh local layout metrics and request parent row relayout."""
+        self.adjustSize()
+        self.updateGeometry()
+        self.main_layout.invalidate()
+        self.main_layout.activate()
+        self.geometryRequest.emit()
+
     def set_icon(self, icon: QIcon):
         if not icon.isNull():
             pixmap = icon.pixmap(self.icon_label.size())
@@ -143,43 +153,74 @@ class PlaylistItemProgressWidget(QWidget):
     def set_progress(self, current: int, total: int, action_text: str):
         """Updates the displayed status and progress."""
         visibility_changed = False
+        progress_was_visible = self.progress_bar.isVisible()
+        percentage_was_visible = self.percentage_label.isVisible()
+        action_text_normalized = str(action_text or "").strip().lower()
+        is_missing_check_phase = action_text_normalized in {
+            "checking missing tracks",
+            "calculating missing tracks",
+        }
         
         if not self.status_container.isVisible():
             self.status_container.setVisible(True)
             visibility_changed = True
+
+        safe_total = max(0, int(total))
+        safe_current = max(0, int(current))
+
+        if is_missing_check_phase:
+            # Show an indeterminate (busy) bar while existence checks are running.
+            self.status_label.setText(action_text)
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setValue(0)
+            self.percentage_label.setVisible(False)
+            if visibility_changed or (not progress_was_visible) or percentage_was_visible:
+                self._refresh_geometry()
+            return
+
+        if safe_total <= 0:
+            # For non-count states (e.g. "All tracks already completed"), show status text only.
+            self.status_label.setText(action_text)
+            self.progress_bar.setVisible(False)
+            self.percentage_label.setVisible(False)
+            if visibility_changed or progress_was_visible or percentage_was_visible:
+                self._refresh_geometry()
+            return
 
         # Ensure progress bar is visible (might be hidden by set_queued)
         self.progress_bar.setVisible(True)
         self.percentage_label.setVisible(True)
+        self.progress_bar.setRange(0, safe_total)
 
-        self.status_label.setText(f"{action_text}: {current}/{total}")
-        self.progress_bar.setMaximum(total)
-        self.progress_bar.setValue(current)
-        
-        percentage = 0
-        if total > 0:
-            percentage = int((current / total) * 100)
+        self.status_label.setText(f"{action_text}: {safe_current}/{safe_total}")
+        self.progress_bar.setMaximum(safe_total)
+        self.progress_bar.setValue(min(safe_current, safe_total))
+
+        percentage = int((min(safe_current, safe_total) / safe_total) * 100)
         self.percentage_label.setText(f"{percentage}%")
-        
-        # If visibility changed, we need to notify the parent tree item to resize
-        if visibility_changed:
-            self.geometryRequest.emit()
+
+        # Request geometry recalculation when row height might have changed.
+        if visibility_changed or (not progress_was_visible) or (not percentage_was_visible):
+            self._refresh_geometry()
 
     def set_queued(self):
         """Sets the widget to a 'Queued' state."""
         visibility_changed = False
+        progress_was_visible = self.progress_bar.isVisible()
+        percentage_was_visible = self.percentage_label.isVisible()
         
         if not self.status_container.isVisible():
             self.status_container.setVisible(True)
             visibility_changed = True
-            
+             
         self.status_label.setText("Queued to be processed")
         # Hide progress bar elements for cleaner look
         self.progress_bar.setVisible(False)
         self.percentage_label.setVisible(False)
         
-        if visibility_changed:
-            self.geometryRequest.emit()
+        if visibility_changed or progress_was_visible or percentage_was_visible:
+            self._refresh_geometry()
 
     def reset_state(self):
         """Hides the progress indicators and restores the default view."""
@@ -196,7 +237,7 @@ class PlaylistItemProgressWidget(QWidget):
         self.percentage_label.setVisible(True)
         
         if visibility_changed:
-            self.geometryRequest.emit()
+            self._refresh_geometry()
 
     def sizeHint(self) -> QSize:
         """Provide a dynamic size hint based on visibility."""

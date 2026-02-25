@@ -170,6 +170,50 @@ def getPlaylistPath(playlist: Union[Playlist, Dict[str, Any]]) -> Optional[str]:
     return full_path
 
 
+def _resolve_playlist_path_from_context(
+    playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
+    base_path: str,
+) -> Optional[str]:
+    """Resolves an absolute playlist folder path from a mixed playlist context."""
+    if not playlist_context:
+        return None
+
+    if isinstance(playlist_context, dict):
+        context_type = playlist_context.get("type")
+        context_data = playlist_context.get("data")
+
+        if context_type == "single":
+            return os.path.join(base_path, "Tracks")
+
+        if context_type == "spotify":
+            return getPlaylistPath(playlist_context)
+
+        if isinstance(context_data, Playlist):
+            return getPlaylistPath(context_data)
+
+        if isinstance(context_data, dict):
+            playlist_name = __fixPath__(
+                context_data.get("name", context_data.get("title", "Unknown Playlist"))
+            )
+            playlist_uuid = str(
+                context_data.get("id", context_data.get("uuid", "UnknownUUID"))
+            )
+            relative_path = (
+                SETTINGS.playlistFolderFormat
+                or SETTINGS.getDefaultPathFormat(Type.Playlist)
+            )
+            relative_path = relative_path.replace(R"{PlaylistUUID}", playlist_uuid)
+            relative_path = relative_path.replace(R"{PlaylistName}", playlist_name)
+            return os.path.join(base_path, relative_path.strip())
+
+        return None
+
+    if isinstance(playlist_context, Playlist):
+        return getPlaylistPath(playlist_context)
+
+    return None
+
+
 def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists: str, album: Optional[Album] = None, playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None) -> str:
     """Generates the full file path for a track based on context and settings."""
     logger.debug(f"getTrackPath: artist='{artist}', artists='{artists}', track.title='{track.title if track else 'None'}'")
@@ -229,31 +273,35 @@ def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists
     filename_format = re.sub(r"\s*([-._])\s*(\1\s*)+", r" \1 ", filename_format)
     filename_format = re.sub(r"\s*([-._])\s*", r" \1 ", filename_format)
 
+    # Get the resolved, absolute base download path
+    base_path = get_user_download_path(SETTINGS.downloadPath)
+
     # Determine the subdirectory structure
     sub_folder = ""
     if album:
         sub_folder = os.path.join("Albums", __fixPath__(album.title))
     elif playlist_context:
-        if isinstance(playlist_context, dict):
-            if playlist_context.get('type') == 'single':
-                sub_folder = "Tracks"
-            elif playlist_context.get('type') == 'spotify':
-                playlist_name = __fixPath__(playlist_context['data'].get('name', 'Unknown'))
-                playlist_uuid = playlist_context['data'].get('id', 'Unknown')
-                logger.debug(f"Spotify playlist: name='{playlist_name}', id='{playlist_uuid}'")
-                sub_folder = os.path.join("Playlists", f"{playlist_name} [{playlist_uuid}]")
-            else:
-                sub_folder = os.path.join("Artists", __fixPath__(artist))
+        resolved_playlist_path = _resolve_playlist_path_from_context(
+            playlist_context, base_path
+        )
+        if resolved_playlist_path:
+            normalized_playlist_path = os.path.normpath(resolved_playlist_path)
+            normalized_base_path = os.path.normpath(base_path)
+            try:
+                relative_sub_folder = os.path.relpath(
+                    normalized_playlist_path, normalized_base_path
+                )
+                if relative_sub_folder.startswith(".."):
+                    sub_folder = os.path.basename(normalized_playlist_path)
+                else:
+                    sub_folder = relative_sub_folder
+            except ValueError:
+                # Different drives on Windows: fall back to last folder segment.
+                sub_folder = os.path.basename(normalized_playlist_path)
         else:
-            # Tidal playlist
-            playlist_name = __fixPath__(getattr(playlist_context, 'title', 'Unknown'))
-            playlist_uuid = getattr(playlist_context, 'uuid', 'Unknown')
-            sub_folder = os.path.join("Playlists", f"{playlist_name} [{playlist_uuid}]")
+            sub_folder = os.path.join("Artists", __fixPath__(artist))
     else:
         sub_folder = os.path.join("Artists", __fixPath__(artist))
-
-    # Get the resolved, absolute base download path
-    base_path = get_user_download_path(SETTINGS.downloadPath)
 
     # Construct the full, absolute path
     filename_with_ext = f"{filename_format.strip()}{extension}"

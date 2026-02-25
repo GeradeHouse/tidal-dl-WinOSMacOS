@@ -10,6 +10,7 @@
 
 import logging
 import threading
+import time
 
 # import traceback # Removed unused import
 # Import List, Dict, Optional, Any only if needed for explicit type hints beyond forward refs
@@ -199,6 +200,90 @@ class SearchHandler(QObject):
         self.live_search_worker: Optional[LiveSearchWorker] = None
         self._latest_search_id = 0  # Counter for live searches
 
+    @pyqtSlot(str)
+    def _emit_search_failed_slot(self, message: str) -> None:
+        self.searchFailed.emit(message)
+
+    @pyqtSlot(str, list, list, list)
+    def _emit_keyword_search_ready_slot(
+        self,
+        query: str,
+        track_results: list,
+        album_results: list,
+        artist_results: list,
+    ) -> None:
+        self.keywordSearchReady.emit(query, track_results, album_results, artist_results)
+
+    @pyqtSlot(list, object, object)
+    def _emit_search_results_slot(
+        self,
+        results_array: list,
+        result_type_obj: object,
+        search_context: object,
+    ) -> None:
+        result_type = result_type_obj if isinstance(result_type_obj, Type) else Type.Null
+        self.searchResultsReady.emit(results_array, result_type, search_context)
+
+    def _emit_search_failed(self, message: str) -> None:
+        if QtCore.QThread.currentThread() is self.thread():
+            self.searchFailed.emit(message)
+            return
+
+        QtCore.QMetaObject.invokeMethod(
+            self,
+            "_emit_search_failed_slot",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(str, message),
+        )
+
+    def _emit_keyword_search_ready(
+        self,
+        query: str,
+        track_results: list,
+        album_results: list,
+        artist_results: list,
+    ) -> None:
+        if QtCore.QThread.currentThread() is self.thread():
+            self.keywordSearchReady.emit(
+                query, track_results, album_results, artist_results
+            )
+            return
+
+        QtCore.QMetaObject.invokeMethod(
+            self,
+            "_emit_keyword_search_ready_slot",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(str, query),
+            QtCore.Q_ARG(list, track_results),
+            QtCore.Q_ARG(list, album_results),
+            QtCore.Q_ARG(list, artist_results),
+        )
+
+    def _emit_search_results(
+        self,
+        results_array: list,
+        result_type: Optional[Type],
+        search_context: object,
+    ) -> None:
+        result_type_safe: Type = result_type if isinstance(result_type, Type) else Type.Null
+
+        if QtCore.QThread.currentThread() is self.thread():
+            self.searchResultsReady.emit(results_array, result_type_safe, search_context)
+            return
+
+        QtCore.QMetaObject.invokeMethod(
+            self,
+            "_emit_search_results_slot",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(list, results_array),
+            QtCore.Q_ARG(object, result_type_safe),
+            QtCore.Q_ARG(object, search_context),
+        )
+
+    @pyqtSlot(str)
+    def perform_search_async(self, query: str) -> None:
+        threading.Thread(target=self.perform_search, args=(query,), daemon=True).start()
+
     def _extract_search_items(
         self,
         search_result_union: Union[SearchResult, Tuple[SearchResult, str]],
@@ -292,9 +377,10 @@ class SearchHandler(QObject):
         - URL input resolves directly to the linked TIDAL object.
         - Keyword input now performs full searches for tracks/albums/artists.
         """
+        search_start = time.perf_counter()
         logger.debug(f"SearchHandler: Performing search. Query='{query}'")
         if not query:
-            self.searchFailed.emit("Please enter a search query or URL.")
+            self._emit_search_failed("Please enter a search query or URL.")
             logger.warning("Search attempt with empty input.")
             return
 
@@ -311,14 +397,14 @@ class SearchHandler(QObject):
                 tmpType, tmpId = TIDAL_API.parseUrl(query)
 
                 if tmpType == Type.Null:
-                    self.searchFailed.emit(
+                    self._emit_search_failed(
                         "The provided URL is not recognized or supported."
                     )
                     return
 
                 tmpData = TIDAL_API.getTypeData(tmpId, tmpType)
                 if tmpData is None:
-                    self.searchFailed.emit(
+                    self._emit_search_failed(
                         "Could not retrieve data for the provided URL."
                     )
                     return
@@ -355,10 +441,16 @@ class SearchHandler(QObject):
                 album_results: List[Any] = []
                 artist_results: List[Any] = []
 
+                tracks_search_ms: float = 0.0
+                albums_search_ms: float = 0.0
+                artists_search_ms: float = 0.0
+
                 try:
+                    _t0 = time.perf_counter()
                     track_results = self._extract_search_items(
                         TIDAL_API.search(query, Type.Track, limit=50), Type.Track
                     )
+                    tracks_search_ms = (time.perf_counter() - _t0) * 1000.0
                 except Exception as track_err:
                     logger.error(
                         f"Keyword track search failed for '{query}': {track_err}",
@@ -366,9 +458,11 @@ class SearchHandler(QObject):
                     )
 
                 try:
+                    _t0 = time.perf_counter()
                     album_results = self._extract_search_items(
                         TIDAL_API.search(query, Type.Album, limit=30), Type.Album
                     )
+                    albums_search_ms = (time.perf_counter() - _t0) * 1000.0
                 except Exception as album_err:
                     logger.error(
                         f"Keyword album search failed for '{query}': {album_err}",
@@ -376,22 +470,24 @@ class SearchHandler(QObject):
                     )
 
                 try:
+                    _t0 = time.perf_counter()
                     artist_results = self._extract_search_items(
                         TIDAL_API.search(query, Type.Artist, limit=20), Type.Artist
                     )
+                    artists_search_ms = (time.perf_counter() - _t0) * 1000.0
                 except Exception as artist_err:
                     logger.error(
                         f"Keyword artist search failed for '{query}': {artist_err}",
                         exc_info=True,
                     )
 
-                self.keywordSearchReady.emit(
+                self._emit_keyword_search_ready(
                     query, track_results, album_results, artist_results
                 )
 
                 if not track_results and not album_results and not artist_results:
-                    self.searchFailed.emit("No results found.")
-                    self.searchResultsReady.emit([], Type.Track, None)
+                    self._emit_search_failed("No results found.")
+                    self._emit_search_results([], Type.Track, None)
                     return
 
                 results_array = track_results
@@ -402,18 +498,26 @@ class SearchHandler(QObject):
                     f"Keyword search results for '{query}': "
                     f"tracks={len(track_results)}, albums={len(album_results)}, artists={len(artist_results)}"
                 )
+                logger.warning(
+                    "SEARCH_PERF_DIAG query='%s' keyword_api_ms tracks=%.1f albums=%.1f artists=%.1f totals=%s",
+                    query,
+                    tracks_search_ms,
+                    albums_search_ms,
+                    artists_search_ms,
+                    len(track_results) + len(album_results) + len(artist_results),
+                )
 
             if not results_array:
                 if suppress_empty_tracks_error:
-                    self.searchResultsReady.emit(
+                    self._emit_search_results(
                         [],
                         actual_result_type if actual_result_type else Type.Null,
                         search_context,
                     )
                     return
 
-                self.searchFailed.emit("No results found.")
-                self.searchResultsReady.emit(
+                self._emit_search_failed("No results found.")
+                self._emit_search_results(
                     [],
                     actual_result_type if actual_result_type else Type.Null,
                     search_context,
@@ -421,16 +525,23 @@ class SearchHandler(QObject):
                 return
 
             # Emit results
-            self.searchResultsReady.emit(
+            self._emit_search_results(
                 results_array, actual_result_type, search_context
+            )
+            logger.warning(
+                "SEARCH_PERF_DIAG query='%s' perform_search_total_ms=%.1f result_type=%s result_count=%s",
+                query,
+                (time.perf_counter() - search_start) * 1000.0,
+                actual_result_type.name if actual_result_type else "Null",
+                len(results_array),
             )
 
         except Exception as e:
             error_msg = f"An error occurred during search: {e}"
             logger.error(error_msg, exc_info=True)
-            self.searchFailed.emit(f"Search failed: {e}")
+            self._emit_search_failed(f"Search failed: {e}")
             # Emit empty results on error
-            self.searchResultsReady.emit(
+            self._emit_search_results(
                 [], Type.Null, None
             )  # Use Null type on general error
 

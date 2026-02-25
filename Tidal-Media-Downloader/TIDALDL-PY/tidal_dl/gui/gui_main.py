@@ -3,7 +3,8 @@
 import logging
 import sys
 import threading
-from typing import Optional, List, Any, Dict, Union, Callable, TYPE_CHECKING
+import time
+from typing import Optional, List, Any, Dict, Union, Callable, TYPE_CHECKING, Tuple
 
 from PyQt6.QtWidgets import (
     QWidget,
@@ -27,6 +28,7 @@ from PyQt6.QtCore import (
     Qt,
     pyqtSignal,
     QThread,
+    QThreadPool,
     pyqtSlot,
     QSize,
     QPoint,
@@ -54,7 +56,7 @@ from tidal_dl import paths
 from tidal_dl.settings import SETTINGS
 from tidal_dl.linking import LinkingWorker
 from tidal_dl.persistence import LinkPersistenceManager
-from tidal_dl.gui.gui_cover_cache import CoverCache
+from tidal_dl.gui.gui_cover_cache import CoverCache, CoverArtWorker
 from tidal_dl.spotify import SpotifyAPI
 
 from .gui_settings import SettingsPage
@@ -138,6 +140,11 @@ class MainView(QWidget):
 
         self.link_persistence_manager = LinkPersistenceManager()
         self.cover_cache = CoverCache()
+        self._keyword_cover_generation: int = 0
+        self._keyword_cover_subscribers: Dict[
+            str, List[Tuple[QListWidget, QListWidgetItem, int]]
+        ] = {}
+        self._keyword_cover_workers: Dict[str, CoverArtWorker] = {}
         self.spotify_api = SpotifyAPI()
         self.player_logic = PlayerLogic(TIDAL_API, self)
 
@@ -578,6 +585,7 @@ class MainView(QWidget):
         self.search_bar.liveSearchRequested.connect(
             self.search_handler.perform_live_search
         )
+        self.search_bar.searchTriggered.connect(self.search_handler.perform_search_async)
         self.search_bar.resultSelected.connect(
             self.search_handler._on_result_item_clicked
         )
@@ -889,6 +897,7 @@ class MainView(QWidget):
         if not cover_id:
             return None
 
+        start = time.perf_counter()
         try:
             cover_url = TIDAL_API.getCoverUrl(str(cover_id), str(width), str(height))
             if not cover_url:
@@ -912,12 +921,85 @@ class MainView(QWidget):
             logger_gui.debug(
                 f"Could not load cover art for '{cover_id}' ({width}x{height}): {cover_err}"
             )
+        finally:
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            if elapsed_ms >= 120.0:
+                logger_gui.warning(
+                    "SEARCH_UI_COVER_PERF_DIAG cover_id=%s size=%sx%s elapsed_ms=%.1f",
+                    cover_id,
+                    width,
+                    height,
+                    elapsed_ms,
+                )
         return None
 
     def _add_disabled_info_item(self, target_list: QListWidget, text: str) -> None:
         info_item = QListWidgetItem(text)
         info_item.setFlags(info_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         target_list.addItem(info_item)
+
+    def _queue_keyword_cover_load(
+        self,
+        target_list: QListWidget,
+        item: QListWidgetItem,
+        cover_id: Optional[str],
+        item_type: str,
+        item_id: str,
+        generation: int,
+    ) -> bool:
+        if not cover_id:
+            return False
+
+        request_key = TIDAL_API.getCoverUrl(str(cover_id), "320", "320") or str(cover_id)
+        cached = self.cover_cache.get(request_key)
+        if cached and not cached.isNull():
+            item.setIcon(QIcon(cached))
+            return True
+
+        # Drop stale requests from older keyword searches.
+        if generation != self._keyword_cover_generation:
+            return False
+
+        subscribers = self._keyword_cover_subscribers.setdefault(request_key, [])
+        subscribers.append((target_list, item, generation))
+        if len(subscribers) > 1:
+            return True
+
+        worker = CoverArtWorker(
+            url=str(cover_id),
+            cache=self.cover_cache,
+            type=item_type,
+            item_id=str(item_id),
+        )
+
+        def _on_ready(_signal_key: str, pixmap: QPixmap, req_key=request_key) -> None:
+            targets = self._keyword_cover_subscribers.pop(req_key, [])
+            self._keyword_cover_workers.pop(req_key, None)
+            for list_widget, target_item, target_generation in targets:
+                if target_generation != self._keyword_cover_generation:
+                    continue
+                if list_widget.row(target_item) < 0:
+                    continue
+                if not pixmap.isNull():
+                    target_item.setIcon(QIcon(pixmap))
+
+        def _on_error(_signal_key: str, _error: str, req_key=request_key) -> None:
+            self._keyword_cover_subscribers.pop(req_key, None)
+            self._keyword_cover_workers.pop(req_key, None)
+
+        worker.signals.cover_ready.connect(_on_ready)
+        worker.signals.error.connect(_on_error)
+
+        self._keyword_cover_workers[request_key] = worker
+
+        pool = QThreadPool.globalInstance()
+        if pool:
+            pool.start(worker)
+        else:
+            self._keyword_cover_subscribers.pop(request_key, None)
+            self._keyword_cover_workers.pop(request_key, None)
+
+        return True
 
     @pyqtSlot(str, list, list, list)
     def _on_keyword_search_ready(
@@ -927,7 +1009,13 @@ class MainView(QWidget):
         albums: list,
         artists: list,
     ) -> None:
-        _ = query
+        start = time.perf_counter()
+        self._keyword_cover_generation += 1
+        current_generation = self._keyword_cover_generation
+
+        # Invalidate any pending subscribers from older result sets.
+        self._keyword_cover_subscribers.clear()
+
         self.top_results_list.clear()
         self.albums_grid_list.clear()
 
@@ -936,6 +1024,7 @@ class MainView(QWidget):
         max_top_tracks = 6
         max_top_albums = 6
         max_top_artists = 6
+        cover_attempts = 0
 
         for track in tracks[:max_top_tracks]:
             track_title = getattr(track, "title", "Unknown Track")
@@ -949,9 +1038,16 @@ class MainView(QWidget):
 
             album_obj = getattr(track, "album", None)
             track_cover_id = getattr(album_obj, "cover", None) if album_obj else None
-            track_pixmap = self._get_cover_pixmap(track_cover_id, 64, 64)
-            if track_pixmap and not track_pixmap.isNull():
-                top_item.setIcon(QIcon(track_pixmap))
+            if track_cover_id:
+                cover_attempts += 1
+                self._queue_keyword_cover_load(
+                    self.top_results_list,
+                    top_item,
+                    track_cover_id,
+                    "Track",
+                    str(getattr(track, "id", "")),
+                    current_generation,
+                )
             self.top_results_list.addItem(top_item)
 
         for album in albums[:max_top_albums]:
@@ -967,9 +1063,16 @@ class MainView(QWidget):
             )
 
             album_cover_id = getattr(album, "cover", None)
-            album_pixmap = self._get_cover_pixmap(album_cover_id, 64, 64)
-            if album_pixmap and not album_pixmap.isNull():
-                top_item.setIcon(QIcon(album_pixmap))
+            if album_cover_id:
+                cover_attempts += 1
+                self._queue_keyword_cover_load(
+                    self.top_results_list,
+                    top_item,
+                    album_cover_id,
+                    "Album",
+                    str(getattr(album, "id", "")),
+                    current_generation,
+                )
             self.top_results_list.addItem(top_item)
 
         for artist in artists[:max_top_artists]:
@@ -982,9 +1085,16 @@ class MainView(QWidget):
             )
 
             artist_cover_id = getattr(artist, "picture", None)
-            artist_pixmap = self._get_cover_pixmap(artist_cover_id, 64, 64)
-            if artist_pixmap and not artist_pixmap.isNull():
-                top_item.setIcon(QIcon(artist_pixmap))
+            if artist_cover_id:
+                cover_attempts += 1
+                self._queue_keyword_cover_load(
+                    self.top_results_list,
+                    top_item,
+                    artist_cover_id,
+                    "Artist",
+                    str(getattr(artist, "id", "")),
+                    current_generation,
+                )
             self.top_results_list.addItem(top_item)
 
         if self.top_results_list.count() == 0:
@@ -1003,14 +1113,31 @@ class MainView(QWidget):
             album_item.setSizeHint(QSize(176, 220))
 
             album_cover_id = getattr(album, "cover", None)
-            album_pixmap = self._get_cover_pixmap(album_cover_id, 220, 220)
-            if album_pixmap and not album_pixmap.isNull():
-                album_item.setIcon(QIcon(album_pixmap))
+            if album_cover_id:
+                cover_attempts += 1
+                self._queue_keyword_cover_load(
+                    self.albums_grid_list,
+                    album_item,
+                    album_cover_id,
+                    "Album",
+                    str(getattr(album, "id", "")),
+                    current_generation,
+                )
 
             self.albums_grid_list.addItem(album_item)
 
         if self.albums_grid_list.count() == 0:
             self._add_disabled_info_item(self.albums_grid_list, "No albums found.")
+
+        logger_gui.warning(
+            "SEARCH_UI_PERF_DIAG query='%s' tracks=%s albums=%s artists=%s cover_attempts=%s total_ms=%.1f",
+            query,
+            len(tracks),
+            len(albums),
+            len(artists),
+            cover_attempts,
+            (time.perf_counter() - start) * 1000.0,
+        )
 
         self._set_search_results_page("top")
 
@@ -1049,7 +1176,6 @@ class MainView(QWidget):
     def _trigger_search(self, query: str):
         if query.startswith("http://") or query.startswith("https://"):
             self._reset_keyword_search_views()
-        self.search_handler.perform_search(query)
 
     @pyqtSlot(list, str, object)  # tracks_to_link_data, playlist_id, on_finish_callback
     def startLinkingWorker(self, tracks_to_link_data: list, playlist_id: Optional[str] = None, on_finish_callback: Optional[Callable] = None):
@@ -1122,6 +1248,15 @@ class MainView(QWidget):
         self.linking_gui_handler.onStopLinkingClicked()
         if self.task_queue_manager:
             self.task_queue_manager.stop_all_tasks()
+
+        if self.table_handler:
+            try:
+                self.table_handler.shutdown_background_workers(wait=False)
+            except Exception as ex:
+                logger_gui.debug(
+                    f"Failed to shut down table handler background workers cleanly: {ex}",
+                    exc_info=True,
+                )
 
         # 2. Specifically wait for the linking QThread to finish.
         # The download handler uses a ThreadPoolExecutor which is harder to wait for
