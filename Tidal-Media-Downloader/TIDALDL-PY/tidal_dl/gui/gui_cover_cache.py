@@ -260,8 +260,19 @@ class CoverArtWorker(QRunnable):
                     signal_key,
                 )
 
+                if self.type == "Artist" and not cover_sid_or_url:
+                    # Missing artist pictures are expected for some catalog entries.
+                    # Emit an empty pixmap so subscribers can clean up silently.
+                    self.signals.cover_ready.emit(signal_key, QPixmap())
+                    return
+
                 if cover_sid_or_url:
-                    image_data = TIDAL_API.getCoverData(str(cover_sid_or_url), "320", "320")
+                    image_data = TIDAL_API.getCoverData(
+                        str(cover_sid_or_url),
+                        "320",
+                        "320",
+                        suppress_logs=(self.type == "Artist"),
+                    )
 
             else: # For other types like Spotify
                 if self.url:
@@ -270,6 +281,10 @@ class CoverArtWorker(QRunnable):
                         image_data = response.content
 
             if not image_data:
+                if self.type == "Artist":
+                    # Empty artist image payloads are non-fatal and should stay silent.
+                    self.signals.cover_ready.emit(signal_key, QPixmap())
+                    return
                 logger.warning(
                     "COVER_DIAG_NO_IMAGE_DATA type=%s item_id=%s item_name=%s url=%s signal_key=%s",
                     self.type,

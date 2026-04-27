@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Optional, Any, cast
 from PyQt6 import QtWidgets
 from PyQt6.QtWidgets import QFileDialog
 
+from .. import apiKey
 from ..enums import Type
 from ..printf import Printf
 from ..settings import SETTINGS, TOKEN
@@ -83,7 +84,11 @@ def load_initial_settings(self: "SettingsPage"):
     try:
         # Account/API - Load API key index with fallback to 0 if not set
         current_api_index = getattr(SETTINGS, "apiKeyIndex", 0)
-        self.cmbApiKeyIndex.setCurrentIndex(current_api_index)
+        combo_index = self.cmbApiKeyIndex.findData(current_api_index)
+        if combo_index == -1:
+            combo_index = 0
+            SETTINGS.apiKeyIndex = 0
+        self.cmbApiKeyIndex.setCurrentIndex(combo_index)
         self.chk_tidal_start_collapsed.setChecked(bool(getattr(SETTINGS, "tidalStartCollapsed", False)))
 
         # Spotify API credentials - Essential for Spotify playlist import functionality
@@ -347,11 +352,16 @@ def save_settings(self: "SettingsPage"):
         old_spotify_client_id = getattr(SETTINGS, "spotifyClientId", "")
         old_spotify_client_secret = getattr(SETTINGS, "spotifyClientSecret", "")
 
+        old_api_key_index_raw = getattr(SETTINGS, "apiKeyIndex", 0)
+        old_api_key_index = old_api_key_index_raw if isinstance(old_api_key_index_raw, int) else 0
+
         # Read values from widgets and save to SETTINGS object
         # --- Account/API Settings ---
-        SETTINGS.apiKeyIndex = (
-            self.cmbApiKeyIndex.currentData()
-        )  # Get selected API profile index
+        selected_api_key_index = self.cmbApiKeyIndex.currentData()
+        if not isinstance(selected_api_key_index, int):
+            selected_api_key_index = 0
+        SETTINGS.apiKeyIndex = selected_api_key_index
+        TIDAL_API.apiKey = apiKey.getItem(selected_api_key_index)
         SETTINGS.tidalStartCollapsed = self.chk_tidal_start_collapsed.isChecked()
 
         # --- Spotify API Integration ---
@@ -427,9 +437,27 @@ def save_settings(self: "SettingsPage"):
             spotify_creds_changed = True
             logger.info("Spotify credentials updated in settings.")
 
+        api_profile_changed = selected_api_key_index != old_api_key_index
+        if api_profile_changed:
+            TOKEN.accessToken = None
+            TOKEN.refreshToken = None
+            TOKEN.userid = None
+            TOKEN.countryCode = None
+            TOKEN.expiresAfter = 0
+            TOKEN.apiKeyIndex = selected_api_key_index
+            TOKEN.save()
+            selected_profile = apiKey.getItem(selected_api_key_index)
+            logger.info(
+                "TIDAL API key profile changed to %s. Stored TIDAL token was cleared; re-login is required.",
+                selected_profile.get("platform", "Unknown"),
+            )
+
         # Show confirmation message to user
+        profile_message = ""
+        if api_profile_changed:
+            profile_message = "\n\nTIDAL API profile changed. Please log in again so the new profile is used."
         CustomQMessageBox.information(
-            self, "Settings Saved", "Settings have been saved and applied."
+            self, "Settings Saved", f"Settings have been saved and applied.{profile_message}"
         )
 
         # Emit signal to notify MainView to return to main menu
@@ -690,18 +718,37 @@ def login_with_token(self: "SettingsPage"):
         logger.info("Parsed structured token data from input.")
         
         # Update fields if they exist in the data
-        if 'accessToken' in token_data:
-            token_obj.accessToken = token_data['accessToken']
-        if 'refreshToken' in token_data:
-            token_obj.refreshToken = token_data['refreshToken']
-        if 'userid' in token_data:
-            token_obj.userid = token_data['userid']
-        if 'countryCode' in token_data:
-            token_obj.countryCode = token_data['countryCode']
-        if 'expiresAfter' in token_data:
-            token_obj.expiresAfter = token_data['expiresAfter']
-            
-        # Also check for camelCase vs lowercase variations if needed, but standard is camelCase
+        access_token = token_data.get('accessToken') or token_data.get('access_token')
+        refresh_token = token_data.get('refreshToken') or token_data.get('refresh_token')
+        user_id = token_data.get('userid') or token_data.get('userId') or token_data.get('user_id')
+        country_code = token_data.get('countryCode') or token_data.get('country_code')
+        expires_after = token_data.get('expiresAfter')
+
+        if expires_after is None:
+            created_at = token_data.get('created_at') or token_data.get('createdAt')
+            expires_in = token_data.get('expires_in') or token_data.get('expiresIn')
+            if created_at is not None and expires_in is not None:
+                try:
+                    expires_after = int(created_at) + int(expires_in)
+                except (TypeError, ValueError):
+                    expires_after = None
+            elif expires_in is not None:
+                try:
+                    import time
+                    expires_after = int(time.time()) + int(expires_in)
+                except (TypeError, ValueError):
+                    expires_after = None
+
+        if access_token:
+            token_obj.accessToken = access_token
+        if refresh_token:
+            token_obj.refreshToken = refresh_token
+        if user_id:
+            token_obj.userid = user_id
+        if country_code:
+            token_obj.countryCode = country_code
+        if expires_after is not None:
+            token_obj.expiresAfter = expires_after
     else:
         # Assume raw access token string
         logger.info("Treating input as raw access token.")
@@ -710,6 +757,16 @@ def login_with_token(self: "SettingsPage"):
         # We shouldn't necessarily clear the existing one unless we want to force a clean state.
         # But usually manual entry implies "use this specific credential".
         # Let's keep it simple: just set access token.
+
+    selected_api_key_index = self.cmbApiKeyIndex.currentData() if self.cmbApiKeyIndex else None
+    if not isinstance(selected_api_key_index, int):
+        selected_api_key_index = getattr(SETTINGS, "apiKeyIndex", 0)
+    if not isinstance(selected_api_key_index, int):
+        selected_api_key_index = 0
+    SETTINGS.apiKeyIndex = selected_api_key_index
+    TIDAL_API.apiKey = apiKey.getItem(selected_api_key_index)
+    token_obj.apiKeyIndex = selected_api_key_index
+    SETTINGS.save()
 
     # 3. Save to disk immediately to persist the manual entry
     TOKEN.save()

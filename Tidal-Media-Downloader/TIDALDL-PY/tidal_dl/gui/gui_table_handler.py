@@ -1258,6 +1258,9 @@ class TableHandler(QObject):
             return
         populate_start = time.perf_counter()
         table = self.table_widget
+        sorting_was_enabled = table.isSortingEnabled()
+        if sorting_was_enabled:
+            table.setSortingEnabled(False)
         table.clearRows()
         with self._quality_state_lock:
             self._quality_inflight_track_ids.clear()
@@ -1280,6 +1283,8 @@ class TableHandler(QObject):
             table.update()
             if self.download_handler:
                 self.download_handler._update_download_button_text()
+            if sorting_was_enabled:
+                table.setSortingEnabled(True)
             return
 
         persisted_links: Dict[str, Any] = {}
@@ -1297,238 +1302,267 @@ class TableHandler(QObject):
             cast(Optional[Union[Playlist, Album, Dict[str, Any]]], playlist_context_for_display)
         )
 
-        for index, item in enumerate(results_array):
-            rowData: Optional[List[str]] = None
-            item_metadata: Any = item
-            track_id_for_download_check: Optional[str] = None
+        table.setUpdatesEnabled(False)
+        try:
+            table.setRowCount(len(results_array))
+            for index, item in enumerate(results_array):
+                rowData: Optional[List[str]] = None
+                item_metadata: Any = item
+                track_id_for_download_check: Optional[str] = None
             
-            # Variables for indicator column (candidates)
-            has_candidates = False
-            candidates_list = []
-            linked_tidal_id = None
+                # Variables for indicator column (candidates)
+                has_candidates = False
+                candidates_list = []
+                linked_tidal_id = None
 
-            try:
-                if is_spotify_track_list:
-                    original_spotify_track_data = item.get("data", {})
-                    spotify_track_id = original_spotify_track_data.get("id")
-                    spotify_track_data_to_use = original_spotify_track_data
+                try:
+                    if is_spotify_track_list:
+                        original_spotify_track_data = item.get("data", {})
+                        spotify_track_id = original_spotify_track_data.get("id")
+                        spotify_track_data_to_use = original_spotify_track_data
 
-                    link_status_text = "Not Linked"
-                    link_status_data_for_title: Dict[str, Any] = {
-                        "type": "spotify_track",
-                        "link_status": "not_linked",
-                        "data": spotify_track_data_to_use,
-                    }
+                        link_status_text = "Not Linked"
+                        link_status_data_for_title: Dict[str, Any] = {
+                            "type": "spotify_track",
+                            "link_status": "not_linked",
+                            "data": spotify_track_data_to_use,
+                        }
 
-                    persisted_tracks_dict = persisted_links.get("tracks", {})
-                    if (
-                        spotify_track_id
-                        and spotify_track_id in persisted_tracks_dict
-                        and aigmodel is not None
-                    ):
-                        link_info = persisted_tracks_dict.get(spotify_track_id, {})
+                        persisted_tracks_dict = persisted_links.get("tracks", {})
+                        if (
+                            spotify_track_id
+                            and spotify_track_id in persisted_tracks_dict
+                            and aigmodel is not None
+                        ):
+                            link_info = persisted_tracks_dict.get(spotify_track_id, {})
 
-                        persisted_tidal_track_id_raw = link_info.get("tidal_track_id")
-                        if persisted_tidal_track_id_raw:
-                            linked_tidal_id = str(persisted_tidal_track_id_raw)
-                            track_id_for_download_check = linked_tidal_id
-                        
-                        # 1. Deserialize Tidal Track
-                        tidal_track_obj = None
-                        tdata = link_info.get("tidal_track_details")
-                        if tdata:
-                            try:
-                                tidal_track_obj = aigmodel.dictToModel(tdata, Track())
-                            except Exception:
-                                tidal_track_obj = None
-                        
-                        # 2. Retrieve Candidates and Score
-                        candidates_list = link_info.get("candidates") or []
-                        score = link_info.get("score")
-                        
-                        # 3. Determine Status
-                        derived_status = "not_linked"
-                        
-                        if tidal_track_obj:
-                            linked_tidal_id = str(tidal_track_obj.id)
-                            track_id_for_download_check = linked_tidal_id
-                            
-                            if score is not None and score <= 1:
-                                link_status_text = f"Linked (Certainty score: {score}): {tidal_track_obj.id}"
-                                derived_status = "auto_linked"
-                            elif score is not None and score > 1:
-                                if candidates_list:
-                                    link_status_text = f"Manual linking required (Certainty score: {score}): {tidal_track_obj.id}"
-                                    derived_status = "manual_review_needed"
-                                    has_candidates = True
+                            persisted_tidal_track_id_raw = link_info.get("tidal_track_id")
+                            if persisted_tidal_track_id_raw:
+                                linked_tidal_id = str(persisted_tidal_track_id_raw)
+                                track_id_for_download_check = linked_tidal_id
+
+                            # 1. Deserialize Tidal Track
+                            tidal_track_obj = None
+                            tdata = link_info.get("tidal_track_details")
+                            if tdata:
+                                try:
+                                    tidal_track_obj = aigmodel.dictToModel(tdata, Track())
+                                except Exception:
+                                    tidal_track_obj = None
+
+                            # 2. Retrieve Candidates and Score
+                            candidates_list = link_info.get("candidates") or []
+                            score = link_info.get("score")
+
+                            # 3. Determine Status
+                            derived_status = "not_linked"
+
+                            if tidal_track_obj:
+                                linked_tidal_id = str(tidal_track_obj.id)
+                                track_id_for_download_check = linked_tidal_id
+
+                                if score is not None and score <= 1:
+                                    link_status_text = f"Linked (Certainty score: {score}): {tidal_track_obj.id}"
+                                    derived_status = "auto_linked"
+                                elif score is not None and score > 1:
+                                    if candidates_list:
+                                        link_status_text = f"Manual linking required (Certainty score: {score}): {tidal_track_obj.id}"
+                                        derived_status = "manual_review_needed"
+                                        has_candidates = True
+                                    else:
+                                        link_status_text = f"Linked (Uncertain, Score: {score}): {tidal_track_obj.id}"
+                                        derived_status = "found_uncertain"
                                 else:
-                                    link_status_text = f"Linked (Uncertain, Score: {score}): {tidal_track_obj.id}"
-                                    derived_status = "found_uncertain"
+                                    # Fallback if score missing but track exists
+                                    link_status_text = f"Linked: {tidal_track_obj.id}"
+                                    derived_status = "cached_linked"
+
+                            elif candidates_list:
+                                # No track selected, but candidates exist
+                                link_status_text = "Manual linking required (Candidates available)"
+                                derived_status = "candidates_only"
+                                has_candidates = True
+
+                            # 4. Update Metadata
+                            link_status_data_for_title.update(
+                                {
+                                    "link_status": derived_status,
+                                    "tidal_track_id": linked_tidal_id,
+                                    "tidal_track": tidal_track_obj,
+                                    "score": score,
+                                    "candidates": candidates_list,
+                                }
+                            )
+
+                        artists_str = ", ".join(
+                            spotify_track_data_to_use.get("artists", [])
+                        )
+                        album_name = spotify_track_data_to_use.get("album", "N/A")
+                        duration_str = format_duration_ms(
+                            spotify_track_data_to_use.get("duration_ms")
+                        )
+                        rowData = [
+                            str(index + 1),
+                            spotify_track_data_to_use.get("name", "N/A"),
+                            artists_str,
+                            album_name,
+                            duration_str,
+                            (
+                                self._get_cached_quality_threadsafe(linked_tidal_id)
+                                if linked_tidal_id
+                                else "-"
+                            )
+                            or (QUALITY_PLACEHOLDER_TEXT if linked_tidal_id else "-"),
+                            link_status_text,
+                        ]
+                        item_metadata = link_status_data_for_title
+
+                    elif isinstance(item, Track):
+                        track_id_for_download_check = str(item.id)
+                        quality_string = (
+                            self._get_cached_quality_threadsafe(
+                                track_id_for_download_check
+                            )
+                            or QUALITY_PLACEHOLDER_TEXT
+                        )
+                        album_title = item.album.title if item.album else "N/A"
+                        artists = (
+                            item.artists
+                            if isinstance(item.artists, list)
+                            else [item.artist]
+                        )
+                        rowData = [
+                            str(index + 1),
+                            str(item.title),
+                            TIDAL_API.getArtistsName(artists),
+                            str(album_title),
+                            Printf.formatDuration(item.duration),
+                            str(quality_string),
+                            "-",
+                        ]
+                        item_metadata = item
+
+                    if rowData:
+                        table.setRowData(
+                            index,
+                            rowData,
+                            track=item_metadata,
+                            apply_row_style=False,
+                        )
+                        
+                        # Set Indicator Data (Column 0) for Candidates
+                        if has_candidates:
+                            indicator_item = table.item(index, 0)
+                            if indicator_item:
+                                indicator_data = {
+                                    "has_candidates": True,
+                                    "expanded": False,
+                                    "candidate_count": len(candidates_list),
+                                    "candidates_list": candidates_list,
+                                    "linked_tidal_track_id": linked_tidal_id,
+                                }
+                                indicator_item.setData(QtCore.Qt.ItemDataRole.UserRole, indicator_data)
+                                indicator_item.setText(f"+ ({len(candidates_list)})")
+                        
+                        # Update row appearance (colors) based on status
+                        table._update_row_appearance_for_row(index)
+
+                        status_col_idx = self.column_indices.get("Status")
+                        if status_col_idx is not None:
+                            status_item = table.item(index, status_col_idx)
+                            if not status_item:
+                                status_item = QTableWidgetItem()
+                                table.setItem(index, status_col_idx, status_item)
+
+                            has_active_state = bool(
+                                track_id_for_download_check
+                                and track_id_for_download_check in self.download_handler.active_downloads
+                            )
+
+                            if has_active_state:
+                                download_state = self.download_handler.active_downloads[
+                                    cast(str, track_id_for_download_check)
+                                ]
+                                status = download_state.get("status", "unknown")
+                                progress = download_state.get("progress", 0)
+
+                                if status == "pending":
+                                    status_item.setText("Pending for download")
+                                    status_item.setToolTip(download_state.get("tooltip", ""))
+                                elif status == "downloading":
+                                    self._set_progress_bar_widget(index, status_col_idx, int(progress))
+                                elif status == "completed":
+                                    completed_quality = self._normalize_completed_quality_text(
+                                        cast(Optional[str], download_state.get("completed_quality"))
+                                        or cast(Optional[str], download_state.get("requested_quality"))
+                                    )
+                                    if not completed_quality:
+                                        track_for_completion = self._extract_tidal_track_from_item_data(item_metadata)
+                                        if track_for_completion:
+                                            self._enqueue_completed_status_resolution(
+                                                track_for_completion,
+                                                cast(
+                                                    Optional[Union[Playlist, Album, Dict[str, Any]]],
+                                                    download_state.get("playlist_context", playlist_context_for_display),
+                                                ),
+                                                row=index,
+                                                reason="populate_table_active_completed_fallback",
+                                            )
+                                    status_item.setText(self._format_completed_status_text(completed_quality))
+                                    status_item.setToolTip(completed_quality)
+                                elif status == "failed":
+                                    status_item.setText("Failed")
+                                    status_item.setToolTip(download_state.get("error", ""))
                             else:
-                                # Fallback if score missing but track exists
-                                link_status_text = f"Linked: {tidal_track_obj.id}"
-                                derived_status = "cached_linked"
-                        
-                        elif candidates_list:
-                            # No track selected, but candidates exist
-                            link_status_text = "Manual linking required (Candidates available)"
-                            derived_status = "candidates_only"
-                            has_candidates = True
-                        
-                        # 4. Update Metadata
-                        link_status_data_for_title.update(
-                            {
-                                "link_status": derived_status,
-                                "tidal_track_id": linked_tidal_id,
-                                "tidal_track": tidal_track_obj,
-                                "score": score,
-                                "candidates": candidates_list
-                            }
-                        )
+                                track_for_completion = self._extract_tidal_track_from_item_data(item_metadata)
+                                if track_for_completion:
+                                    self._enqueue_completed_status_resolution(
+                                        track_for_completion,
+                                        cast(Optional[Union[Playlist, Album, Dict[str, Any]]], playlist_context_for_display),
+                                        row=index,
+                                        reason="populate_table_idle_row",
+                                    )
 
-                    artists_str = ", ".join(
-                        spotify_track_data_to_use.get("artists", [])
+                except Exception as e:
+                    logger.error(
+                        f"Error processing item at index {index}: {e}", exc_info=True
                     )
-                    album_name = spotify_track_data_to_use.get("album", "N/A")
-                    duration_str = format_duration_ms(
-                        spotify_track_data_to_use.get("duration_ms")
+                    error_row_data = [str(index + 1), f"Error: {e}"] + [
+                        ""
+                    ] * max(0, table.columnCount() - 2)
+                    table.setRowData(
+                        index,
+                        error_row_data,
+                        track=None,
+                        apply_row_style=False,
                     )
-                    rowData = [
-                        str(index + 1),
-                        spotify_track_data_to_use.get("name", "N/A"),
-                        artists_str,
-                        album_name,
-                        duration_str,
-                        (
-                            self._get_cached_quality_threadsafe(linked_tidal_id)
-                            if linked_tidal_id
-                            else "-"
-                        )
-                        or (QUALITY_PLACEHOLDER_TEXT if linked_tidal_id else "-"),
-                        link_status_text,
-                    ]
-                    item_metadata = link_status_data_for_title
 
-                elif isinstance(item, Track):
-                    track_id_for_download_check = str(item.id)
-                    quality_string = (
-                        self._get_cached_quality_threadsafe(
-                            track_id_for_download_check
-                        )
-                        or QUALITY_PLACEHOLDER_TEXT
-                    )
-                    album_title = item.album.title if item.album else "N/A"
-                    artists = (
-                        item.artists
-                        if isinstance(item.artists, list)
-                        else [item.artist]
-                    )
-                    rowData = [
-                        str(index + 1),
-                        str(item.title),
-                        TIDAL_API.getArtistsName(artists),
-                        str(album_title),
-                        Printf.formatDuration(item.duration),
-                        str(quality_string),
-                        "-",
-                    ]
-                    item_metadata = item
-
-                if rowData:
-                    table.addRow(rowData, item_metadata)
-                    
-                    # Set Indicator Data (Column 0) for Candidates
-                    if has_candidates:
-                        indicator_item = table.item(index, 0)
-                        if indicator_item:
-                            indicator_data = {
-                                "has_candidates": True,
-                                "expanded": False,
-                                "candidate_count": len(candidates_list),
-                                "candidates_list": candidates_list,
-                                "linked_tidal_track_id": linked_tidal_id,
-                            }
-                            indicator_item.setData(QtCore.Qt.ItemDataRole.UserRole, indicator_data)
-                            indicator_item.setText(f"+ ({len(candidates_list)})")
-                    
-                    # Update row appearance (colors) based on status
-                    table._update_row_appearance_for_row(index)
-
-                    status_col_idx = self.column_indices.get("Status")
-                    if status_col_idx is not None:
-                        status_item = table.item(index, status_col_idx)
-                        if not status_item:
-                            status_item = QTableWidgetItem()
-                            table.setItem(index, status_col_idx, status_item)
-
-                        has_active_state = bool(
-                            track_id_for_download_check
-                            and track_id_for_download_check in self.download_handler.active_downloads
-                        )
-
-                        if has_active_state:
-                            download_state = self.download_handler.active_downloads[
-                                cast(str, track_id_for_download_check)
-                            ]
-                            status = download_state.get("status", "unknown")
-                            progress = download_state.get("progress", 0)
-
-                            if status == "pending":
-                                status_item.setText("Pending for download")
-                                status_item.setToolTip(download_state.get("tooltip", ""))
-                            elif status == "downloading":
-                                self._set_progress_bar_widget(index, status_col_idx, int(progress))
-                            elif status == "completed":
-                                completed_quality = self._normalize_completed_quality_text(
-                                    cast(Optional[str], download_state.get("completed_quality"))
-                                    or cast(Optional[str], download_state.get("requested_quality"))
-                                )
-                                if not completed_quality:
-                                    track_for_completion = self._extract_tidal_track_from_item_data(item_metadata)
-                                    if track_for_completion:
-                                        self._enqueue_completed_status_resolution(
-                                            track_for_completion,
-                                            cast(
-                                                Optional[Union[Playlist, Album, Dict[str, Any]]],
-                                                download_state.get("playlist_context", playlist_context_for_display),
-                                            ),
-                                            row=index,
-                                            reason="populate_table_active_completed_fallback",
-                                        )
-                                status_item.setText(self._format_completed_status_text(completed_quality))
-                                status_item.setToolTip(completed_quality)
-                            elif status == "failed":
-                                status_item.setText("Failed")
-                                status_item.setToolTip(download_state.get("error", ""))
-                        else:
-                            track_for_completion = self._extract_tidal_track_from_item_data(item_metadata)
-                            if track_for_completion:
-                                self._enqueue_completed_status_resolution(
-                                    track_for_completion,
-                                    cast(Optional[Union[Playlist, Album, Dict[str, Any]]], playlist_context_for_display),
-                                    row=index,
-                                    reason="populate_table_idle_row",
-                                )
-
-            except Exception as e:
-                logger.error(
-                    f"Error processing item at index {index}: {e}", exc_info=True
+            table.adjustColumnWidths()
+            table.update()
+            self._schedule_visible_quality_resolution()
+            elapsed_ms = (time.perf_counter() - populate_start) * 1000.0
+            logger.info(
+                "Table populated with %s items in %.1fms (spotify=%s, playlist_id=%s)",
+                table.rowCount(),
+                elapsed_ms,
+                is_spotify_track_list,
+                playlist_id,
+            )
+            if elapsed_ms >= 800.0:
+                logger.warning(
+                    "[DIAGNOSIS] Slow _populate_table_generic detected | elapsed_ms=%.1f rows=%s spotify=%s playlist_id=%s sorting_was_enabled=%s",
+                    elapsed_ms,
+                    table.rowCount(),
+                    is_spotify_track_list,
+                    playlist_id,
+                    sorting_was_enabled,
                 )
-                table.addRow([str(index + 1), f"Error: {e}"], None)
-
-        table.adjustColumnWidths()
-        table.update()
-        self._schedule_visible_quality_resolution()
-        elapsed_ms = (time.perf_counter() - populate_start) * 1000.0
-        logger.info(
-            "Table populated with %s items in %.1fms (spotify=%s, playlist_id=%s)",
-            table.rowCount(),
-            elapsed_ms,
-            is_spotify_track_list,
-            playlist_id,
-        )
-        if self.download_handler:
-            self.download_handler._update_download_button_text()
+            if self.download_handler:
+                self.download_handler._update_download_button_text()
+        finally:
+            table.setUpdatesEnabled(True)
+            if sorting_was_enabled:
+                table.setSortingEnabled(True)
 
     def handle_table_context_menu(self, pos: QPoint):
         if not self.table_widget:

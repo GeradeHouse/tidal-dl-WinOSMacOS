@@ -12,7 +12,7 @@
 """
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 import logging
 
 from PyQt6 import QtWidgets
@@ -34,6 +34,18 @@ from PyQt6.QtWidgets import (
 
 from tidal_dl.gui.gui_settings_widgets import CollapsibleSection
 from tidal_dl.apiKey import getItems
+
+
+ATMOS_TV_PLATFORM_NAME = "Atmos TV (Tidal-Web-Downloader)"
+
+
+def _api_key_profile_label(entry: dict[str, Any]) -> str:
+    platform = str(entry.get("platform", "Unknown"))
+    formats = str(entry.get("formats", "")).strip()
+    label = f"{platform}: {formats}" if formats else platform
+    if platform == ATMOS_TV_PLATFORM_NAME:
+        label = f"{label}  [Recommended for FLAC/CD]"
+    return label
 
 if TYPE_CHECKING:
     from tidal_dl.gui.gui_settings import SettingsPage
@@ -134,6 +146,8 @@ def initialize_controls(self: "SettingsPage"):
 
     # API Controls
     self.cmbApiKeyIndex = QtWidgets.QComboBox()
+    self.cmbApiKeyIndex.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents)
+    self.cmbApiKeyIndex.setMinimumContentsLength(48)
 
     # --- NEW: Manual Token Controls ---
     self.accessTokenInput = QLineEdit()
@@ -219,7 +233,9 @@ def create_tidal_section(self: "SettingsPage"):
 
     apiKeyItems = getItems()
     for idx, entry in enumerate(apiKeyItems):
-        self.cmbApiKeyIndex.addItem(f"{entry['platform']}: {entry['formats']}", idx)
+        label = _api_key_profile_label(entry)
+        self.cmbApiKeyIndex.addItem(label, idx)
+        self.cmbApiKeyIndex.setItemData(idx, label, Qt.ItemDataRole.ToolTipRole)
     account_layout.addRow("API Key Profile:", self.cmbApiKeyIndex)
     account_layout.addRow("Start with Tidal playlists collapsed:", self.chk_tidal_start_collapsed)
 

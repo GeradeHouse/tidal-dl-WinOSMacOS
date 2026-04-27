@@ -10,24 +10,35 @@
 @Desc    :
 """
 import json
-import requests
 import base64
 
-# The new client_id and client_secret from the provided code
-CLIENT_ID = base64.b64decode("ZlgySnhkbW50WldLMGl4VA==").decode("iso-8859-1")
-CLIENT_SECRET = base64.b64decode(
+# Atmos TV key reported by Tidal-Web-Downloader users as supporting currently working playback.
+ATMOS_TV_CLIENT_ID = "4N3n6Q1x95LL5K7p"
+ATMOS_TV_CLIENT_SECRET = "oKOXfJW371cX6xaZ0PyhgGNBdNLlBZd4AKKYougMjik="
+
+# Existing streamrip/desktop key retained as a selectable fallback profile.
+STREAMRIP_CLIENT_ID = base64.b64decode("ZlgySnhkbW50WldLMGl4VA==").decode("iso-8859-1")
+STREAMRIP_CLIENT_SECRET = base64.b64decode(
     "MU5tNUFmREFqeHJnSkZKYktOV0xlQXlLR1ZHbUlOdVhQUExIVlhBdnhBZz0=",
 ).decode("iso-8859-1")
 
 __KEYS_JSON__ = f"""
 {{
-    "version": "2025.10.25",
+    "version": "2026.04.26",
     "keys": [
         {{
+            "platform": "Atmos TV (Tidal-Web-Downloader)",
+            "formats": "Normal/High/HiFi/Atmos",
+            "clientId": "{ATMOS_TV_CLIENT_ID}",
+            "clientSecret": "{ATMOS_TV_CLIENT_SECRET}",
+            "valid": "True",
+            "from": "Tidal-Web-Downloader forum/source reference"
+        }},
+        {{
             "platform": "Desktop (streamrip)",
-            "formats": "Normal/High/HiFi/Master",
-            "clientId": "{CLIENT_ID}",
-            "clientSecret": "{CLIENT_SECRET}",
+            "formats": "Low/High/HiFi/Max",
+            "clientId": "{STREAMRIP_CLIENT_ID}",
+            "clientSecret": "{STREAMRIP_CLIENT_SECRET}",
             "valid": "True",
             "from": "streamrip project (https://github.com/omnunum/streamrip/)"
         }}

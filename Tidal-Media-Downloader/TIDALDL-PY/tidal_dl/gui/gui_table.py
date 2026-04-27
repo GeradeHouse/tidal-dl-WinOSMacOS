@@ -35,6 +35,7 @@ Usage example:
 # Standard library imports
 import os
 import logging
+import time
 from typing import List, Dict, Optional, Any
 
 # Third-party imports
@@ -177,6 +178,9 @@ class SplitterTable(QtWidgets.QTableWidget):
         self._mousePressPos = None
         self._mousePressRow = None
         self._dragging = False
+        self._cached_header_signature: tuple[str, ...] = tuple()
+        self._cached_length_col_index: int = -1
+        self._last_adjust_signature: tuple[str, ...] = tuple()
         self.drag_threshold = 5  # pixels
 
         # State for tracking column resize drag (using signals now)
@@ -205,29 +209,41 @@ class SplitterTable(QtWidgets.QTableWidget):
         self.selectedRows.clear()
         self.lastClickedRow = None
 
-    def addRow(self, row_data, track=None):
-        """
-        Adds a new row to the table and populates each column with a QTableWidgetItem.
-        Stores Track object in the title column's user data.
-        """
-        row = self.rowCount()
-        self.insertRow(row)
-        # Determine column index for 'Length' for alignment
-        length_col_index = -1
-        try:
-            # Find 'Length' column index by iterating through headers
-            for i in range(self.columnCount()):
-                header_item = self.horizontalHeaderItem(i)
-                if header_item and header_item.text() == "Length":
-                    length_col_index = i
+    def _get_length_column_index(self) -> int:
+        """Resolve and cache the current 'Length' column index based on header labels."""
+        header_signature = tuple(
+            self.horizontalHeaderItem(i).text() if self.horizontalHeaderItem(i) else ""
+            for i in range(self.columnCount())
+        )
+        if header_signature != self._cached_header_signature:
+            self._cached_header_signature = header_signature
+            self._cached_length_col_index = -1
+            for i, header_text in enumerate(header_signature):
+                if header_text == "Length":
+                    self._cached_length_col_index = i
                     break
-        except Exception as e:
-            logger.warning(
-                f"[SplitterTable.addRow] Error finding 'Length' column index: {e}"
-            )
+        return self._cached_length_col_index
 
-        for col_index, data in enumerate(row_data):
-            item = QtWidgets.QTableWidgetItem(str(data))
+    def setRowData(
+        self,
+        row: int,
+        row_data,
+        track=None,
+        apply_row_style: bool = True,
+    ) -> None:
+        """Populate an existing row index with table data."""
+        if row < 0:
+            return
+
+        if row >= self.rowCount():
+            self.setRowCount(row + 1)
+
+        length_col_index = self._get_length_column_index()
+        total_cols = self.columnCount()
+
+        for col_index in range(total_cols):
+            cell_text = str(row_data[col_index]) if col_index < len(row_data) else ""
+            item = QtWidgets.QTableWidgetItem(cell_text)
 
             # Right-align '#' column (index 0)
             if col_index == 0:
@@ -237,7 +253,7 @@ class SplitterTable(QtWidgets.QTableWidget):
 
             # Set tooltip for Quality column
             if col_index == 5:  # Quality column index
-                item.setToolTip(str(data))
+                item.setToolTip(cell_text)
 
             # Center align 'Length' column
             if col_index == length_col_index:
@@ -258,8 +274,17 @@ class SplitterTable(QtWidgets.QTableWidget):
                 QtCore.Qt.ItemFlag.ItemIsSelectable | QtCore.Qt.ItemFlag.ItemIsEnabled
             )
             self.setItem(row, col_index, item)
-        # Update the visual appearance of the new row.
-        self._update_row_appearance_for_row(row)
+
+        if apply_row_style:
+            self._update_row_appearance_for_row(row)
+
+    def addRow(self, row_data, track=None):
+        """
+        Adds a new row to the table and populates each column with a QTableWidgetItem.
+        Stores Track object in the title column's user data.
+        """
+        row = self.rowCount()
+        self.setRowData(row, row_data, track=track, apply_row_style=True)
         # Do not adjust columns here to preserve any user resizing on columns 0, 3, and 4.
         # The auto–resize behavior for columns 1 and 2 is handled during widget initialization and resize events.
 
@@ -677,12 +702,23 @@ class SplitterTable(QtWidgets.QTableWidget):
         )
         # --- END LOGGING ---
         logger.debug("[SplitterTable] Adjusting column widths...")
+        adjust_start = time.perf_counter()
         try:
             header = self.horizontalHeader()
             if not header:
                 return  # Add check
             num_cols = self.columnCount()
             if num_cols <= 0:
+                return
+
+            header_signature = tuple(
+                self.horizontalHeaderItem(i).text() if self.horizontalHeaderItem(i) else ""
+                for i in range(num_cols)
+            )
+            if header_signature == self._last_adjust_signature:
+                logger.debug(
+                    "[SplitterTable] Skipping adjustColumnWidths; column signature unchanged."
+                )
                 return
 
             # 1. Ensure all columns are interactive
@@ -751,11 +787,22 @@ class SplitterTable(QtWidgets.QTableWidget):
             # Other columns ('Length', 'Quality', 'Link Status') will size interactively.
             # The last column will stretch due to stretchLastSection=True.
 
+            self._last_adjust_signature = header_signature
+
             # --- ADD LOGGING AT END ---
-            final_widths = [self.columnWidth(i) for i in range(self.columnCount())]
-            logger.debug(
-                f"[SplitterTable adjustColumnWidths] FINISHED. Final widths: {final_widths}"
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                final_widths = [self.columnWidth(i) for i in range(self.columnCount())]
+                logger.debug(
+                    f"[SplitterTable adjustColumnWidths] FINISHED. Final widths: {final_widths}"
+                )
+            adjust_elapsed_ms = (time.perf_counter() - adjust_start) * 1000.0
+            if adjust_elapsed_ms >= 120.0:
+                logger.warning(
+                    "[DIAGNOSIS] Slow adjustColumnWidths detected | elapsed_ms=%.1f row_count=%s col_count=%s",
+                    adjust_elapsed_ms,
+                    self.rowCount(),
+                    self.columnCount(),
+                )
             # --- END LOGGING ---
         except Exception as e:
             logger.error(

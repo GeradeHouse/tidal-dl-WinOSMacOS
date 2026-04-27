@@ -51,12 +51,23 @@ def initialize_and_login():
     SETTINGS.read(getSettingsFilePath())
     TOKEN.read(getTokenPath())
     
+    all_keys = apiKey.getItems()
+
     # Prioritize the API key index stored in the token file.
-    if TOKEN.apiKeyIndex is not None:
-        logger.debug(f"Found apiKeyIndex '{TOKEN.apiKeyIndex}' in token file. Prioritizing it.")
-        SETTINGS.apiKeyIndex = TOKEN.apiKeyIndex
+    token_api_key_index = TOKEN.apiKeyIndex if isinstance(TOKEN.apiKeyIndex, int) else None
+    if token_api_key_index is not None:
+        logger.debug(f"Found apiKeyIndex '{token_api_key_index}' in token file. Prioritizing it.")
+        SETTINGS.apiKeyIndex = token_api_key_index
     else:
         logger.debug("No apiKeyIndex in token file. Using index from settings.json.")
+
+    if not isinstance(SETTINGS.apiKeyIndex, int) or not 0 <= SETTINGS.apiKeyIndex < len(all_keys):
+        logger.warning(
+            "Configured TIDAL API key index %r is invalid for %s available profiles. Resetting to 0.",
+            SETTINGS.apiKeyIndex,
+            len(all_keys),
+        )
+        SETTINGS.apiKeyIndex = 0
 
     logger.debug(f"Initial SETTINGS.apiKeyIndex: {SETTINGS.apiKeyIndex}")
     
@@ -94,7 +105,7 @@ def saveToken():
         if TIDAL_API.key.expiresIn:
             TOKEN.expiresAfter = int(time.time()) + int(TIDAL_API.key.expiresIn)
             
-        TOKEN.apiKeyIndex = SETTINGS.apiKeyIndex
+        TOKEN.apiKeyIndex = SETTINGS.apiKeyIndex if isinstance(SETTINGS.apiKeyIndex, int) else 0
         TOKEN.save()
         logger.info("TIDAL token data saved successfully.")
     except Exception as e:
@@ -163,9 +174,19 @@ def getLoginUrl():
     It iterates through all valid API keys until one succeeds.
     """
     all_keys = apiKey.getItems()
+    if not all_keys:
+        raise RuntimeError("No TIDAL API key profiles are available.")
     
     # Start with the currently configured index to try it first.
-    start_index = SETTINGS.apiKeyIndex
+    start_index = SETTINGS.apiKeyIndex if isinstance(SETTINGS.apiKeyIndex, int) else 0
+    if not 0 <= start_index < len(all_keys):
+        logger.warning(
+            "Configured TIDAL API key index %r is invalid for %s available profiles. Starting with index 0.",
+            SETTINGS.apiKeyIndex,
+            len(all_keys),
+        )
+        start_index = 0
+        SETTINGS.apiKeyIndex = 0
     
     # Create a reordered list of indices to try, starting with the configured one, then wrapping around.
     ordered_indices = list(range(start_index, len(all_keys))) + list(range(0, start_index))

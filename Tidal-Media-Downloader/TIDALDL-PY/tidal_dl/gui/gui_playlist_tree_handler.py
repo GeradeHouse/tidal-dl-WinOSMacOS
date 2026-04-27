@@ -1141,11 +1141,11 @@ class PlaylistTreeHandler(QObject):
                             )
 
                         dlQualities = [
-                            ("M4a (Low - 96k)", AudioQuality.LOW),
-                            ("M4a (High - 320k)", AudioQuality.HIGH),
+                            ("AAC (Low)", AudioQuality.LOW),
+                            ("FLAC (High / CD Standard)", AudioQuality.HIGH),
                             ("MP3 (High - 320k)", AudioQuality.MP3),
                             ("FLAC (Lossless CD)", AudioQuality.LOSSLESS),
-                            ("FLAC (Hi-Res)", AudioQuality.HI_RES_LOSSLESS),
+                            ("FLAC (Max / HiRes)", AudioQuality.HI_RES_LOSSLESS),
                             ("Highest Available Quality", AudioQuality.HIGHEST),
                         ]
                         for text, quality_enum in dlQualities:
@@ -1218,11 +1218,11 @@ class PlaylistTreeHandler(QObject):
                         )
 
                     dlQualities = [
-                        ("M4a (Low - 96k)", AudioQuality.LOW),
-                        ("M4a (High - 320k)", AudioQuality.HIGH),
+                        ("AAC (Low)", AudioQuality.LOW),
+                        ("FLAC (High / CD Standard)", AudioQuality.HIGH),
                         ("MP3 (High - 320k)", AudioQuality.MP3),
                         ("FLAC (Lossless CD)", AudioQuality.LOSSLESS),
-                        ("FLAC (Hi-Res)", AudioQuality.HI_RES_LOSSLESS),
+                        ("FLAC (Max / HiRes)", AudioQuality.HI_RES_LOSSLESS),
                         ("Highest Available Quality", AudioQuality.HIGHEST),
                     ]
                     for text, quality_enum in dlQualities:

@@ -147,7 +147,7 @@ class Printf(object):
         final_quality = (
             Printf.map_quality_enum(audio_quality_attr)
             if not hires_detected
-            else "FLAC – High Resolution (24-bit, 96 kHz)"
+            else Printf.map_quality_enum(AudioQuality.HI_RES_LOSSLESS)
         )
 
         # logger.debug(f"Final quality decision based on metadata: {'HIRES' if hires_detected else 'Standard'} -> {final_quality}")
@@ -160,10 +160,10 @@ class Printf(object):
     def map_quality_enum(q):
         """Map AudioQuality enum to string"""
         quality_map = {
-            AudioQuality.LOW: "M4a - AAC – High Efficiency (96 kbps, 44.1 kHz)",
-            AudioQuality.HIGH: "M4a - AAC – Full Bandwidth (320 kbps, 44.1 kHz)",
+            AudioQuality.LOW: "AAC – Low (up to 320 kbps)",
+            AudioQuality.HIGH: "FLAC – High (16-bit, 44.1 kHz)",
             AudioQuality.LOSSLESS: "FLAC – CD Standard (16-bit, 44.1 kHz)",
-            AudioQuality.HI_RES_LOSSLESS: "FLAC – High Resolution (24-bit, 96 kHz)",
+            AudioQuality.HI_RES_LOSSLESS: "FLAC – Max / HiRes (up to 24-bit, 192 kHz)",
             AudioQuality.HIGHEST: "Highest available",
             AudioQuality.MP3: "MP3 - Constant Bitrate (320 kbps, 44.1 kHz)",
         }
@@ -338,9 +338,10 @@ class Printf(object):
             # Use map_quality_enum for the stream quality attribute
             retrieved_quality_str = Printf.map_quality_enum(stream.soundQuality)
             tb.add_row(["Get-Q", retrieved_quality_str])
-            # Compare the *retrieved* quality string to determine codec display
-            if retrieved_quality_str == "FLAC – High Resolution (24-bit, 96 kHz)":
-                tb.add_row(["Get-Codec", "flac"])  # Assuming HI_RES_LOSELESS is always FLAC
+            stream_quality_name = str(stream.soundQuality).upper()
+            # Treat TIDAL Max / HiRes streams as FLAC even when the container is MP4/DASH.
+            if stream_quality_name in {"HI_RES", "HI_RES_LOSSLESS"}:
+                tb.add_row(["Get-Codec", "flac"])
             else:
                 tb.add_row(["Get-Codec", str(stream.codec)])
         print(tb)

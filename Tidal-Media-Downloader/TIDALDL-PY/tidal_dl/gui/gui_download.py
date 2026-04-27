@@ -372,11 +372,11 @@ class DownloadHandler(QObject):
             return
 
         dlQualities = [
-            ("M4a (High Efficiency)", AudioQuality.LOW),
-            ("M4a (Full Bandwidth)", AudioQuality.HIGH),
+            ("AAC (Low)", AudioQuality.LOW),
+            ("FLAC (High / CD Standard)", AudioQuality.HIGH),
             ("MP3 (Constant Bitrate)", AudioQuality.MP3),
             ("FLAC (CD Standard)", AudioQuality.LOSSLESS),
-            ("FLAC (High Resolution)", AudioQuality.HI_RES_LOSSLESS),
+            ("FLAC (Max / HiRes)", AudioQuality.HI_RES_LOSSLESS),
             ("Highest Available", AudioQuality.HIGHEST),
         ]
 

@@ -869,8 +869,20 @@ def downloadTrack(
 
         if downloadQuality:
             quality_map = {
-                "low": AudioQuality.LOW, "high": AudioQuality.HIGH, "mp3": AudioQuality.MP3,
-                "lossless": AudioQuality.LOSSLESS, "hi_res_lossless": AudioQuality.HI_RES_LOSSLESS,
+                "aac_low": AudioQuality.LOW,
+                "low": AudioQuality.LOW,
+                "high_flac": AudioQuality.HIGH,
+                "flac_high": AudioQuality.HIGH,
+                "high": AudioQuality.HIGH,
+                "mp3": AudioQuality.MP3,
+                "cd_flac": AudioQuality.LOSSLESS,
+                "flac_cd": AudioQuality.LOSSLESS,
+                "lossless": AudioQuality.LOSSLESS,
+                "max_flac": AudioQuality.HI_RES_LOSSLESS,
+                "flac_max": AudioQuality.HI_RES_LOSSLESS,
+                "hi_res_lossless": AudioQuality.HI_RES_LOSSLESS,
+                "hires": AudioQuality.HI_RES_LOSSLESS,
+                "max": AudioQuality.HI_RES_LOSSLESS,
                 "highest": AudioQuality.HIGHEST
             }
             # Normalize the input string for broader matching
@@ -1026,13 +1038,18 @@ def downloadTracks(
         filtered_tracks = []
         # Determine a quality filter using the same mapping.
         quality_map_enum = {
+            "aac – low (up to 320 kbps)": AudioQuality.LOW,
+            "flac – high (16-bit, 44.1 khz)": AudioQuality.HIGH,
+            "flac – cd standard (16-bit, 44.1 khz)": AudioQuality.LOSSLESS,
+            "flac – max / hires (up to 24-bit, 192 khz)": AudioQuality.HI_RES_LOSSLESS,
+            # Backward-compatible aliases for persisted/older GUI labels.
             "m4a - aac – high efficiency (96 kbps, 44.1 khz)": AudioQuality.LOW,
             "m4a - aac – full bandwidth (320 kbps, 44.1 khz)": AudioQuality.HIGH,
-            "flac – cd standard (16-bit, 44.1 khz)": AudioQuality.LOSSLESS,
-            "flac – high resolution (24-bit, 96 khz)": AudioQuality.HI_RES_LOSSLESS,  # Corrected kHz typo
+            "flac – high resolution (24-bit, 96 khz)": AudioQuality.HI_RES_LOSSLESS,
             "highest available": AudioQuality.HIGHEST,
             "low": AudioQuality.LOW,
             "high": AudioQuality.HIGH,
+            "max": AudioQuality.HI_RES_LOSSLESS,
             "lossless": AudioQuality.LOSSLESS,
             "hi_res_lossless": AudioQuality.HI_RES_LOSSLESS,
             "highest": AudioQuality.HIGHEST,

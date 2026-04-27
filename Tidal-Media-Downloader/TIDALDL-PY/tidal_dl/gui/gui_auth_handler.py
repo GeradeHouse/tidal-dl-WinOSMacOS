@@ -220,16 +220,13 @@ class AuthHandler(QObject):
 
     def _on_tidal_url_received(self, login_url: str):
         """Handle the successful retrieval of the TIDAL login URL."""
-        # --- MODIFICATION START ---
-        # Ensure the href attribute contains the full, valid URL with the protocol.
-        full_url = f"https://{login_url}"
+        full_url = login_url if login_url.startswith(("http://", "https://")) else f"https://{login_url}"
         CustomQMessageBox.information(
             self._parent_widget,
             "TIDAL Login Required",
             "Browser Login Required",
-            f"Please visit the following URL in your browser to log in.\n\nURL: <a href='{full_url}'>{login_url}</a>\n\nYou have 5 minutes to complete the login."
+            f"Please visit the following URL in your browser to log in.\n\nURL: <a href='{full_url}'>{full_url}</a>\n\nYou have 5 minutes to complete the login."
         )
-        # --- MODIFICATION END ---
         # Start the dedicated polling worker in the background.
         self.start_tidal_token_polling()
 

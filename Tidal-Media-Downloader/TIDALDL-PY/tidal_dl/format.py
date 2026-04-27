@@ -82,17 +82,32 @@ def __getDurationStr__(seconds: Optional[Union[int, float, str]]) -> str:
 
 def __getExtension__(stream: StreamUrl) -> str:
     """Determines the file extension based on stream URL and codec."""
-    if stream and stream.url:
-        url_lower = stream.url.lower()
+    stream_url = str(getattr(stream, 'url', '') or '') if stream else ''
+    codec_lower = str(getattr(stream, 'codec', '') or '').lower() if stream else ''
+    manifest_mime_lower = str(getattr(stream, 'manifestMimeType', '') or '').lower() if stream else ''
+    sound_quality = str(getattr(stream, 'soundQuality', '') or '').upper() if stream else ''
+
+    if stream_url:
+        url_lower = stream_url.lower()
         if '.flac' in url_lower:
             return '.flac'
         if '.mp4' in url_lower:
-            codec_lower = getattr(stream, 'codec', '').lower()
             if 'ac4' in codec_lower or 'mha1' in codec_lower:
                 return '.mp4'
             elif 'flac' in codec_lower:
                 return '.mp4'
             return '.m4a'
+
+    if 'flac' in codec_lower:
+        if 'dash+xml' in manifest_mime_lower or 'vnd.tidal.bt' in manifest_mime_lower:
+            return '.mp4'
+        return '.flac'
+
+    if sound_quality in {'LOSSLESS', 'HI_RES', 'HI_RES_LOSSLESS'}:
+        if 'dash+xml' in manifest_mime_lower or 'vnd.tidal.bt' in manifest_mime_lower:
+            return '.mp4'
+        return '.flac'
+
     return '.m4a'
 
 

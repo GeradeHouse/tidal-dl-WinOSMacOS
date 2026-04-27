@@ -24,7 +24,7 @@ class Settings(aigpy.model.ModelBase):
     language = "english"
     lyricFile = True
     # Default API key to use on *first run only* (when settings.json doesn't exist yet).
-    # We point this to a *non* "Master-only" key that supports Normal/High/HiFi/Master.
+    # Use the first bundled profile unless settings.json contains a saved user choice.
     # NOTE: If a settings.json is present, its value takes precedence and this
     #       does NOT overwrite the user's saved choice.
     apiKeyIndex = 0

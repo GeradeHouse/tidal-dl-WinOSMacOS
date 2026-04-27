@@ -78,7 +78,7 @@
     },
 
     // ────────────── Python / Pylance ──────────────
-    "python.defaultInterpreterPath": "{workspaceFolder}/.venv",
+    "python.defaultInterpreterPath": "",
     "python.analysis.exclude": [
       "**/.history",
       "**/.lh",

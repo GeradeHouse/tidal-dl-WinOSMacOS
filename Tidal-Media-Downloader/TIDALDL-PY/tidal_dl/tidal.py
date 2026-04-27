@@ -101,8 +101,9 @@ class TidalAPI(object):
 
         logger.debug(f"TIDAL_API.apiKey initialized empty.")
         
-        # Runtime scope (same default as your code)
-        self._scope = os.getenv("TIDAL_SCOPE", "r_usr+w_usr+w_sub")
+        # Runtime OAuth scope. Use OAuth-standard space-separated scopes; requests
+        # encodes spaces correctly for application/x-www-form-urlencoded bodies.
+        self._scope = os.getenv("TIDAL_SCOPE", "r_usr w_usr w_sub")
 
         # --- START MODIFICATION ---
         # Create a persistent session object for all requests
@@ -174,7 +175,7 @@ class TidalAPI(object):
             if self.key.expiresIn:
                 TOKEN.expiresAfter = int(time.time()) + int(self.key.expiresIn)
 
-            TOKEN.apiKeyIndex = SETTINGS.apiKeyIndex
+            TOKEN.apiKeyIndex = SETTINGS.apiKeyIndex if isinstance(SETTINGS.apiKeyIndex, int) else 0
             TOKEN.save()
         except Exception as e:
             logger.warning(f"Could not persist refreshed token to file: {e}")
@@ -544,6 +545,29 @@ class TidalAPI(object):
     #                           Public  methods                             #
     # --------------------------------------------------------------------- #
 
+    def _post_oauth_token(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.apiKey or "clientId" not in self.apiKey or "clientSecret" not in self.apiKey:
+            raise RuntimeError("TIDAL API key not set yet. Load/select an apiKey before calling this method.")
+
+        token_data = dict(data)
+        token_data["client_id"] = self.apiKey["clientId"]
+        token_data["client_secret"] = self.apiKey["clientSecret"]
+
+        try:
+            return self.__post__("/token", token_data, urlpre=AUTH_URL)
+        except Exception as client_secret_post_error:
+            logger.warning(
+                "OAuth token request using client_secret_post failed for API profile %s. Retrying with HTTP Basic auth.",
+                self.apiKey.get("platform", "Unknown"),
+            )
+            legacy_data = dict(data)
+            legacy_data["client_id"] = self.apiKey["clientId"]
+            auth = (self.apiKey["clientId"], self.apiKey["clientSecret"])
+            try:
+                return self.__post__("/token", legacy_data, auth=auth, urlpre=AUTH_URL)
+            except Exception as basic_auth_error:
+                raise basic_auth_error from client_secret_post_error
+
     def getDeviceCode(self) -> str:
         if not self.apiKey or "clientId" not in self.apiKey:
             raise RuntimeError("TIDAL API key not set yet. Load/select an apiKey before calling this method.")
@@ -562,7 +586,13 @@ class TidalAPI(object):
         user_code = result.get("userCode")
         verification_uri_complete = result.get("verificationUriComplete")
         verification_uri = result.get("verificationUri")
+        if not verification_uri_complete:
+            verification_uri_complete = result.get("verification_uri_complete")
+        if not verification_uri:
+            verification_uri = result.get("verification_uri")
         expires_in = result.get("expiresIn")
+        if expires_in is None:
+            expires_in = result.get("expires_in")
         interval = result.get("interval")
 
         if not all([device_code, user_code, verification_uri, expires_in, interval]):
@@ -584,14 +614,12 @@ class TidalAPI(object):
             raise RuntimeError("TIDAL API key not set yet. Load/select an apiKey before calling this method.")
         
         data: Dict[str, Any] = {
-            "client_id": self.apiKey["clientId"],
             "device_code": self.key.deviceCode,
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             "scope": self._scope,
         }
-        auth = (self.apiKey["clientId"], self.apiKey["clientSecret"])
 
-        result = self.__post__("/token", data, auth=auth, urlpre=AUTH_URL)
+        result = self._post_oauth_token(data)
 
         # Handle pending authorization based on new logic
         if result.get("status", 200) != 200 and result.get("sub_status") == 1002:
@@ -605,18 +633,26 @@ class TidalAPI(object):
             raise Exception(f"Authentication failed: {error_message}")
 
         # Success - extract token data
-        user_info = result.get("user")
+        user_info = result.get("user") if isinstance(result.get("user"), dict) else {}
         access_token = result.get("access_token")
         refresh_token = result.get("refresh_token")
         expires_in = result.get("expires_in")
 
-        if not user_info or not access_token:
+        if not access_token:
             raise Exception(
-                "Authorization response missing required user info or tokens."
+                "Authorization response missing required access token."
             )
 
-        user_id = user_info.get("userId")
-        country_code = user_info.get("countryCode")
+        user_id = user_info.get("userId") or result.get("userId") or result.get("user_id")
+        country_code = user_info.get("countryCode") or result.get("countryCode") or result.get("country_code")
+
+        if user_id is None or country_code is None:
+            session_header = {"authorization": f"Bearer {access_token}"}
+            session_response = self.session.get(f"{BASE}/sessions", headers=session_header, timeout=15)
+            session_response.raise_for_status()
+            session_result = session_response.json()
+            user_id = session_result.get("userId")
+            country_code = session_result.get("countryCode")
 
         if user_id is None or country_code is None:
             raise Exception("Authorization response missing userId or countryCode.")
@@ -663,20 +699,20 @@ class TidalAPI(object):
             raise RuntimeError("TIDAL API key not set yet. Load/select an apiKey before calling this method.")
         
         data: Dict[str, str] = {
-            "client_id": self.apiKey["clientId"],
             "refresh_token": refreshToken,
             "grant_type": "refresh_token",
             "scope": self._scope,
         }
-        auth = (self.apiKey["clientId"], self.apiKey["clientSecret"])
         try:
-            result = self.__post__("/token", data, auth=auth, urlpre=AUTH_URL)
+            result = self._post_oauth_token(data)
 
             if result.get("status", 200) != 200:
                 raise Exception(f"Refresh failed: {result.get('userMessage', 'Unknown error')}")
 
             access_token = result.get("access_token")
             expires_in = result.get("expires_in")
+            country_code = result.get("countryCode") or result.get("country_code")
+            user_id = result.get("userId") or result.get("user_id")
 
             if not access_token:
                 logger.error("refreshAccessToken response missing access token.")
@@ -690,6 +726,21 @@ class TidalAPI(object):
             new_refresh_token = result.get("refresh_token")
             if new_refresh_token:
                 self.key.refreshToken = new_refresh_token
+
+            if country_code is None or user_id is None:
+                with requests.Session() as temp_session:
+                    temp_session.headers.update(dict(self.session.headers))
+                    temp_session.headers.update({"authorization": f"Bearer {access_token}"})
+                    session_response = temp_session.get(f"{BASE}/sessions", timeout=15)
+                    session_response.raise_for_status()
+                    session_result = session_response.json()
+                    country_code = session_result.get("countryCode")
+                    user_id = session_result.get("userId")
+
+            if country_code is not None:
+                self.key.countryCode = country_code
+            if user_id is not None:
+                self.key.userId = user_id
 
             # Update the persistent session with the new Bearer token
             self.session.headers.update({"authorization": f"Bearer {self.key.accessToken}"})
@@ -1189,7 +1240,11 @@ class TidalAPI(object):
         return f"https://resources.tidal.com/images/{url_path_sid}/{normalized_size}x{normalized_size}.jpg"
     
     def getCoverData(
-        self, sid: Optional[str], width: str = "320", height: str = "320"
+        self,
+        sid: Optional[str],
+        width: str = "320",
+        height: str = "320",
+        suppress_logs: bool = False,
     ) -> bytes:
         url = self.getCoverUrl(sid, width, height)
         if not url:
@@ -1221,19 +1276,22 @@ class TidalAPI(object):
             response.raise_for_status()
             content_type = response.headers.get("content-type", "").lower()
             if "image" not in content_type:
-                logger.warning(
-                    f"Expected image content type, got '{content_type}' for URL: {url}"
-                )
+                if not suppress_logs:
+                    logger.warning(
+                        f"Expected image content type, got '{content_type}' for URL: {url}"
+                    )
                 return b""
             content = response.content
             if not content:
-                logger.warning(f"Empty response content for cover URL: {url}")
+                if not suppress_logs:
+                    logger.warning(f"Empty response content for cover URL: {url}")
                 self._mark_cover_failure(cover_key, ttl_seconds=60)
                 return b""
             self._clear_cover_failure(cover_key)
             return content
         except requests.exceptions.Timeout:
-            logger.error(f"Timeout fetching cover data for {sid} from {url}")
+            if not suppress_logs:
+                logger.error(f"Timeout fetching cover data for {sid} from {url}")
             self._mark_cover_failure(cover_key, ttl_seconds=45)
             return b""
         except requests.exceptions.HTTPError as e:
@@ -1253,36 +1311,40 @@ class TidalAPI(object):
                 resp_server = e.response.headers.get("server", "")
                 resp_text_snippet = (e.response.text or "").replace("\n", " ")[:180]
 
-                logger.warning(
-                    "COVER_DIAG_403 sid=%s size=%sx%s url=%s auth_present=%s auth_prefix=%s ua=%s resp_ct=%s resp_server=%s resp_body=%s",
-                    sid,
-                    width,
-                    height,
-                    url,
-                    req_auth_present,
-                    req_auth_prefix,
-                    req_user_agent,
-                    resp_content_type,
-                    resp_server,
-                    resp_text_snippet,
-                )
+                if not suppress_logs:
+                    logger.warning(
+                        "COVER_DIAG_403 sid=%s size=%sx%s url=%s auth_present=%s auth_prefix=%s ua=%s resp_ct=%s resp_server=%s resp_body=%s",
+                        sid,
+                        width,
+                        height,
+                        url,
+                        req_auth_present,
+                        req_auth_prefix,
+                        req_user_agent,
+                        resp_content_type,
+                        resp_server,
+                        resp_text_snippet,
+                    )
                 self._mark_cover_failure(cover_key, ttl_seconds=180)
             elif status_code == 404:
                 self._mark_cover_failure(cover_key, ttl_seconds=600)
             else:
                 self._mark_cover_failure(cover_key, ttl_seconds=90)
-            logger.error(
-                f"HTTP error {status_code} fetching cover data for {sid} from {url}: {e}"
-            )
+            if not suppress_logs:
+                logger.error(
+                    f"HTTP error {status_code} fetching cover data for {sid} from {url}: {e}"
+                )
             return b""
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error fetching cover data for {sid} from {url}: {e}")
+            if not suppress_logs:
+                logger.error(f"Error fetching cover data for {sid} from {url}: {e}")
             self._mark_cover_failure(cover_key, ttl_seconds=90)
             return b""
         except Exception as e:
-            logger.error(
-                f"Unexpected error in getCoverData for {sid}: {e}", exc_info=True
-            )
+            if not suppress_logs:
+                logger.error(
+                    f"Unexpected error in getCoverData for {sid}: {e}", exc_info=True
+                )
             self._mark_cover_failure(cover_key, ttl_seconds=60)
             return b""
 
@@ -1391,14 +1453,14 @@ class TidalAPI(object):
     def getFlag(
         self, data: Any, type: Type, short: bool = True, separator: str = " / "
     ) -> str:
-        master = False
+        max_quality = False
         atmos = False
         explicit = False
 
         if type == Type.Album or type == Type.Track:
             audio_quality = getattr(data, "audioQuality", None)
             if audio_quality == AudioQuality.HI_RES_LOSSLESS.value:
-                master = True
+                max_quality = True
             audio_modes = getattr(data, "audioModes", [])
             if (
                 type == Type.Album
@@ -1409,12 +1471,12 @@ class TidalAPI(object):
             if getattr(data, "explicit", False) is True:
                 explicit = True
 
-        if not master and not atmos and not explicit:
+        if not max_quality and not atmos and not explicit:
             return ""
 
         array: List[str] = []
-        if master:
-            array.append("M" if short else "Master")
+        if max_quality:
+            array.append("M" if short else "Max")
         if atmos:
             array.append("A" if short else "Dolby Atmos")
         if explicit:

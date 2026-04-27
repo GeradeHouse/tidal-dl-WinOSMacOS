@@ -220,11 +220,12 @@ def changeSettings():
 
 def changeApiKey():
     # Use `cast` to resolve Pylance's type inference issue with apiKey.getItem
-    item = cast(Dict[str, str], apiKey.getItem(SETTINGS.apiKeyIndex))
+    api_key_index = SETTINGS.apiKeyIndex if isinstance(SETTINGS.apiKeyIndex, int) else 0
+    item = cast(Dict[str, str], apiKey.getItem(api_key_index))
     ver = apiKey.getVersion()
 
     logger.info(
-        f'Current APIKeys: {str(SETTINGS.apiKeyIndex)} {item["platform"]}-{item["formats"]}'
+        f'Current APIKeys: {str(api_key_index)} {item["platform"]}-{item["formats"]}'
     )
     logger.info(f"Current Version: {str(ver)}")
     logger.info(f"Available API Keys: {len(apiKey.getItems())} keys")
