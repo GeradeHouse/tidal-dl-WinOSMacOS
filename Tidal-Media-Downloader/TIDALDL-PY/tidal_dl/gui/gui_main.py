@@ -277,10 +277,21 @@ class MainView(QWidget):
         self.c_tableArea.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
         )
-        initialColumnNames = ["#", "Title", "Artists", "Album", "Length", "Quality"]
+        initialColumnNames = [
+            "#",
+            "Title",
+            "Artists",
+            "Album",
+            "Release Year",
+            "BPM",
+            "Key",
+            "Genre",
+            "Label",
+            "Length",
+            "Quality",
+        ]
         self.tableWidget = SplitterTable(initialColumnNames, self)
         self.tableWidget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.tableWidget.setStyleSheet("QTableWidget { background: transparent; }")
         self.c_tableArea.setWidget(self.tableWidget)
 
         self.c_combTQuality = QComboBox()
@@ -679,6 +690,7 @@ class MainView(QWidget):
             self.navigation_handler.show_main_menu
         )
         self.settingsPage.playlistDisplaySettingsChanged.connect(self.tree_handler.onPlaylistDisplaySettingsChanged)
+        self.settingsPage.playlistDisplaySettingsChanged.connect(self.table_handler.refresh_table_view)
         self.toggleLogButton.clicked.connect(self.toggle_log_console)
         self.title_bar.s_showSettings.connect(self.navigation_handler.show_settings)
 

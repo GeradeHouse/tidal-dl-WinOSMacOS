@@ -11,21 +11,17 @@
 """
 
 import logging
-from typing import List, Optional, Dict, TYPE_CHECKING, Any, Tuple
+from typing import List, Optional, Dict, TYPE_CHECKING, Any, Tuple, cast
 from PyQt6 import QtWidgets, QtCore
 from PyQt6.QtCore import (
     QObject,
     pyqtSignal,
     pyqtSlot,
-    QPoint,
-    Qt,
-    QItemSelection,
-    QItemSelectionModel,
 )
 from ..model import Track, Playlist
 from ..tidal import TidalAPI
-from ..printf import Printf
 from ..persistence import LinkPersistenceManager
+from ..metadata.enrichment import enrich_track_album_metadata
 from .gui_custom_dialog import CustomQMessageBox
 
 if TYPE_CHECKING:
@@ -92,6 +88,35 @@ class LinkingGuiHandler(QObject):
         
         logger.debug(
             "Connected link_button clicked signal to _handle_link_button_click"
+        )
+
+    def _prepare_tidal_track_metadata(
+        self,
+        tidal_track: Optional[Track],
+        *,
+        fetch_full_track: bool = False,
+    ) -> Optional[Track]:
+        if tidal_track is None:
+            return None
+
+        prepared_track = tidal_track
+        track_id = getattr(prepared_track, "id", None)
+        if fetch_full_track and track_id is not None:
+            try:
+                prepared_track = self.api.getTrack(
+                    str(track_id), suppress_debug_prints=True
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Could not fetch full TIDAL track metadata for %s: %s",
+                    track_id,
+                    exc,
+                    exc_info=True,
+                )
+
+        return cast(
+            Optional[Track],
+            enrich_track_album_metadata(prepared_track, self.api.getAlbum),
         )
 
     @pyqtSlot(str, str, int)
@@ -462,6 +487,7 @@ class LinkingGuiHandler(QObject):
 
         status_text = ""
         link_status = "not_linked"
+        tidal_track = self._prepare_tidal_track_metadata(tidal_track)
 
         if tidal_track:
             if score is not None and score <= 1:
@@ -714,6 +740,11 @@ class LinkingGuiHandler(QObject):
             return
 
         table_widget = self.table_handler.table_widget
+
+        selected_track = self._prepare_tidal_track_metadata(
+            selected_track,
+            fetch_full_track=True,
+        ) or selected_track
 
         # Update the main table row status
         status_text = f"Linked (Manual): {selected_track.id}"

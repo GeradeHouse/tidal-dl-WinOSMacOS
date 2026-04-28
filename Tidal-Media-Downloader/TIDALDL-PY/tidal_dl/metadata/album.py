@@ -24,6 +24,34 @@ setup_gui_logger("streamrip", logging.DEBUG)
 genre_clean = re.compile(r"([^\u2192\/]+)")
 
 
+def extract_label_from_copyright(copyright_text: Optional[str]) -> Optional[str]:
+    """Derive a probable label from TIDAL copyright text."""
+    if not copyright_text:
+        return None
+
+    cleaned = str(copyright_text).strip()
+    if not cleaned:
+        return None
+
+    copyright_match = re.match(
+        r"^(?:(?:\([CP]\)|\[[CP]\]|[©℗])\s*|[CP]\s+)\d{4}\s*(.+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if copyright_match:
+        return copyright_match.group(1).strip() or None
+
+    label_match = re.match(
+        r"^(?:(?:\([CP]\)|\[[CP]\]|[©℗])\s*|[CP]\s+)(.+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if label_match:
+        return label_match.group(1).strip() or None
+
+    return None
+
+
 @dataclass(slots=True)
 class AlbumInfo:
     id: str
@@ -262,17 +290,7 @@ class AlbumMetadata:
         disctotal = typed(disc_total_val, int)
         
         # Extract label from copyright field since Tidal doesn't provide direct label field
-        label = None
-        if _copyright:
-            import re
-            copyright_match = re.match(r'^\([CP]\)\s*\d{4}\s*(.+)$', _copyright, re.IGNORECASE)
-            if copyright_match:
-                label = copyright_match.group(1).strip()
-            else:
-                # Fallback: if no year pattern, just remove (C) or (P) prefix
-                label_match = re.match(r'^\([CP]\)\s*(.+)$', _copyright, re.IGNORECASE)
-                if label_match:
-                    label = label_match.group(1).strip()
+        label = extract_label_from_copyright(_copyright)
         
         # Extract additional Tidal metadata
         barcode = getattr(resp, "upc", None)  # UPC/Barcode
@@ -389,18 +407,7 @@ class AlbumMetadata:
         disctotal = typed(resp.get("volumeNumber", 1), int)
         
         # Extract label from copyright field since Tidal doesn't provide direct label field
-        label = None
-        if _copyright:
-            # Parse copyright to extract label: "(C) 2000 Label Name" -> "Label Name"
-            import re
-            copyright_match = re.match(r'^\([CP]\)\s*\d{4}\s*(.+)$', _copyright, re.IGNORECASE)
-            if copyright_match:
-                label = copyright_match.group(1).strip()
-            else:
-                # Fallback: if no year pattern, just remove (C) or (P) prefix
-                label_match = re.match(r'^\([CP]\)\s*(.+)$', _copyright, re.IGNORECASE)
-                if label_match:
-                    label = label_match.group(1).strip()
+        label = extract_label_from_copyright(_copyright)
         
         # Extract additional Tidal metadata
         # Normalize release type casing: keep EP uppercase, others title case

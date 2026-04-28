@@ -202,6 +202,7 @@ def initialize_controls(self: "SettingsPage"):
     self.chkSaveAlbumInfo = QCheckBox()
     self.chkShowPlaylistIcons = QtWidgets.QCheckBox()
     self.spinPlaylistIconSize = QSpinBox()
+    self.chkUseCamelotKeyNotation = QCheckBox()
 
     # Navigation Buttons
     self.btnBack = QPushButton("Back")
@@ -437,6 +438,7 @@ def create_ui_behavior_section(self: "SettingsPage"):
     assert self.chkSaveAlbumInfo is not None
     assert self.chkShowPlaylistIcons is not None
     assert self.spinPlaylistIconSize is not None
+    assert self.chkUseCamelotKeyNotation is not None
     assert self.mainLayout is not None
 
     ui_icon_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons", "ui-behavior-white.png"))
@@ -464,6 +466,7 @@ def create_ui_behavior_section(self: "SettingsPage"):
     self.spinPlaylistIconSize.setSuffix(" px")
     ui_layout.addRow("Playlist Icon Size:", self.spinPlaylistIconSize)
     self.chkShowPlaylistIcons.stateChanged.connect(self.spinPlaylistIconSize.setEnabled)
+    ui_layout.addRow("Use Camelot Key Notation:", self.chkUseCamelotKeyNotation)
 
     ui_section.addLayout(ui_layout)
     self.mainLayout.addWidget(ui_section)

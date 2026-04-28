@@ -78,6 +78,7 @@ def load_initial_settings(self: "SettingsPage"):
     assert self.chkSaveAlbumInfo is not None
     assert self.chkShowPlaylistIcons is not None
     assert self.spinPlaylistIconSize is not None
+    assert self.chkUseCamelotKeyNotation is not None
     assert self.cache_path_lineEdit is not None
     assert self.cache_ttl_spinBox is not None
 
@@ -162,6 +163,9 @@ def load_initial_settings(self: "SettingsPage"):
         self.chkShowPlaylistIcons.setChecked(bool(getattr(SETTINGS, "showPlaylistIcons", True)))
         self.spinPlaylistIconSize.setValue(getattr(SETTINGS, "playlistIconSize", 35))
         self.spinPlaylistIconSize.setEnabled(self.chkShowPlaylistIcons.isChecked())
+        self.chkUseCamelotKeyNotation.setChecked(
+            bool(getattr(SETTINGS, "useCamelotKeyNotation", False))
+        )
         # --- End UI & Behavior ---
 
         # Load Cache Settings
@@ -344,6 +348,7 @@ def save_settings(self: "SettingsPage"):
     assert self.chkSaveAlbumInfo is not None
     assert self.chkShowPlaylistIcons is not None
     assert self.spinPlaylistIconSize is not None
+    assert self.chkUseCamelotKeyNotation is not None
     assert self.cache_path_lineEdit is not None
     assert self.cache_ttl_spinBox is not None
 
@@ -393,9 +398,28 @@ def save_settings(self: "SettingsPage"):
         SETTINGS.lyricFile = self.chkLyricFile.isChecked()
         SETTINGS.showProgress = self.chkShowProgress.isChecked()
         SETTINGS.showTrackInfo = self.chkShowTrackInfo.isChecked()
+        old_show_playlist_icons = bool(getattr(SETTINGS, "showPlaylistIcons", True))
+        old_playlist_icon_size_raw = getattr(SETTINGS, "playlistIconSize", 25)
+        old_playlist_icon_size = (
+            old_playlist_icon_size_raw
+            if isinstance(old_playlist_icon_size_raw, int)
+            else 25
+        )
+        old_use_camelot_key_notation = bool(
+            getattr(SETTINGS, "useCamelotKeyNotation", False)
+        )
+
         SETTINGS.saveAlbumInfo = self.chkSaveAlbumInfo.isChecked()
         SETTINGS.showPlaylistIcons = self.chkShowPlaylistIcons.isChecked()
         SETTINGS.playlistIconSize = self.spinPlaylistIconSize.value()
+        SETTINGS.useCamelotKeyNotation = self.chkUseCamelotKeyNotation.isChecked()
+        key_notation_changed = (
+            SETTINGS.useCamelotKeyNotation != old_use_camelot_key_notation
+        )
+        playlist_display_settings_changed = (
+            SETTINGS.showPlaylistIcons != old_show_playlist_icons
+            or SETTINGS.playlistIconSize != old_playlist_icon_size
+        )
 
         # --- Cache Settings ---
         # Save Cache Settings - Save None if path is empty
@@ -412,7 +436,8 @@ def save_settings(self: "SettingsPage"):
 
         # Emit the fontSizeChanged signal with the new font size
         self.fontSizeChanged.emit(SETTINGS.fontSize)
-        self.playlistDisplaySettingsChanged.emit()
+        if key_notation_changed or playlist_display_settings_changed:
+            self.playlistDisplaySettingsChanged.emit()
         # --- Debugging: Log saved boolean values ---
         logger.debug(f"Saved Settings - checkExist: {SETTINGS.checkExist}")
         logger.debug(f"Saved Settings - includeEP: {SETTINGS.includeEP}")

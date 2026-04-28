@@ -13,6 +13,8 @@ from typing import Optional
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 
+TABLE_TEXT_MARGIN = 9
+
 # --- Setup Logging ---
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
@@ -30,6 +32,29 @@ _setup_gui_logging()
 class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
     """Keep an item's Qt.ForegroundRole colour even when it is selected."""
 
+    def initStyleOption(
+        self,
+        option: Optional[QtWidgets.QStyleOptionViewItem],
+        index: QtCore.QModelIndex,
+    ) -> None:
+        """Apply consistent readable table text alignment and wrapping."""
+        if option is None:
+            return
+        super().initStyleOption(option, index)
+        option.displayAlignment |= QtCore.Qt.AlignmentFlag.AlignVCenter
+        option.features |= QtWidgets.QStyleOptionViewItem.ViewItemFeature.WrapText
+        option.textElideMode = QtCore.Qt.TextElideMode.ElideRight
+
+    def sizeHint(
+        self,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> QtCore.QSize:
+        """Add breathing room around wrapped text inside each table row."""
+        size = super().sizeHint(option, index)
+        size.setHeight(max(size.height() + (TABLE_TEXT_MARGIN * 2), 70))
+        return size
+
     def paint(
         self,
         painter: Optional[QtGui.QPainter],
@@ -41,21 +66,11 @@ class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
             super().paint(painter, option, index)
             return
 
-        # Copy the incoming option so we don't mutate it in place
-        opt = QtWidgets.QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-
-        # If selected, pull out any custom brush and push it into the HighlightedText role
-        if opt.state & QtWidgets.QStyle.StateFlag.State_Selected:
-            brush = index.data(QtCore.Qt.ItemDataRole.ForegroundRole)
-            if isinstance(brush, QtGui.QBrush):
-                opt.palette.setBrush(QtGui.QPalette.ColorRole.HighlightedText, brush)
-
         # --- START FIX ---
         # Get the style object, which might be None.
         actual_style: Optional[QtWidgets.QStyle]
-        if opt.widget is not None:
-            actual_style = opt.widget.style()
+        if option.widget is not None:
+            actual_style = option.widget.style()
         else:
             actual_style = QtWidgets.QApplication.style()
 
@@ -73,7 +88,41 @@ class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
         style: QtWidgets.QStyle = actual_style
         # --- END FIX ---
 
-        # Finally paint with our modified palette
+        # Copy the incoming option so we don't mutate it in place
+        opt = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+
+        # Draw the selection/hover panel over the full cell, then inset text for readability.
+        background_option = QtWidgets.QStyleOptionViewItem(opt)
+        background_option.text = ""
+        style.drawControl(
+            QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
+            background_option,
+            painter,
+            background_option.widget,
+        )
+
+        opt.rect = style.subElementRect(
+            QtWidgets.QStyle.SubElement.SE_ItemViewItemText,
+            opt,
+            opt.widget,
+        ).adjusted(
+            TABLE_TEXT_MARGIN,
+            0,
+            -TABLE_TEXT_MARGIN,
+            0,
+        )
+
+        # If selected, pull out any custom brush and push it into the HighlightedText role
+        if opt.state & QtWidgets.QStyle.StateFlag.State_Selected:
+            brush = index.data(QtCore.Qt.ItemDataRole.ForegroundRole)
+            if isinstance(brush, QtGui.QBrush):
+                opt.palette.setBrush(QtGui.QPalette.ColorRole.HighlightedText, brush)
+
+        opt.state &= ~QtWidgets.QStyle.StateFlag.State_Selected
+        opt.state &= ~QtWidgets.QStyle.StateFlag.State_MouseOver
+
+        # Finally paint the text with our modified palette and readable inset.
         style.drawControl(
             QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
             opt,

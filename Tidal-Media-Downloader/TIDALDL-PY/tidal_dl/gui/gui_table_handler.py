@@ -32,6 +32,7 @@ from tidal_dl.persistence import LinkPersistenceManager
 from tidal_dl.format import getAudioTypeFolder, getTrackPath
 from tidal_dl.paths import get_user_download_path
 from tidal_dl.model import StreamUrl
+from tidal_dl.metadata.enrichment import MISSING_METADATA_TEXT, get_track_display_metadata
 
 # Robust import alias for aigpy dictToModel
 try:
@@ -58,6 +59,13 @@ setup_gui_logger(__name__, logging.INFO)
 
 MANUAL_LINK_REQUIRED_ROLE = Qt.ItemDataRole.UserRole + 100
 QUALITY_PLACEHOLDER_TEXT = "Loading..."
+REQUESTED_METADATA_COLUMNS = [
+    ("Release Year", "release_year"),
+    ("BPM", "bpm"),
+    ("Key", "key"),
+    ("Genre", "genre"),
+    ("Label", "label"),
+]
 
 
 class TableHandler(QObject):
@@ -66,7 +74,7 @@ class TableHandler(QObject):
     with data and handling context menus specific to the table content.
     """
 
-    trackQualityResolved = pyqtSignal(str, str)
+    trackQualityResolved = pyqtSignal(str, str, object)
     completedStatusResolved = pyqtSignal(str, str, str)
 
     def __init__(
@@ -204,6 +212,59 @@ class TableHandler(QObject):
         quality_item.setText(quality_text)
         quality_item.setToolTip(quality_text)
 
+    def _get_requested_metadata_values(self, track: Optional[Track]) -> Dict[str, str]:
+        use_camelot_key = bool(getattr(SETTINGS, "useCamelotKeyNotation", False))
+        return get_track_display_metadata(track, use_camelot_key=use_camelot_key)
+
+    def _set_row_requested_metadata_text(
+        self,
+        row: int,
+        track: Optional[Track],
+    ) -> None:
+        if not self.table_widget:
+            return
+
+        metadata_values = self._get_requested_metadata_values(track)
+        self._replace_row_tidal_track_metadata(row, track)
+        for header, key in REQUESTED_METADATA_COLUMNS:
+            col = self.column_indices.get(header)
+            if col is None:
+                continue
+
+            text = metadata_values.get(key, MISSING_METADATA_TEXT) or MISSING_METADATA_TEXT
+            item = self.table_widget.item(row, col)
+            if not item:
+                item = QTableWidgetItem()
+                self.table_widget.setItem(row, col, item)
+            item.setText(text)
+            item.setToolTip(text)
+
+    def _replace_row_tidal_track_metadata(
+        self,
+        row: int,
+        track: Optional[Track],
+    ) -> None:
+        if not self.table_widget or not isinstance(track, Track):
+            return
+
+        title_item = self.table_widget.item(row, 1)
+        if not title_item:
+            return
+
+        item_data = title_item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(item_data, Track):
+            if str(getattr(item_data, "id", "")) == str(getattr(track, "id", "")):
+                title_item.setData(Qt.ItemDataRole.UserRole, track)
+        elif isinstance(item_data, dict):
+            existing_track = item_data.get("tidal_track")
+            existing_track_id = item_data.get("tidal_track_id")
+            if isinstance(existing_track, Track):
+                existing_track_id = getattr(existing_track, "id", existing_track_id)
+            if existing_track_id and str(existing_track_id) == str(getattr(track, "id", "")):
+                item_data["tidal_track"] = track
+                item_data["tidal_track_id"] = str(track.id)
+                title_item.setData(Qt.ItemDataRole.UserRole, item_data)
+
     def _schedule_visible_quality_resolution(self, *_args: Any) -> None:
         if not self.table_widget or "Quality" not in self.column_indices:
             return
@@ -240,21 +301,23 @@ class TableHandler(QObject):
 
     def _resolve_track_quality_in_background(self, track_id: str) -> None:
         quality_text: Optional[str] = None
+        track_obj: Optional[Track] = None
         try:
-            track_obj = TIDAL_API.getTrack(str(track_id))
+            fetched_track = TIDAL_API.getTrack(str(track_id))
+            track_obj = fetched_track if isinstance(fetched_track, Track) else None
             if isinstance(track_obj, Track):
                 quality_text = Printf.map_track_quality(track_obj)
 
             quality_text = (quality_text or "-").strip() or "-"
 
-            self.trackQualityResolved.emit(track_id, quality_text)
+            self.trackQualityResolved.emit(track_id, quality_text, track_obj)
 
         except Exception as ex:
             logger.debug(
                 f"Failed to resolve quality for track {track_id}: {ex}",
                 exc_info=True,
             )
-            self.trackQualityResolved.emit(track_id, "-")
+            self.trackQualityResolved.emit(track_id, "-", None)
         finally:
             with self._quality_state_lock:
                 self._quality_inflight_track_ids.discard(track_id)
@@ -298,8 +361,13 @@ class TableHandler(QObject):
             self._set_row_quality_text(row, QUALITY_PLACEHOLDER_TEXT)
             self._enqueue_track_quality_resolution(track_id)
 
-    @pyqtSlot(str, str)
-    def _on_track_quality_resolved(self, track_id: str, quality_text: str) -> None:
+    @pyqtSlot(str, str, object)
+    def _on_track_quality_resolved(
+        self,
+        track_id: str,
+        quality_text: str,
+        resolved_track: Optional[Track] = None,
+    ) -> None:
         if not self.table_widget or "Quality" not in self.column_indices:
             return
 
@@ -310,6 +378,8 @@ class TableHandler(QObject):
             row_track_id = self._extract_tidal_track_id_from_row(row)
             if row_track_id == track_id:
                 self._set_row_quality_text(row, quality_text)
+                if isinstance(resolved_track, Track):
+                    self._set_row_requested_metadata_text(row, resolved_track)
 
     def show_loading_message(self, message: str):
         if not self.table_widget:
@@ -1302,7 +1372,19 @@ class TableHandler(QObject):
             and results_array[0].get("type") == "spotify_track"
         )
 
-        base_headers = ["#", "Title", "Artists", "Album", "Length", "Quality"]
+        base_headers = [
+            "#",
+            "Title",
+            "Artists",
+            "Album",
+            "Release Year",
+            "BPM",
+            "Key",
+            "Genre",
+            "Label",
+            "Length",
+            "Quality",
+        ]
         column_headers = base_headers + ["Status"]
         table.setColumnCount(len(column_headers))
         table.setHorizontalHeaderLabels(column_headers)
@@ -1349,6 +1431,7 @@ class TableHandler(QObject):
                         original_spotify_track_data = item.get("data", {})
                         spotify_track_id = original_spotify_track_data.get("id")
                         spotify_track_data_to_use = original_spotify_track_data
+                        tidal_track_obj: Optional[Track] = None
 
                         link_status_text = "Not Linked"
                         link_status_data_for_title: Dict[str, Any] = {
@@ -1430,11 +1513,19 @@ class TableHandler(QObject):
                         duration_str = format_duration_ms(
                             spotify_track_data_to_use.get("duration_ms")
                         )
+                        metadata_values = self._get_requested_metadata_values(
+                            tidal_track_obj
+                        )
                         rowData = [
                             str(index + 1),
                             spotify_track_data_to_use.get("name", "N/A"),
                             artists_str,
                             album_name,
+                            metadata_values["release_year"],
+                            metadata_values["bpm"],
+                            metadata_values["key"],
+                            metadata_values["genre"],
+                            metadata_values["label"],
                             duration_str,
                             (
                                 self._get_cached_quality_threadsafe(linked_tidal_id)
@@ -1460,11 +1551,17 @@ class TableHandler(QObject):
                             if isinstance(item.artists, list)
                             else [item.artist]
                         )
+                        metadata_values = self._get_requested_metadata_values(item)
                         rowData = [
                             str(index + 1),
                             str(item.title),
                             TIDAL_API.getArtistsName(artists),
                             str(album_title),
+                            metadata_values["release_year"],
+                            metadata_values["bpm"],
+                            metadata_values["key"],
+                            metadata_values["genre"],
+                            metadata_values["label"],
                             Printf.formatDuration(item.duration),
                             str(quality_string),
                             "-",
@@ -1707,6 +1804,7 @@ class TableHandler(QObject):
                 title_item.setData(Qt.ItemDataRole.UserRole, item_data)
 
         if tidal_track:
+            self._set_row_requested_metadata_text(row_index, tidal_track)
             tidal_track_id = str(tidal_track.id)
             cached_quality = self._get_cached_quality_threadsafe(
                 tidal_track_id
@@ -1724,6 +1822,7 @@ class TableHandler(QObject):
             "candidates_only",
             "manual_review_needed",
         }:
+            self._set_row_requested_metadata_text(row_index, None)
             self._set_row_quality_text(row_index, "-")
 
         indicator_item = table.item(row_index, 0)

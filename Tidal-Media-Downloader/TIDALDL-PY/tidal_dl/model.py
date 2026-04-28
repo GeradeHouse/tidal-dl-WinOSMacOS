@@ -53,14 +53,21 @@ class Album(aigpy.model.ModelBase):
         self.numberOfVideos = 0
         self.numberOfVolumes = 0
         self.releaseDate = None
+        self.streamStartDate = None
+        self.tidalReleaseDate = None
         self.type = None
         self.version = None
         self.cover = None
+        self.copyright = None
+        self.upc = None
+        self.genre = None
+        self.genres = None
         self.explicit = False
         self.audioQuality = None
         self.audioModes = None
         self.artist = Artist()
         self.artists = Artist()
+        self.allowStreaming = True
 
 
 class Playlist(aigpy.model.ModelBase):
@@ -87,8 +94,14 @@ class Track(aigpy.model.ModelBase):
         self.trackNumberOnPlaylist = 0
         self.version = None
         self.isrc = None
+        self.bpm = None
+        self.key = None
+        self.keyScale = None
+        self.genre = None
+        self.genres = None
         self.explicit = False
         self.audioQuality = None
+        self.copyright = None
         self.copyRight = None
         self.mediaMetadata = {}
         self.artist = Artist()

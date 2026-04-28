@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .album import AlbumMetadata
-from .util import safe_get, typed
+from .enrichment import MISSING_METADATA_TEXT, format_track_key
+from .util import typed
 
 logger = logging.getLogger("streamrip")
 
@@ -88,6 +89,10 @@ class TrackMetadata:
 
         # Lyrics are handled separately in the download process, not from this object
         lyrics = ""
+
+        key = format_track_key(track, use_camelot_key=False)
+        if key == MISSING_METADATA_TEXT:
+            key = None
         
         # Extract additional Tidal metadata
         bpm = getattr(track, "bpm", None)
@@ -136,6 +141,7 @@ class TrackMetadata:
             discnumber=discnumber,
             composer=None,
             author=None,
+            key=key,
             artists=artists,
             isrc=isrc,
             lyrics=lyrics,

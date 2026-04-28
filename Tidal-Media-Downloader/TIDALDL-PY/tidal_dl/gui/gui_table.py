@@ -60,6 +60,8 @@ from .gui_table_candidate_widget import CandidateWidget
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)  # Set specific level for this module
 
+TABLE_ROW_HEIGHT = 70
+
 # Set up GUI logging with INFO level for this modul- LAZY LOADED
 def _setup_gui_logging():
     """Lazy-load GUI logging setup to avoid circular imports."""
@@ -119,7 +121,8 @@ class SplitterTable(QtWidgets.QTableWidget):
         # Set default row height for better readability and clickability
         v_header = self.verticalHeader()
         if v_header:
-            v_header.setDefaultSectionSize(60)
+            v_header.setDefaultSectionSize(TABLE_ROW_HEIGHT)
+            v_header.setMinimumSectionSize(TABLE_ROW_HEIGHT)
         # Use ExtendedSelection to allow selecting multiple rows.
         self.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
@@ -133,6 +136,9 @@ class SplitterTable(QtWidgets.QTableWidget):
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )  # Disable editing
         self.setItemDelegate(HighlightPreservingDelegate(self))  # Add this line
+        self.setWordWrap(True)
+        self.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.setAlternatingRowColors(False)
 
         # Initially, set the resize modes for all columns to Interactive so that the user can change each column's width.
         h_header = self.horizontalHeader()  # Get header again
@@ -283,6 +289,14 @@ class SplitterTable(QtWidgets.QTableWidget):
                     break
         return self._cached_length_col_index
 
+    def _get_column_index_by_header(self, header_name: str) -> int:
+        """Resolve a column index by header label."""
+        for i in range(self.columnCount()):
+            header_item = self.horizontalHeaderItem(i)
+            if header_item and header_item.text() == header_name:
+                return i
+        return -1
+
     def setRowData(
         self,
         row: int,
@@ -298,20 +312,26 @@ class SplitterTable(QtWidgets.QTableWidget):
             self.setRowCount(row + 1)
 
         length_col_index = self._get_length_column_index()
+        quality_col_index = self._get_column_index_by_header("Quality")
         total_cols = self.columnCount()
 
         for col_index in range(total_cols):
             cell_text = str(row_data[col_index]) if col_index < len(row_data) else ""
             item = QtWidgets.QTableWidgetItem(cell_text)
+            item.setToolTip(cell_text)
 
             # Right-align '#' column (index 0)
             if col_index == 0:
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                 )
+            else:
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                )
 
             # Set tooltip for Quality column
-            if col_index == 5:  # Quality column index
+            if col_index == quality_col_index:
                 item.setToolTip(cell_text)
 
             # Center align 'Length' column
@@ -558,10 +578,8 @@ class SplitterTable(QtWidgets.QTableWidget):
             logger.warning(f"[SplitterTable UpdateAppearance] Invalid row index: {row}")
             return
 
-        # Determine background color based on selection
-        # Using the QSS defined color for selection background: rgba(56, 56, 56, 0.8)
-        # Convert to QColor: QColor(56, 56, 56, int(0.8 * 255))
-        selected_bg_color = QtGui.QColor(56, 56, 56, 204)
+        # Determine background color based on selection.
+        selected_bg_color = QtGui.QColor(58, 58, 63, 224)
         transparent_bg_color = (
             Qt.GlobalColor.transparent
         )  # Or your default item background from QSS
@@ -775,7 +793,6 @@ class SplitterTable(QtWidgets.QTableWidget):
 
             # 2. Set specific initial widths using fixed indices
             initial_wide_width = 200
-            initial_narrow_width = 50
 
             # Use fixed indices: 0='#', 1='Title', 2='Artists', 3='Album'
             hash_col = 0
@@ -808,25 +825,23 @@ class SplitterTable(QtWidgets.QTableWidget):
                     f"[SplitterTable] Set width for Album (col {album_col}) to {initial_wide_width} and mode to Stretch"
                 )
 
-            # Set initial width for Quality column (index 5)
-            quality_col = 5
-            if quality_col < num_cols:
-                self.setColumnWidth(quality_col, 180)  # Set initial width for Quality
-                logger.debug(
-                    f"[SplitterTable] Set width for Quality (col {quality_col}) to 180"
-                )
-
-            # Set initial width for Progress column (index 7 when Spotify)
-            progress_col = 7
-            if progress_col < num_cols:
-                # Check header text to be sure it's the Progress column
-                progress_header_item = self.horizontalHeaderItem(progress_col)
-                if progress_header_item and progress_header_item.text() == "Progress":
-                    self.setColumnWidth(
-                        progress_col, 120
-                    )  # Set initial width for Progress
+            preferred_widths = {
+                "Release Year": 95,
+                "BPM": 65,
+                "Key": 80,
+                "Genre": 140,
+                "Label": 160,
+                "Length": 75,
+                "Quality": 150,
+                "Status": 220,
+                "Progress": 120,
+            }
+            for header_text, width in preferred_widths.items():
+                col_index = self._get_column_index_by_header(header_text)
+                if col_index >= 0:
+                    self.setColumnWidth(col_index, width)
                     logger.debug(
-                        f"[SplitterTable] Set width for Progress (col {progress_col}) to 120"
+                        f"[SplitterTable] Set width for {header_text} (col {col_index}) to {width}"
                     )
 
             # Other columns ('Length', 'Quality', 'Link Status') will size interactively.
@@ -1007,10 +1022,6 @@ class SplitterTable(QtWidgets.QTableWidget):
         else:
             # Expand the row
             logger.debug(f"[SplitterTable] Expanding row {row}.")
-            # Get the full metadata stored in the main row's status item (column 6)
-            status_item = self.item(row, 6)
-            # status_data = status_item.data(QtCore.Qt.ItemDataRole.UserRole) if status_item else {} # Old way
-            # item_metadata = status_item.data(QtCore.Qt.ItemDataRole.UserRole) if status_item else {} # No longer get candidates from here
             # Get raw candidates from the indicator_data, which should now reliably store them
             candidates_raw = indicator_data.get("candidates_list")
             # Get the currently linked track ID from the main row's indicator data to pass to CandidateWidget

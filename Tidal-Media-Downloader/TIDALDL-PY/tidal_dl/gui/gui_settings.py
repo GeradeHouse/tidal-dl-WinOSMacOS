@@ -145,6 +145,7 @@ class SettingsPage(QtWidgets.QWidget):
         self.chkSaveAlbumInfo: Optional[QCheckBox] = None
         self.chkShowPlaylistIcons: Optional[QCheckBox] = None
         self.spinPlaylistIconSize: Optional[QSpinBox] = None
+        self.chkUseCamelotKeyNotation: Optional[QCheckBox] = None
         self.btnBack: Optional[QPushButton] = None
         self.btnSave: Optional[QPushButton] = None
         self.btnSpotifyHelp: Optional[QPushButton] = None

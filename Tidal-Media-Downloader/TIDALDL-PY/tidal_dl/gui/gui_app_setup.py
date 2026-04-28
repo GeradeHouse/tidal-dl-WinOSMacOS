@@ -287,23 +287,35 @@ def apply_global_stylesheet(app: QApplication, font_size: int = 11):
         /* Table Widget Styling */
         QTableWidget {{
             background-color: transparent;
-            gridline-color: #444;
-            color: #ccc;
+            gridline-color: rgba(255, 255, 255, 0.12);
+            color: #f0f0f0;
             border: none;
+            outline: 0;
+            selection-background-color: rgba(58, 58, 63, 0.88);
+            selection-color: #ffffff;
         }}
         QHeaderView::section {{
-            background-color: #242429;
-            color: #aaa;
-            padding: 4px;
-            border: 1px solid #333;
+            background-color: rgba(36, 36, 41, 0.92);
+            color: #d0d0d0;
+            padding: 6px 8px;
+            border: 1px solid rgba(255, 255, 255, 0.10);
             font-weight: bold;
         }}
         QTableWidget::item {{
-            padding-left: 5px;
+            padding: 6px 9px;
+            border: none;
+            color: #f0f0f0;
+        }}
+        QTableWidget::item:hover {{
+            background-color: rgba(255, 255, 255, 0.045);
         }}
         QTableWidget::item:selected {{
-            background-color: #3a3a3f;
-            color: #fff;
+            background-color: rgba(58, 58, 63, 0.88);
+            color: #ffffff;
+        }}
+        QTableWidget::item:focus {{
+            outline: 0;
+            border: none;
         }}
 
         /* Other Widgets */
