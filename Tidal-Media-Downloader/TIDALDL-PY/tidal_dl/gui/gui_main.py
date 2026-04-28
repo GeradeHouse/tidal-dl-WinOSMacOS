@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
     QSplitterHandle,
     QStackedLayout,
     QApplication,
+    QMenu,
 )
 from PyQt6.QtCore import (
     Qt,
@@ -36,6 +37,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QPainter,
     QColor,
+    QAction,
     QKeyEvent,
     QMouseEvent,
     QPaintEvent,
@@ -691,8 +693,14 @@ class MainView(QWidget):
         self.player_logic.volumeChangedSignal.connect(
             self.play_bar_widget.update_volume
         )
+        self.player_logic.outputDeviceChanged.connect(
+            self.play_bar_widget.set_output_device_label
+        )
         self.player_logic.shuffleRepeatChanged.connect(
             self.play_bar_widget.update_shuffle_repeat_state
+        )
+        self.play_bar_widget.set_output_device_label(
+            getattr(self.player_logic, "_selected_output_device_name", "Default Playback Device")
         )
 
         self.play_bar_widget.playPauseClicked.connect(
@@ -707,6 +715,9 @@ class MainView(QWidget):
         )
         self.play_bar_widget.volumeChanged.connect(self.player_logic.set_volume)
         self.play_bar_widget.muteClicked.connect(self.player_logic.toggle_mute)
+        self.play_bar_widget.outputDeviceMenuRequested.connect(
+            self._show_output_device_menu
+        )
 
         # --- Add these lines to connect the progress signals ---
 
@@ -719,6 +730,280 @@ class MainView(QWidget):
         self.download_handler.downloadStarted.connect(self.tree_handler.on_job_started)
         self.download_handler.downloadFinished.connect(self.tree_handler.on_job_finished)
         self.linking_gui_handler.linkProgress.connect(self.tree_handler.on_job_progress)
+
+    @pyqtSlot(QPoint)
+    def _show_output_device_menu(self, global_pos: QPoint):
+        menu = QMenu(self)
+        devices = self.player_logic.get_output_devices()
+        selected_id = self.player_logic.selected_output_device_id()
+
+        for device_info in devices:
+            device_id = str(device_info.get("id", "") or "")
+            name = str(device_info.get("name", "Default Playback Device") or "Default Playback Device")
+            action = menu.addAction(name)
+            if action is None:
+                continue
+            action.setCheckable(True)
+            action.setChecked(device_id == selected_id)
+            action.triggered.connect(
+                lambda _checked=False, selected_device_id=device_id: self.player_logic.set_output_device(selected_device_id)
+            )
+
+        menu.exec(global_pos)
+
+    def _get_artist_names_for_track(self, track: Track) -> str:
+        artists = getattr(track, "artists", None)
+        if artists and isinstance(artists, list):
+            names = [str(getattr(artist, "name", "")).strip() for artist in artists if getattr(artist, "name", None)]
+            if names:
+                return ", ".join(names)
+
+        if hasattr(artists, "name") and getattr(artists, "name", None):
+            return str(getattr(artists, "name"))
+
+        artist = getattr(track, "artist", None)
+        if hasattr(artist, "name") and getattr(artist, "name", None):
+            return str(getattr(artist, "name"))
+
+        return "Unknown Artist"
+
+    def _play_tidal_track(self, track_to_play: Track) -> None:
+        album = getattr(track_to_play, "album", None)
+        duration = getattr(track_to_play, "duration", 0) or 0
+        try:
+            duration_ms = int(float(duration)) * 1000
+        except (TypeError, ValueError):
+            duration_ms = 0
+        player_track_info = {
+            "id": getattr(track_to_play, "id", None),
+            "title": getattr(track_to_play, "title", "Unknown Title"),
+            "artist": self._get_artist_names_for_track(track_to_play),
+            "album_title": getattr(album, "title", None) if album else "Unknown Album",
+            "duration_ms": duration_ms,
+            "album_art_id": getattr(album, "cover", None) if album else None,
+        }
+        self.player_logic.play_track(player_track_info)
+
+    def _get_spotify_artist_text(self, spotify_info: Dict[str, Any]) -> str:
+        artists_raw = spotify_info.get("artists", [])
+        names: List[str] = []
+        if isinstance(artists_raw, list):
+            for artist in artists_raw:
+                if isinstance(artist, dict):
+                    name = str(artist.get("name", "")).strip()
+                else:
+                    name = str(artist).strip()
+                if name:
+                    names.append(name)
+        return ", ".join(names) if names else "Unknown Artist"
+
+    def _show_spotify_track_placeholder(
+        self,
+        spotify_info: Dict[str, Any],
+        title_prefix: str = "[Spotify]",
+    ) -> None:
+        duration_ms = spotify_info.get("duration_ms", 0) or 0
+        try:
+            duration_ms_int = int(duration_ms)
+        except (TypeError, ValueError):
+            duration_ms_int = 0
+        self.play_bar_widget.set_track_info(
+            f"{title_prefix} {spotify_info.get('name', 'Unknown')}",
+            self._get_spotify_artist_text(spotify_info),
+        )
+        self.play_bar_widget.update_progress(0, duration_ms_int)
+
+    def _get_playable_spotify_tidal_track(
+        self,
+        row: int,
+        item_data: Dict[str, Any],
+    ) -> Optional[Track]:
+        playable_link_statuses = {
+            "cached_linked",
+            "found",
+            "auto_linked",
+            "manual_linked",
+            "cached_linked_full",
+            "cached_linked_id_fetched",
+            "found_uncertain",
+        }
+        if item_data.get("link_status") not in playable_link_statuses:
+            return None
+
+        tidal_track = item_data.get("tidal_track")
+        if isinstance(tidal_track, Track):
+            return tidal_track
+
+        tidal_track_id = item_data.get("tidal_track_id")
+        if not tidal_track_id:
+            return None
+
+        try:
+            fetched_track = TIDAL_API.getTrack(str(tidal_track_id), suppress_debug_prints=True)
+        except Exception as exc:
+            logger_gui.warning(
+                "Could not fetch cached linked TIDAL track %s for playback: %s",
+                tidal_track_id,
+                exc,
+            )
+            return None
+
+        if isinstance(fetched_track, Track) and getattr(fetched_track, "id", None):
+            item_data["tidal_track"] = fetched_track
+            title_item = self.tableWidget.item(row, 1)
+            if title_item:
+                title_item.setData(Qt.ItemDataRole.UserRole, item_data)
+            return fetched_track
+
+        return None
+
+    def _get_current_spotify_playlist_id(self) -> Optional[str]:
+        playlist_obj = self.s_playlist_obj
+        if isinstance(playlist_obj, dict) and playlist_obj.get("type") == "spotify":
+            playlist_data = playlist_obj.get("data", {})
+            if isinstance(playlist_data, dict) and playlist_data.get("id"):
+                return str(playlist_data.get("id"))
+        return None
+
+    def _should_auto_link_spotify_track_for_playback(self, item_data: Dict[str, Any]) -> bool:
+        link_status = str(item_data.get("link_status") or "not_linked")
+        non_auto_link_statuses = {
+            "linking",
+            "manual_review_needed",
+            "candidates_only",
+            "not_found",
+        }
+        return link_status not in non_auto_link_statuses
+
+    def _start_spotify_link_then_play(self, row: int, spotify_info: Dict[str, Any]) -> None:
+        if self.linking_active:
+            logger_gui.info(
+                "Spotify track playback auto-link skipped because another linking job is already active."
+            )
+            self._show_spotify_track_placeholder(spotify_info)
+            return
+
+        required_keys = ("name", "artists", "album", "id")
+        if not all(key in spotify_info for key in required_keys):
+            logger_gui.warning(
+                "Spotify track playback auto-link skipped because required metadata is missing: %s",
+                spotify_info,
+            )
+            self._show_spotify_track_placeholder(spotify_info)
+            return
+
+        playlist_id = self._get_current_spotify_playlist_id()
+        if not playlist_id:
+            logger_gui.info(
+                "Spotify track playback auto-link skipped because no active Spotify playlist context was found."
+            )
+            self._show_spotify_track_placeholder(spotify_info)
+            return
+
+        target_spotify_id = str(spotify_info.get("id") or "")
+        if not target_spotify_id:
+            self._show_spotify_track_placeholder(spotify_info)
+            return
+
+        pending = {"done": False}
+
+        def _cleanup_pending_connections() -> None:
+            try:
+                self.s_linkingFinished.disconnect(_on_linking_finished)
+            except TypeError:
+                pass
+            try:
+                self.s_linkingError.disconnect(_on_linking_error)
+            except TypeError:
+                pass
+
+        def _is_target_spotify_track(finished_row: int, finished_spotify_data: Optional[Dict[str, Any]]) -> bool:
+            if isinstance(finished_spotify_data, dict):
+                finished_spotify_id = str(finished_spotify_data.get("id") or "")
+                if finished_spotify_id:
+                    return finished_spotify_id == target_spotify_id
+            return finished_row == row
+
+        def _on_linking_finished(
+            finished_row: int,
+            tidal_track: Optional[Track],
+            candidates: Optional[List[Dict[str, Any]]],
+            score: Optional[int],
+            finished_spotify_data: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            if pending["done"] or not _is_target_spotify_track(finished_row, finished_spotify_data):
+                return
+
+            pending["done"] = True
+            _cleanup_pending_connections()
+
+            if isinstance(tidal_track, Track):
+                if candidates:
+                    logger_gui.info(
+                        "Spotify auto-link for playback returned an uncertain TIDAL match with candidates; manual review is required before playback. TIDAL track ID %s.",
+                        getattr(tidal_track, "id", None),
+                    )
+                    self._show_spotify_track_placeholder(spotify_info)
+                    return
+
+                if score is not None and score > 1:
+                    logger_gui.info(
+                        "Spotify auto-link for playback returned an uncertain TIDAL match without alternatives; playing TIDAL track ID %s.",
+                        getattr(tidal_track, "id", None),
+                    )
+                else:
+                    logger_gui.info(
+                        "Spotify auto-link for playback succeeded with TIDAL track ID %s.",
+                        getattr(tidal_track, "id", None),
+                    )
+                self._play_tidal_track(tidal_track)
+                return
+
+            if candidates:
+                logger_gui.info(
+                    "Spotify auto-link for playback found manual candidates only; playback was not started."
+                )
+            else:
+                logger_gui.info(
+                    "Spotify auto-link for playback did not find a TIDAL match; playback was not started."
+                )
+            self._show_spotify_track_placeholder(spotify_info)
+
+        def _on_linking_error(
+            finished_row: int,
+            error_message: str,
+            finished_spotify_data: Optional[Dict[str, Any]],
+        ) -> None:
+            if pending["done"] or not _is_target_spotify_track(finished_row, finished_spotify_data):
+                return
+
+            pending["done"] = True
+            _cleanup_pending_connections()
+            logger_gui.warning(
+                "Spotify auto-link for playback failed before playback could start: %s",
+                error_message,
+            )
+            self._show_spotify_track_placeholder(spotify_info)
+
+        def _on_link_worker_done() -> None:
+            if pending["done"]:
+                return
+
+            pending["done"] = True
+            _cleanup_pending_connections()
+            logger_gui.info(
+                "Spotify auto-link for playback ended before a link result was produced."
+            )
+            self._show_spotify_track_placeholder(spotify_info)
+
+        logger_gui.info(
+            "Auto-linking Spotify track before playback: %s",
+            spotify_info.get("name", "Unknown"),
+        )
+        self._show_spotify_track_placeholder(spotify_info, "[Linking]")
+        self.s_linkingFinished.connect(_on_linking_finished)
+        self.s_linkingError.connect(_on_linking_error)
+        self.startLinkingWorker([(row, spotify_info)], playlist_id, _on_link_worker_done)
 
     @pyqtSlot(QtWidgets.QTableWidgetItem)
     def _on_table_item_double_clicked(self, item: QtWidgets.QTableWidgetItem):
@@ -736,55 +1021,21 @@ class MainView(QWidget):
             track_to_play = item_data
         elif isinstance(item_data, dict) and item_data.get("type") == "spotify_track":
             spotify_info = item_data.get("data")
-            valid_link_statuses = [
-                "cached_linked",
-                "found",
-                "auto_linked",
-                "manual_linked",
-                "cached_linked_full",
-                "cached_linked_id_fetched",
-                "found_uncertain",
-            ]
-            if (
-                spotify_info
-                and item_data.get("link_status") in valid_link_statuses
-                and "tidal_track" in item_data
-                and isinstance(item_data.get("tidal_track"), Track)
-            ):
-                track_to_play = item_data.get("tidal_track")
-            else:
+            if not isinstance(spotify_info, dict):
+                return
+
+            track_to_play = self._get_playable_spotify_tidal_track(row, item_data)
+            if track_to_play is None:
+                if not self._should_auto_link_spotify_track_for_playback(item_data):
+                    self._show_spotify_track_placeholder(spotify_info)
+                    return
+                self._start_spotify_link_then_play(row, spotify_info)
                 return
 
         if track_to_play:
-            artist_names = "Unknown Artist"
-            if track_to_play.artists and isinstance(track_to_play.artists, list):
-                artist_names = ", ".join(
-                    [a.name for a in track_to_play.artists if hasattr(a, "name")]
-                )
-            elif hasattr(track_to_play.artists, "name"):
-                artist_names = track_to_play.artists.name
-
-            player_track_info = {
-                "id": track_to_play.id,
-                "title": track_to_play.title,
-                "artist": artist_names,
-                "album_title": (
-                    track_to_play.album.title if track_to_play.album else "Unknown Album"
-                ),
-                "duration_ms": (
-                    track_to_play.duration * 1000 if track_to_play.duration else 0
-                ),
-                "album_art_id": (
-                    track_to_play.album.cover if track_to_play.album else None
-                ),
-            }
-            self.player_logic.play_track(player_track_info)
+            self._play_tidal_track(track_to_play)
         elif spotify_info:
-            self.play_bar_widget.set_track_info(
-                f"[Spotify] {spotify_info.get('name', 'Unknown')}",
-                ", ".join(spotify_info.get("artists", ["Unknown Artist"])),
-            )
-            self.play_bar_widget.update_progress(0, spotify_info.get("duration_ms", 0))
+            self._show_spotify_track_placeholder(spotify_info)
 
     @pyqtSlot(dict)
     def _on_player_track_changed(self, track_info: Dict[str, Any]):

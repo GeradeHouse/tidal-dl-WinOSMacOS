@@ -33,7 +33,7 @@ from moviepy.audio.io.AudioFileClip import AudioFileClip
 from mutagen import File as MutagenFile
 
 from .decryption import *
-from .format import getAlbumPath, getTrackPath
+from .format import getAlbumPath, getAudioTypeFolder, getTrackPath
 from .metadata.album import AlbumMetadata
 from .metadata.track import TrackMetadata
 from .metadata.tagger import tag_file
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from tidal_dl.gui.gui_main import MainView  # type: ignore
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.ERROR)  # Set specific level for this module
+logger.setLevel(logging.INFO)  # Download diagnostics need INFO-level phase markers
 
 # Set up GUI logging with INFO level for this modul- LAZY LOADED
 def _setup_gui_logging():
@@ -106,6 +106,60 @@ def log_ffprobe_info(filepath: str, stage_name: str):
         )
 
 
+def _track_diag_identity(track: Optional[Track]) -> str:
+    if track is None:
+        return "track_id=None title=None"
+    track_id = getattr(track, "id", None)
+    title = getattr(track, "title", None)
+    return f"track_id={track_id} title={title!r}"
+
+
+def _log_phase_start(phase: str, track: Optional[Track] = None, extra: str = "") -> float:
+    started_at = time.monotonic()
+    logger.info(
+        "DL_PHASE_START phase=%s %s extra=%s",
+        phase,
+        _track_diag_identity(track),
+        extra or "-",
+    )
+    return started_at
+
+
+def _log_phase_end(
+    phase: str,
+    started_at: float,
+    track: Optional[Track] = None,
+    extra: str = "",
+) -> None:
+    elapsed_seconds = time.monotonic() - started_at
+    logger.info(
+        "DL_PHASE_END phase=%s elapsed=%.3fs %s extra=%s",
+        phase,
+        elapsed_seconds,
+        _track_diag_identity(track),
+        extra or "-",
+    )
+
+
+def _log_phase_error(
+    phase: str,
+    started_at: float,
+    track: Optional[Track] = None,
+    extra: str = "",
+    exc: Optional[BaseException] = None,
+) -> None:
+    elapsed_seconds = time.monotonic() - started_at
+    logger.error(
+        "DL_PHASE_ERROR phase=%s elapsed=%.3fs %s extra=%s error=%s",
+        phase,
+        elapsed_seconds,
+        _track_diag_identity(track),
+        extra or "-",
+        str(exc) if exc else "-",
+        exc_info=exc is not None,
+    )
+
+
 def __isSkip__(finalpath: str, url: str) -> bool:
     if not SETTINGS.checkExist:
         return False
@@ -157,6 +211,25 @@ def _extract_download_root_and_relative_playlist_dir(
     candidate_path: str,
 ) -> tuple[Optional[str], Optional[str]]:
     normalized_path = os.path.normpath(os.path.abspath(candidate_path))
+    configured_download_root = os.path.normpath(
+        os.path.abspath(get_user_download_path(SETTINGS.downloadPath))
+    )
+    candidate_dir = os.path.dirname(normalized_path)
+    audio_type_folders = {"flac", "mp3", "m4a", "mp4", "aac", "unknown"}
+    relative_to_configured_root: Optional[str] = None
+    try:
+        maybe_relative = os.path.relpath(candidate_dir, configured_download_root)
+        if maybe_relative not in {"", "."} and not maybe_relative.startswith(".."):
+            relative_to_configured_root = os.path.normpath(maybe_relative)
+    except ValueError:
+        # Different drive letters (Windows): continue with playlist-segment fallback.
+        relative_to_configured_root = None
+
+    if relative_to_configured_root:
+        relative_parts = relative_to_configured_root.split(os.sep)
+        if relative_parts and relative_parts[0].lower() in audio_type_folders:
+            return configured_download_root, relative_to_configured_root
+
     path_parts = normalized_path.split(os.sep)
 
     if "Playlists" in path_parts:
@@ -175,21 +248,10 @@ def _extract_download_root_and_relative_playlist_dir(
         return download_root, relative_playlist_dir
 
     # Fallback for custom playlist folder formats that do not include a "Playlists" segment.
-    configured_download_root = os.path.normpath(
-        os.path.abspath(get_user_download_path(SETTINGS.downloadPath))
-    )
-    candidate_dir = os.path.dirname(normalized_path)
-
-    try:
-        relative_playlist_dir = os.path.relpath(candidate_dir, configured_download_root)
-    except ValueError:
-        # Different drive letters (Windows): cannot build a stable relative path.
+    if not relative_to_configured_root:
         return None, None
 
-    if relative_playlist_dir in {"", "."} or relative_playlist_dir.startswith(".."):
-        return None, None
-
-    return configured_download_root, os.path.normpath(relative_playlist_dir)
+    return configured_download_root, relative_to_configured_root
 
 
 def _extract_track_id_from_audio_tags(file_path: str) -> Optional[str]:
@@ -308,14 +370,30 @@ def _find_existing_playlist_track_path(
     album: Optional[Album],
     playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
     main_view_instance: "MainView",
+    audio_type_folder: Optional[str] = None,
+    candidate_extensions: Optional[List[str]] = None,
 ) -> Optional[str]:
     if not playlist_context:
         return None
 
-    playlist_base_path = getTrackPath(track, stream, artist, artists, album, playlist_context)
-    base_stem, _ = os.path.splitext(os.path.normpath(playlist_base_path))
-    extensions = [".flac", ".mp3", ".m4a", ".mp4"]
-    candidate_paths = [f"{base_stem}{ext}" for ext in extensions]
+    extensions = candidate_extensions or [".flac", ".mp3", ".m4a", ".mp4"]
+    candidate_paths = []
+    for extension in extensions:
+        candidate_audio_type_folder = audio_type_folder or getAudioTypeFolder(
+            stream,
+            extension=extension,
+        )
+        candidate_base_path = getTrackPath(
+            track,
+            stream,
+            artist,
+            artists,
+            album,
+            playlist_context,
+            audio_type_folder=candidate_audio_type_folder,
+        )
+        base_stem, _ = os.path.splitext(os.path.normpath(candidate_base_path))
+        candidate_paths.append(f"{base_stem}{extension}")
 
     expected_stems = {
         os.path.splitext(os.path.basename(candidate_path))[0]
@@ -330,7 +408,7 @@ def _find_existing_playlist_track_path(
             return candidate_path
 
     download_root, computed_relative_playlist_dir = _extract_download_root_and_relative_playlist_dir(
-        playlist_base_path
+        candidate_paths[0]
     )
     if not download_root or not computed_relative_playlist_dir:
         return None
@@ -374,31 +452,45 @@ def _find_existing_playlist_track_path(
         if matched:
             return matched
 
-    playlists_root = os.path.join(download_root, "Playlists")
-    if not os.path.isdir(playlists_root):
+    candidate_playlist_roots = [os.path.join(download_root, "Playlists")]
+    for audio_folder in ("flac", "mp3", "m4a", "mp4", "aac", "unknown"):
+        candidate_playlist_roots.append(os.path.join(download_root, audio_folder, "Playlists"))
+
+    playlist_roots: List[str] = []
+    seen_playlist_roots: set[str] = set()
+    for playlists_root in candidate_playlist_roots:
+        normalized_playlists_root = os.path.normpath(playlists_root)
+        if normalized_playlists_root in seen_playlist_roots:
+            continue
+        seen_playlist_roots.add(normalized_playlists_root)
+        if os.path.isdir(playlists_root):
+            playlist_roots.append(playlists_root)
+
+    if not playlist_roots:
         return None
 
     prioritized_dirs: List[str] = []
     remaining_dirs: List[str] = []
     playlist_name_key = (playlist_name or "").strip().lower()
 
-    with suppress(OSError):
-        for entry in os.scandir(playlists_root):
-            if not entry.is_dir():
-                continue
+    for playlists_root in playlist_roots:
+        with suppress(OSError):
+            for entry in os.scandir(playlists_root):
+                if not entry.is_dir():
+                    continue
 
-            entry_name_key = entry.name.strip().lower()
-            if (
-                playlist_name_key
-                and (
-                    playlist_name_key == entry_name_key
-                    or playlist_name_key in entry_name_key
-                    or entry_name_key in playlist_name_key
-                )
-            ):
-                prioritized_dirs.append(entry.path)
-            else:
-                remaining_dirs.append(entry.path)
+                entry_name_key = entry.name.strip().lower()
+                if (
+                    playlist_name_key
+                    and (
+                        playlist_name_key == entry_name_key
+                        or playlist_name_key in entry_name_key
+                        or entry_name_key in playlist_name_key
+                    )
+                ):
+                    prioritized_dirs.append(entry.path)
+                else:
+                    remaining_dirs.append(entry.path)
 
     for folder_path in prioritized_dirs:
         matched = _scan_single_playlist_folder_for_track(
@@ -492,12 +584,30 @@ def create_streamrip_metadata(track: Track, album: Album) -> TrackMetadata:
 
     # Step 3: Manually add any extra information if needed
     # For example, streamrip's model can hold composer, which we get from contributors
+    phase_started = _log_phase_start(
+        "metadata_contributors_fetch",
+        track,
+        "source=create_streamrip_metadata optional=true",
+    )
     try:
         contributors = TIDAL_API.getTrackContributors(str(track.id))
+        _log_phase_end(
+            "metadata_contributors_fetch",
+            phase_started,
+            track,
+            "source=create_streamrip_metadata optional=true",
+        )
         composers = __parseContributors__("Composer", contributors)
         if composers:
             track_meta.composer = ", ".join(composers)
     except Exception as e:
+        _log_phase_error(
+            "metadata_contributors_fetch",
+            phase_started,
+            track,
+            "source=create_streamrip_metadata optional=true",
+            e,
+        )
         logger.warning(f"Could not fetch contributors for track {track.id}: {e}")
 
     return track_meta
@@ -573,7 +683,28 @@ def __setMetaData__(
         # ---------------------------------------------------------
 
         # Step 2: Download cover art to a temporary file
-        cover_data = TIDAL_API.getCoverData(album_obj.cover, "1280", "1280")
+        phase_started = _log_phase_start(
+            "metadata_cover_fetch",
+            track,
+            f"cover={getattr(album_obj, 'cover', None)} size=1280x1280 optional=true",
+        )
+        try:
+            cover_data = TIDAL_API.getCoverData(album_obj.cover, "1280", "1280")
+            _log_phase_end(
+                "metadata_cover_fetch",
+                phase_started,
+                track,
+                f"bytes={len(cover_data) if cover_data else 0}",
+            )
+        except Exception as cover_error:
+            _log_phase_error(
+                "metadata_cover_fetch",
+                phase_started,
+                track,
+                "optional=true",
+                cover_error,
+            )
+            raise
         if cover_data:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_f:
                 temp_f.write(cover_data)
@@ -594,10 +725,28 @@ def __setMetaData__(
                     pass
 
                 # We use asyncio.run() to call the async tag_file from sync code
+                phase_started = _log_phase_start(
+                    "metadata_tag_file",
+                    track,
+                    f"file={file_name!r} attempt={attempt}/{max_retries}",
+                )
                 asyncio.run(tag_file(filepath, streamrip_meta, cover_path))
+                _log_phase_end(
+                    "metadata_tag_file",
+                    phase_started,
+                    track,
+                    f"file={file_name!r} attempt={attempt}/{max_retries}",
+                )
                 logger.info(f"Successfully tagged '{file_name}' with extensive metadata.")
                 break
             except Exception as tag_error:
+                _log_phase_error(
+                    "metadata_tag_file",
+                    phase_started,
+                    track,
+                    f"file={file_name!r} attempt={attempt}/{max_retries}",
+                    tag_error,
+                )
                 is_permission = _is_permission_denied_error(tag_error)
                 if is_permission and attempt < max_retries:
                     wait_seconds = base_delay_seconds * attempt
@@ -909,12 +1058,36 @@ def downloadTrack(
 
         if track.id is None:
             raise ValueError(f"Track '{track.title}' has no ID.")
+        phase_started = _log_phase_start(
+            "stream_url_fetch",
+            track,
+            f"requested_quality={q.value}",
+        )
         stream = TIDAL_API.getStreamUrl(str(track.id), q)
+        _log_phase_end(
+            "stream_url_fetch",
+            phase_started,
+            track,
+            f"retrieved_quality={getattr(stream, 'soundQuality', None)} codec={getattr(stream, 'codec', None)} segment_count={len(getattr(stream, 'urls', []) or [])}",
+        )
 
         artists = TIDAL_API.getArtistsName(cast(List[Artist], getattr(track, "artists", [])))
         artist = getattr(getattr(track, "artist", None), "name", "") or artists
-        path = getTrackPath(track, stream, artist, artists, album, playlist_context)
-        path = os.path.join(SETTINGS.downloadPath, path)
+        audio_type_folder = getAudioTypeFolder(
+            stream,
+            AudioQuality.MP3 if requested_mp3 else intended_quality,
+        )
+        path = getTrackPath(
+            track,
+            stream,
+            artist,
+            artists,
+            album,
+            playlist_context,
+            audio_type_folder=audio_type_folder,
+        )
+        if not os.path.isabs(path):
+            path = os.path.join(get_user_download_path(SETTINGS.downloadPath), path)
         path = os.path.normpath(path)
         aigpy.path.mkdirs(os.path.dirname(path))
 
@@ -943,6 +1116,8 @@ def downloadTrack(
                 album,
                 playlist_context,
                 main_view_instance,
+                audio_type_folder=audio_type_folder,
+                candidate_extensions=[os.path.splitext(path)[1].lower()],
             )
             if existing_playlist_track_path:
                 logger.info(
@@ -961,7 +1136,28 @@ def downloadTrack(
         tool = aigpy.download.DownloadTool(actual_download_part_path, url_list)
         tool.setUserProgress(userProgress)
         tool.setPartSize(partSize)
-        check, err = tool.start(False)
+        phase_started = _log_phase_start(
+            "download_tool_start",
+            track,
+            f"part_path={actual_download_part_path!r} segment_count={len(url_list)} part_size={partSize}",
+        )
+        try:
+            check, err = tool.start(False)
+            _log_phase_end(
+                "download_tool_start",
+                phase_started,
+                track,
+                f"success={check} err={err or ''!r}",
+            )
+        except Exception as download_error:
+            _log_phase_error(
+                "download_tool_start",
+                phase_started,
+                track,
+                f"part_path={actual_download_part_path!r} segment_count={len(url_list)}",
+                download_error,
+            )
+            raise
 
         if not check:
             logger.error(f"DL Track '{track.title}' failed: {err or ''}")
@@ -995,22 +1191,74 @@ def downloadTrack(
 
         contributors = None
         if track.id:
+            phase_started = _log_phase_start(
+                "contributors_prefetch",
+                track,
+                "source=downloadTrack optional=true",
+            )
             try:
                 contributors = TIDAL_API.getTrackContributors(str(track.id))
+                _log_phase_end(
+                    "contributors_prefetch",
+                    phase_started,
+                    track,
+                    "source=downloadTrack optional=true",
+                )
             except Exception as ex:
+                _log_phase_error(
+                    "contributors_prefetch",
+                    phase_started,
+                    track,
+                    "source=downloadTrack optional=true",
+                    ex,
+                )
                 logger.debug(f"Failed to get contributors: {ex}")
 
         lyrics = ""
         if track.id:
+            phase_started = _log_phase_start(
+                "lyrics_fetch",
+                track,
+                "optional=true",
+            )
             try:
-                lyrics = TIDAL_API.getLyrics(str(track.id)).subtitles
-                if SETTINGS.lyricFile:
+                lyrics_data = TIDAL_API.getLyrics(str(track.id))
+                lyrics = (
+                    getattr(lyrics_data, "subtitles", None)
+                    or getattr(lyrics_data, "lyrics", None)
+                    or ""
+                )
+                _log_phase_end(
+                    "lyrics_fetch",
+                    phase_started,
+                    track,
+                    f"has_lyrics={bool(lyrics)} length={len(lyrics) if lyrics else 0}",
+                )
+                if SETTINGS.lyricFile and lyrics:
                     lrcPath = path.rsplit(".", 1)[0] + ".lrc"
                     aigpy.file.write(lrcPath, lyrics, "w")
             except Exception as ex:
+                _log_phase_error(
+                    "lyrics_fetch",
+                    phase_started,
+                    track,
+                    "optional=true",
+                    ex,
+                )
                 logger.debug(f"No lyrics available: {ex}")
 
+        phase_started = _log_phase_start(
+            "metadata_set",
+            track,
+            f"path={path!r}",
+        )
         __setMetaData__(cast(Track, track), album, path, contributors, lyrics)
+        _log_phase_end(
+            "metadata_set",
+            phase_started,
+            track,
+            f"path={path!r}",
+        )
         logger.info(track.title or f"Track {track.id}")
         return True, ""
 

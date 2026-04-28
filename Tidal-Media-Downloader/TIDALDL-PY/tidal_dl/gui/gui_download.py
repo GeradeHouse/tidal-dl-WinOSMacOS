@@ -28,12 +28,12 @@ from .gui_table import SplitterTable
 from ..printf import Printf
 from ..tidal import TIDAL_API, AudioQuality, Track, Album, Playlist, Artist
 from ..download import downloadTrack as core_downloadTrack
-from ..format import getAlbumPath, getPlaylistPath, getTrackPath
+from ..format import getAudioTypeFolder, getTrackPath
 from ..model import StreamUrl
 from ..settings import SETTINGS
 from .gui_utils import show_in_folder
 from .gui_custom_dialog import ModernDarkDialog, CustomQMessageBox
-from ..paths import resource_path
+from ..paths import get_user_download_path, resource_path
 
 if TYPE_CHECKING:
     from tidal_dl.gui.gui_main import MainView
@@ -80,7 +80,7 @@ class DownloadWorker(QObject):
         try:
             # Set working directory on Windows if needed
             if platform.system() == "Windows":
-                download_path = os.path.abspath(SETTINGS.downloadPath)
+                download_path = get_user_download_path(SETTINGS.downloadPath)
                 os.makedirs(download_path, exist_ok=True)
                 # os.chdir(download_path) #removed this line, this was causing the issue
 
@@ -170,13 +170,24 @@ class DownloadWorker(QObject):
                 # Dummy stream for getTrackPath (only used for extension, which we ignore for folder)
                 dummy_stream = StreamUrl()
                 dummy_stream.codec = "flac"  # Assume FLAC for path calculation
+                audio_type_folder = getAudioTypeFolder(
+                    dummy_stream,
+                    self.download_quality,
+                )
 
                 # Compute the full path using the same logic as downloadTrack
-                computed_path = getTrackPath(first_track_item, dummy_stream, artist, artists, album=None, playlist_context=self.playlist_context)
+                computed_path = getTrackPath(
+                    first_track_item,
+                    dummy_stream,
+                    artist,
+                    artists,
+                    album=None,
+                    playlist_context=self.playlist_context,
+                    audio_type_folder=audio_type_folder,
+                )
                 final_path = os.path.dirname(computed_path)
-                
-                # Ensure the path is absolute by joining it with the base download path
-                final_path = os.path.join(os.path.abspath(SETTINGS.downloadPath), final_path)
+                if not os.path.isabs(final_path):
+                    final_path = os.path.join(get_user_download_path(SETTINGS.downloadPath), final_path)
                 final_path = os.path.normpath(final_path)
                 
                 logger.debug(f"Computed track path: '{computed_path}', folder: '{final_path}'")
@@ -559,10 +570,25 @@ class DownloadHandler(QObject):
             try:
                 sample_track = tracks_to_start[0] if tracks_to_start else None
                 if isinstance(sample_track, Track):
-                    sample_path = table_handler._build_candidate_track_paths(
+                    artists = TIDAL_API.getArtistsName(
+                        cast(List[Artist], getattr(sample_track, "artists", []))
+                    )
+                    artist = getattr(getattr(sample_track, "artist", None), "name", "") or artists
+                    dummy_stream = StreamUrl()
+                    dummy_stream.codec = "flac"
+                    audio_type_folder = getAudioTypeFolder(
+                        dummy_stream,
+                        quality_arg_str,
+                    )
+                    sample_path = getTrackPath(
                         sample_track,
-                        playlist_context,
-                    )[0]
+                        dummy_stream,
+                        artist,
+                        artists,
+                        album=None,
+                        playlist_context=playlist_context,
+                        audio_type_folder=audio_type_folder,
+                    )
                     root_and_relative = table_handler._extract_download_root_and_relative_playlist_dir(
                         sample_path
                     )

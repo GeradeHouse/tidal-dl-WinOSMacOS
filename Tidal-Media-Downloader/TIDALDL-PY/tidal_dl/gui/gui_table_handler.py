@@ -29,7 +29,7 @@ from tidal_dl.tidal import Type, Track, Playlist, Album, AudioQuality, TIDAL_API
 from tidal_dl.printf import Printf
 from tidal_dl.gui.gui_utils import format_duration_ms
 from tidal_dl.persistence import LinkPersistenceManager
-from tidal_dl.format import getTrackPath
+from tidal_dl.format import getAudioTypeFolder, getTrackPath
 from tidal_dl.paths import get_user_download_path
 from tidal_dl.model import StreamUrl
 
@@ -542,18 +542,25 @@ class TableHandler(QObject):
         dummy_stream = StreamUrl()
         dummy_stream.url = "https://local.invalid/placeholder.m4a"
         dummy_stream.codec = "aac"
-
-        base_path = getTrackPath(
-            track,
-            dummy_stream,
-            artist,
-            artists,
-            album=None,
-            playlist_context=playlist_context,
-        )
-        base_stem, _ = os.path.splitext(os.path.normpath(base_path))
         extensions_in_priority_order = [".flac", ".mp3", ".m4a", ".mp4"]
-        return [f"{base_stem}{ext}" for ext in extensions_in_priority_order]
+        candidate_paths: List[str] = []
+        for extension in extensions_in_priority_order:
+            audio_type_folder = getAudioTypeFolder(
+                dummy_stream,
+                extension=extension,
+            )
+            base_path = getTrackPath(
+                track,
+                dummy_stream,
+                artist,
+                artists,
+                album=None,
+                playlist_context=playlist_context,
+                audio_type_folder=audio_type_folder,
+            )
+            base_stem, _ = os.path.splitext(os.path.normpath(base_path))
+            candidate_paths.append(f"{base_stem}{extension}")
+        return candidate_paths
 
     def _extract_playlist_identity(
         self,
@@ -597,6 +604,25 @@ class TableHandler(QObject):
         candidate_path: str,
     ) -> tuple[Optional[str], Optional[str]]:
         normalized_path = os.path.normpath(os.path.abspath(candidate_path))
+        configured_download_root = os.path.normpath(
+            os.path.abspath(get_user_download_path(SETTINGS.downloadPath))
+        )
+        candidate_dir = os.path.dirname(normalized_path)
+        audio_type_folders = {"flac", "mp3", "m4a", "mp4", "aac", "unknown"}
+        relative_to_configured_root: Optional[str] = None
+        try:
+            maybe_relative = os.path.relpath(candidate_dir, configured_download_root)
+            if maybe_relative not in {"", "."} and not maybe_relative.startswith(".."):
+                relative_to_configured_root = os.path.normpath(maybe_relative)
+        except ValueError:
+            # Different drive letters (Windows): continue with playlist-segment fallback.
+            relative_to_configured_root = None
+
+        if relative_to_configured_root:
+            relative_parts = relative_to_configured_root.split(os.sep)
+            if relative_parts and relative_parts[0].lower() in audio_type_folders:
+                return configured_download_root, relative_to_configured_root
+
         path_parts = normalized_path.split(os.sep)
 
         if "Playlists" in path_parts:
@@ -615,22 +641,11 @@ class TableHandler(QObject):
             return download_root, relative_playlist_dir
 
         # Fallback for custom playlist folder formats that do not include a "Playlists" segment.
-        # Example: F:\Muziek\FLAC\GeradeHouse - Deeper House\...
-        configured_download_root = os.path.normpath(
-            os.path.abspath(get_user_download_path(SETTINGS.downloadPath))
-        )
-        candidate_dir = os.path.dirname(normalized_path)
-
-        try:
-            relative_playlist_dir = os.path.relpath(candidate_dir, configured_download_root)
-        except ValueError:
-            # Different drive letters (Windows): cannot build a stable relative path.
+        # Example: F:\Muziek\Tidal-dl\flac\GeradeHouse - Deeper House\...
+        if not relative_to_configured_root:
             return None, None
 
-        if relative_playlist_dir in {"", "."} or relative_playlist_dir.startswith(".."):
-            return None, None
-
-        return configured_download_root, os.path.normpath(relative_playlist_dir)
+        return configured_download_root, relative_to_configured_root
 
     def _build_existing_playlist_file_index(
         self,
@@ -667,7 +682,7 @@ class TableHandler(QObject):
             persisted_relative_playlist_dir,
         ]
 
-        target_dir: Optional[str] = None
+        target_dirs: List[str] = []
         searched_relative_dirs: Set[str] = set()
         for relative_dir in preferred_relative_dirs:
             if not relative_dir:
@@ -678,32 +693,32 @@ class TableHandler(QObject):
             searched_relative_dirs.add(normalized_relative_dir)
             candidate_dir = os.path.join(download_root, normalized_relative_dir)
             if os.path.isdir(candidate_dir):
-                target_dir = candidate_dir
-                break
+                target_dirs.append(candidate_dir)
 
-        if not target_dir:
+        if not target_dirs:
             return set(), set()
 
         indexed_stems: Set[str] = set()
         indexed_track_ids: Set[str] = set()
         allowed_extensions = {".flac", ".mp3", ".m4a", ".mp4"}
 
-        with suppress(OSError):
-            for entry in os.scandir(target_dir):
-                if not entry.is_file():
-                    continue
+        for target_dir in target_dirs:
+            with suppress(OSError):
+                for entry in os.scandir(target_dir):
+                    if not entry.is_file():
+                        continue
 
-                stem, extension = os.path.splitext(entry.name)
-                if extension.lower() not in allowed_extensions:
-                    continue
+                    stem, extension = os.path.splitext(entry.name)
+                    if extension.lower() not in allowed_extensions:
+                        continue
 
-                normalized_stem = self._normalize_stem_for_match(stem)
-                if normalized_stem:
-                    indexed_stems.add(normalized_stem)
+                    normalized_stem = self._normalize_stem_for_match(stem)
+                    if normalized_stem:
+                        indexed_stems.add(normalized_stem)
 
-                tags_track_id = self._extract_track_id_from_audio_tags(entry.path)
-                if tags_track_id:
-                    indexed_track_ids.add(tags_track_id)
+                    tags_track_id = self._extract_track_id_from_audio_tags(entry.path)
+                    if tags_track_id:
+                        indexed_track_ids.add(tags_track_id)
 
         return indexed_stems, indexed_track_ids
 
@@ -855,30 +870,44 @@ class TableHandler(QObject):
             if matched:
                 return matched
 
-        playlists_root = os.path.join(download_root, "Playlists")
-        if not os.path.isdir(playlists_root):
+        candidate_playlist_roots = [os.path.join(download_root, "Playlists")]
+        for audio_folder in ("flac", "mp3", "m4a", "mp4", "aac", "unknown"):
+            candidate_playlist_roots.append(os.path.join(download_root, audio_folder, "Playlists"))
+
+        playlist_roots: List[str] = []
+        seen_playlist_roots: Set[str] = set()
+        for playlists_root in candidate_playlist_roots:
+            normalized_playlists_root = os.path.normpath(playlists_root)
+            if normalized_playlists_root in seen_playlist_roots:
+                continue
+            seen_playlist_roots.add(normalized_playlists_root)
+            if os.path.isdir(playlists_root):
+                playlist_roots.append(playlists_root)
+
+        if not playlist_roots:
             return None
 
         prioritized_dirs: List[str] = []
         remaining_dirs: List[str] = []
         playlist_name_key = (playlist_name or "").strip().lower()
 
-        with suppress(OSError):
-            for entry in os.scandir(playlists_root):
-                if not entry.is_dir():
-                    continue
-
-                if playlist_name_key:
-                    entry_name_key = entry.name.strip().lower()
-                    if (
-                        playlist_name_key == entry_name_key
-                        or playlist_name_key in entry_name_key
-                        or entry_name_key in playlist_name_key
-                    ):
-                        prioritized_dirs.append(entry.path)
+        for playlists_root in playlist_roots:
+            with suppress(OSError):
+                for entry in os.scandir(playlists_root):
+                    if not entry.is_dir():
                         continue
 
-                remaining_dirs.append(entry.path)
+                    if playlist_name_key:
+                        entry_name_key = entry.name.strip().lower()
+                        if (
+                            playlist_name_key == entry_name_key
+                            or playlist_name_key in entry_name_key
+                            or entry_name_key in playlist_name_key
+                        ):
+                            prioritized_dirs.append(entry.path)
+                            continue
+
+                    remaining_dirs.append(entry.path)
 
         for folder_path in prioritized_dirs:
             matched = self._scan_single_playlist_folder_for_track(

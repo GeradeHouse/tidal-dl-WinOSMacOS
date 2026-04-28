@@ -37,6 +37,7 @@ class PlayBarWidget(QWidget):
     seekPositionChanged = pyqtSignal(int)  # Emits percentage (0-1000)
     volumeChanged = pyqtSignal(int)  # Emits volume (0-100)
     muteClicked = pyqtSignal(bool)
+    outputDeviceMenuRequested = pyqtSignal(QPoint)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -172,12 +173,17 @@ class PlayBarWidget(QWidget):
             QSize(28, 28),
             checkable=True,
         )
+        self.output_device_button = QPushButton("▾")
+        self.output_device_button.setFixedSize(QSize(28, 28))
+        self.output_device_button.setToolTip("Audio output device")
+        self.output_device_button.setObjectName("PlayerControlButton")
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(75)
         self.volume_slider.setFixedWidth(100)
 
         volume_layout.addStretch()
+        volume_layout.addWidget(self.output_device_button)
         volume_layout.addWidget(self.mute_button)
         volume_layout.addWidget(self.volume_slider)
 
@@ -197,8 +203,19 @@ class PlayBarWidget(QWidget):
         )  # valueChanged for programmatic changes
         self.volume_slider.valueChanged.connect(self.volumeChanged.emit)
         self.mute_button.toggled.connect(self.muteClicked.emit)
+        self.output_device_button.clicked.connect(self._on_output_device_button_clicked)
 
         self.apply_styles()
+
+    def _on_output_device_button_clicked(self):
+        global_pos = self.output_device_button.mapToGlobal(
+            self.output_device_button.rect().bottomLeft()
+        )
+        self.outputDeviceMenuRequested.emit(global_pos)
+
+    def set_output_device_label(self, device_name: str):
+        label = device_name or "Default Playback Device"
+        self.output_device_button.setToolTip(f"Audio output device: {label}")
 
     def _create_player_button(
         self,

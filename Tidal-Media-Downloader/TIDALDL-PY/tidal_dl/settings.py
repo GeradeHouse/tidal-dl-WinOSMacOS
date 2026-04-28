@@ -39,6 +39,8 @@ class Settings(aigpy.model.ModelBase):
     tidalStartCollapsed = True
     showPlaylistIcons = True
     playlistIconSize = 25
+    playbackOutputDeviceId = ""
+    playbackOutputDeviceName = "Default Playback Device"
 
     downloadPath = "./Downloads/"
     audioQuality = enums.AudioQuality.LOSSLESS
@@ -116,6 +118,10 @@ class Settings(aigpy.model.ModelBase):
             self.showPlaylistIcons = True
         if not hasattr(self, "playlistIconSize"):
             self.playlistIconSize = 25
+        if not hasattr(self, "playbackOutputDeviceId"):
+            self.playbackOutputDeviceId = ""
+        if not hasattr(self, "playbackOutputDeviceName") or not self.playbackOutputDeviceName:
+            self.playbackOutputDeviceName = "Default Playback Device"
         if not hasattr(self, "playlistCoverCachePath"):
             self.playlistCoverCachePath = None
         if (
@@ -179,6 +185,8 @@ class Settings(aigpy.model.ModelBase):
         data["tidalStartCollapsed"] = self.tidalStartCollapsed
         data["showPlaylistIcons"] = self.showPlaylistIcons
         data["playlistIconSize"] = self.playlistIconSize
+        data["playbackOutputDeviceId"] = self.playbackOutputDeviceId
+        data["playbackOutputDeviceName"] = self.playbackOutputDeviceName
         data["fontSize"] = self.fontSize
         txt = json.dumps(data, indent=4)  # Add indent for readability
         aigpy.file.write(self._path_, txt, "w+")

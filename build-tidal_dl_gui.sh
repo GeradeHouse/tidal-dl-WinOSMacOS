@@ -28,7 +28,7 @@ APP_NAME="tidal_dl_gui"
 OPENSSL_PREFIX=""
 
 PKG_ROOT="${SCRIPT_DIR}/Tidal-Media-Downloader/TIDALDL-PY/tidal_dl"
-GUI_MAIN="${PKG_ROOT}/gui/gui.py"
+GUI_MAIN="${PKG_ROOT}/gui/gui_main.py"
 ASSETS_DIR="${PKG_ROOT}/assets"
 
 ICON_PATH="${ASSETS_DIR}/icons/icon-tidal-dl-gui.icns"
@@ -104,7 +104,7 @@ LAUNCHER="${PKG_ROOT}/gui/__entry_launcher__.py"
 cat > "${LAUNCHER}" <<'PY'
 # -*- coding: utf-8 -*-
 import sys
-from tidal_dl.gui.gui import main
+from tidal_dl.gui.gui_main import main
 if __name__ == "__main__":
     sys.exit(main())
 PY

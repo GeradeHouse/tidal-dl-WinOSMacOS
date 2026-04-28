@@ -41,7 +41,6 @@ from xml.etree import ElementTree as ET
 
 from tidal_dl import apiKey
 from tidal_dl.enums import AudioQuality, Type
-from tidal_dl.format import getAlbumPath, getTrackPath
 from tidal_dl.model import (
     Album,
     Artist,
@@ -158,6 +157,62 @@ class TidalAPI(object):
             or "token has expired" in text
         )
 
+    def _get_request_optional_hint(self, path: str, urlpre: str) -> str:
+        """Best-effort hint for whether a failing GET is optional/non-critical."""
+        normalized_path = str(path or "").strip("/").lower()
+        normalized_host = str(urlpre or "").lower()
+
+        if normalized_path.endswith("/lyrics") or "listen.tidal.com" in normalized_host:
+            return "known_optional:lyrics_metadata"
+        if normalized_path.endswith("/contributors"):
+            return "known_optional:contributors_metadata"
+        if "/playbackinfo" in normalized_path:
+            return "critical:playback_stream"
+        if "/items" in normalized_path:
+            return "unknown:items_endpoint_may_be_playlist_download_or_cover_collage"
+        if normalized_path.startswith("users/") and normalized_path.endswith("/playlists"):
+            return "critical:startup_playlist_refresh"
+        return "unknown"
+
+    def _log_unauthorized_get_diagnostic(
+        self,
+        *,
+        path: str,
+        urlpre: str,
+        params: Dict[str, Any],
+        response: requests.Response,
+        token_expired_detected: bool,
+    ) -> None:
+        """Logs endpoint-level context for 401 responses without exposing tokens."""
+        response_text = (response.text or "").replace("\r", " ").replace("\n", " ")
+        response_text = response_text[:300]
+        request_url = getattr(response, "url", "") or ""
+        optional_hint = self._get_request_optional_hint(path, urlpre)
+        api_profile = "unknown"
+        try:
+            api_profile = str(self.apiKey.get("platform", "unknown")) if self.apiKey else "unset"
+        except Exception:
+            api_profile = "unknown"
+
+        redacted_params = dict(params or {})
+        for sensitive_key in ("access_token", "token", "client_secret", "refresh_token"):
+            if sensitive_key in redacted_params:
+                redacted_params[sensitive_key] = "<redacted>"
+
+        logger.error(
+            "TIDAL_401_DIAG path=%s urlpre=%s status=%s request_url=%s optional_hint=%s "
+            "token_expired_detected=%s api_profile=%s params=%s response_body=%s",
+            path,
+            urlpre,
+            response.status_code,
+            request_url,
+            optional_hint,
+            token_expired_detected,
+            api_profile,
+            redacted_params,
+            response_text,
+        )
+
     def _persist_runtime_token(self) -> None:
         """Persists refreshed runtime token data to token settings file."""
         try:
@@ -264,7 +319,15 @@ class TidalAPI(object):
                         return {}
                 
                 if respond.status_code == 401:
-                    if self._is_token_expired_response(respond):
+                    token_expired_detected = self._is_token_expired_response(respond)
+                    self._log_unauthorized_get_diagnostic(
+                        path=path,
+                        urlpre=urlpre,
+                        params=params,
+                        response=respond,
+                        token_expired_detected=token_expired_detected,
+                    )
+                    if token_expired_detected:
                         if not refresh_attempted and self._try_refresh_after_unauthorized():
                             refresh_attempted = True
                             continue
@@ -936,16 +999,67 @@ class TidalAPI(object):
             return getattr(result.playlists, "items", []) if result.playlists else []
         return []
 
+    def _emptyLyrics(self, id: str) -> Lyrics:
+        lyrics = Lyrics()
+        lyrics.trackId = str(id)
+        lyrics.lyrics = ""
+        lyrics.subtitles = ""
+        return lyrics
+
     def getLyrics(self, id: str) -> Lyrics:
-        data: Dict[str, Any] = self.__get__(
-            f"tracks/{str(id)}/lyrics", urlpre="https://listen.tidal.com/v1/"
-        )
-        model = aigpy.model.dictToModel(data, Lyrics())
-        if model is None:
-            raise Exception(
-                f"Failed to convert API response to Lyrics model for track ID {id}"
-            )
-        return cast(Lyrics, model)
+        """Best-effort lyrics retrieval using the streamrip-style TIDAL host."""
+        url = f"https://tidal.com/v1/tracks/{str(id)}/lyrics"
+        params: Dict[str, Any] = {"countryCode": self.key.countryCode}
+
+        try:
+            response = self.session.get(url, params=params, timeout=15)
+
+            if response.status_code in (401, 403, 404):
+                logger.debug(
+                    "Lyrics unavailable for track %s: status=%s body=%s",
+                    id,
+                    response.status_code,
+                    (response.text or "").replace("\r", " ").replace("\n", " ")[:200],
+                )
+                return self._emptyLyrics(id)
+
+            if not response.ok:
+                logger.debug(
+                    "Lyrics request failed for track %s: status=%s body=%s",
+                    id,
+                    response.status_code,
+                    (response.text or "").replace("\r", " ").replace("\n", " ")[:200],
+                )
+                return self._emptyLyrics(id)
+
+            try:
+                data = response.json()
+            except json.JSONDecodeError as e:
+                logger.debug("Lyrics response JSON decode failed for track %s: %s", id, e)
+                return self._emptyLyrics(id)
+
+            if not isinstance(data, dict):
+                logger.debug("Lyrics response for track %s was not a JSON object.", id)
+                return self._emptyLyrics(id)
+
+            model = aigpy.model.dictToModel(data, Lyrics())
+            if model is None:
+                logger.debug("Could not convert lyrics response to Lyrics model for track %s.", id)
+                return self._emptyLyrics(id)
+
+            lyrics_model = cast(Lyrics, model)
+            if lyrics_model.lyrics is None:
+                lyrics_model.lyrics = ""
+            if lyrics_model.subtitles is None:
+                lyrics_model.subtitles = ""
+            return lyrics_model
+
+        except requests.exceptions.RequestException as e:
+            logger.debug("Lyrics request exception for track %s: %s", id, e)
+            return self._emptyLyrics(id)
+        except Exception as e:
+            logger.debug("Unexpected lyrics retrieval error for track %s: %s", id, e)
+            return self._emptyLyrics(id)
 
     def getItems(self, id: str, type: Type) -> Tuple[List[Track], List[Any]]:
         path_map = {

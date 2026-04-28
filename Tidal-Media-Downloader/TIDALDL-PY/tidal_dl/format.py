@@ -17,7 +17,7 @@ import aigpy
 
 # Import singleton and enums needed for path formatting
 from .settings import SETTINGS
-from .enums import Type
+from .enums import AudioQuality, Type
 from .model import Album, Playlist, Track, StreamUrl
 from .paths import get_user_download_path
 
@@ -111,6 +111,61 @@ def __getExtension__(stream: StreamUrl) -> str:
     return '.m4a'
 
 
+def _normalize_audio_type_folder(folder_name: Optional[str]) -> str:
+    """Normalizes audio folder names to stable, safe lowercase directory names."""
+    normalized = __fixPath__(folder_name or "").strip().strip(".").lower()
+    return normalized or "unknown"
+
+
+def getAudioTypeFolder(
+    stream: Optional[StreamUrl] = None,
+    requested_audio_type: Optional[Union[str, AudioQuality]] = None,
+    extension: Optional[str] = None,
+) -> str:
+    """Determines the download subfolder name for an audio file type."""
+    requested_value = ""
+    if isinstance(requested_audio_type, AudioQuality):
+        requested_value = requested_audio_type.name.lower()
+    elif requested_audio_type is not None:
+        requested_value = str(requested_audio_type).strip().lower()
+
+    requested_value = requested_value.replace("-", "_").replace(" ", "_")
+    if "mp3" in requested_value:
+        return "mp3"
+    if "aac" in requested_value or requested_value == AudioQuality.LOW.name.lower():
+        return "m4a"
+    if (
+        "flac" in requested_value
+        or "lossless" in requested_value
+        or requested_value == AudioQuality.HIGH.name.lower()
+        or requested_value == AudioQuality.HI_RES_LOSSLESS.name.lower()
+    ):
+        return "flac"
+    if requested_value in {"m4a", "mp4"}:
+        return requested_value
+
+    explicit_extension = (extension or "").strip().lower()
+    if explicit_extension and not explicit_extension.startswith("."):
+        explicit_extension = f".{explicit_extension}"
+
+    if explicit_extension in {".flac", ".mp3", ".m4a", ".mp4"}:
+        return explicit_extension.lstrip(".")
+
+    stream_url = str(getattr(stream, "url", "") or "") if stream else ""
+    codec_lower = str(getattr(stream, "codec", "") or "").lower() if stream else ""
+    sound_quality = str(getattr(stream, "soundQuality", "") or "").upper() if stream else ""
+
+    if ".flac" in stream_url.lower() or "flac" in codec_lower:
+        return "flac"
+    if sound_quality in {"HIGH", "LOSSLESS", "HI_RES", "HI_RES_LOSSLESS"}:
+        return "flac"
+
+    inferred_extension = __getExtension__(stream) if stream else ".m4a"
+    if inferred_extension in {".flac", ".m4a", ".mp4"}:
+        return inferred_extension.lstrip(".")
+    return _normalize_audio_type_folder(inferred_extension)
+
+
 def getAlbumPath(album: Album, artistName: str, albumArtistName: str, flag: str) -> Optional[str]:
     """Generates the directory path for an album based on settings."""
     if not album or not hasattr(album, 'title'):
@@ -159,7 +214,7 @@ def getAlbumPath(album: Album, artistName: str, albumArtistName: str, flag: str)
     return full_path
 
 
-def getPlaylistPath(playlist: Union[Playlist, Dict[str, Any]]) -> Optional[str]:
+def getPlaylistPath(playlist: Union[Playlist, Dict[str, Any]], base_path: Optional[str] = None) -> Optional[str]:
     """Generates the directory path for a playlist based on settings."""
     playlistName = "Unknown Playlist"
     playlistUUID = "UnknownUUID"
@@ -179,8 +234,8 @@ def getPlaylistPath(playlist: Union[Playlist, Dict[str, Any]]) -> Optional[str]:
     relative_path = relative_path.replace(R"{PlaylistUUID}", playlistUUID)
     relative_path = relative_path.replace(R"{PlaylistName}", playlistName)
 
-    base_path = get_user_download_path(SETTINGS.downloadPath)
-    full_path = os.path.join(base_path, relative_path.strip())
+    resolved_base_path = base_path or get_user_download_path(SETTINGS.downloadPath)
+    full_path = os.path.join(resolved_base_path, relative_path.strip())
 
     return full_path
 
@@ -201,10 +256,10 @@ def _resolve_playlist_path_from_context(
             return os.path.join(base_path, "Tracks")
 
         if context_type == "spotify":
-            return getPlaylistPath(playlist_context)
+            return getPlaylistPath(playlist_context, base_path)
 
         if isinstance(context_data, Playlist):
-            return getPlaylistPath(context_data)
+            return getPlaylistPath(context_data, base_path)
 
         if isinstance(context_data, dict):
             playlist_name = __fixPath__(
@@ -224,12 +279,12 @@ def _resolve_playlist_path_from_context(
         return None
 
     if isinstance(playlist_context, Playlist):
-        return getPlaylistPath(playlist_context)
+        return getPlaylistPath(playlist_context, base_path)
 
     return None
 
 
-def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists: str, album: Optional[Album] = None, playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None) -> str:
+def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists: str, album: Optional[Album] = None, playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None, audio_type_folder: Optional[str] = None) -> str:
     """Generates the full file path for a track based on context and settings."""
     logger.debug(f"getTrackPath: artist='{artist}', artists='{artists}', track.title='{track.title if track else 'None'}'")
     if not track or not hasattr(track, 'title') or not stream:
@@ -288,8 +343,10 @@ def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists
     filename_format = re.sub(r"\s*([-._])\s*(\1\s*)+", r" \1 ", filename_format)
     filename_format = re.sub(r"\s*([-._])\s*", r" \1 ", filename_format)
 
-    # Get the resolved, absolute base download path
-    base_path = get_user_download_path(SETTINGS.downloadPath)
+    # Get the resolved, absolute base download path and group downloads by audio type.
+    download_root = get_user_download_path(SETTINGS.downloadPath)
+    audio_folder = _normalize_audio_type_folder(audio_type_folder or getAudioTypeFolder(stream))
+    base_path = os.path.join(download_root, audio_folder)
 
     # Determine the subdirectory structure
     sub_folder = ""
