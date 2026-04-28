@@ -196,9 +196,7 @@ class LinkingGuiHandler(QObject):
             return
 
         # --- Text Logic ---
-        selected_indices = sorted(
-            list(set(idx.row() for idx in table.selectedIndexes()))
-        )
+        selected_indices = table.getSelectedRows()
         button_text = "Link Tracks"
 
         if selected_indices:
@@ -414,9 +412,7 @@ class LinkingGuiHandler(QObject):
             return
 
         table = self.table_handler.table_widget
-        selected_indices = sorted(
-            list(set(idx.row() for idx in table.selectedIndexes()))
-        )
+        selected_indices = table.getSelectedRows()
 
         if selected_indices:
             self.startLinkingSelectedTracks(selected_indices)

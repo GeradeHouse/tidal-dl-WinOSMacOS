@@ -1601,10 +1601,8 @@ class TableHandler(QObject):
         if not index.isValid():
             return
 
-        selected_rows_indices = sorted(
-            list(set(idx.row() for idx in table.selectedIndexes()))
-        )
-        if not selected_rows_indices:
+        selected_rows_indices = table.getSelectedRows()
+        if index.row() not in selected_rows_indices:
             selected_rows_indices = [index.row()]
 
         first_row_index = selected_rows_indices[0]

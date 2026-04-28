@@ -11,9 +11,9 @@
 A custom table widget that displays data in columns with interactive selection capabilities.
 This table widget extends QTableWidget to provide specialized behavior for displaying and selecting
 rows of data, typically representing media tracks for download. The widget supports:
-- Row-based selection with distinctive highlighting
+- Row-based selection with standard single-click replacement and distinctive highlighting
 - Shift-click for range selection
-- Ctrl-click for toggling individual row selection
+- Ctrl-click/Cmd-click for toggling individual row selection
 - Smart column resizing that maintains specific columns at fixed widths while
     dynamically adjusting others to fill available space
 - Clipboard operations (Ctrl+C for copying selected rows)
@@ -36,7 +36,7 @@ Usage example:
 import os
 import logging
 import time
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Set
 
 # Third-party imports
 from PyQt6 import QtWidgets, QtCore, QtGui
@@ -75,8 +75,8 @@ _setup_gui_logging()
 
 # The SelectableLabel and ColumnWidget classes have been replaced by a QTableWidget–based implementation.
 # The new SplitterTable class below implements a spreadsheet–like widget that supports row selection
-# for download. Clicking on any cell in a row toggles that row's selection, and the entire row is highlighted
-# with a uniform background color.
+# for download. Clicking on any cell in a row selects that row, while Ctrl/Cmd-click toggles
+# individual rows; selected rows are highlighted with a uniform background color.
 #
 # At initialization:
 #   - All columns (0 "Index", 1 "Title", 2 "Artist", 3 "Length", and 4 "Quality") are set to be interactive,
@@ -173,6 +173,7 @@ class SplitterTable(QtWidgets.QTableWidget):
         # Data structures for row selection.
         self.selectedRows = set()
         self.lastClickedRow = None
+        self._selection_before_mouse_press = set()
 
         # Variables for mouse–based toggling.
         self._mousePressPos = None
@@ -196,6 +197,8 @@ class SplitterTable(QtWidgets.QTableWidget):
             # Connect sort indicator changed to collapse sub-rows
             h_header.sortIndicatorChanged.connect(self.on_sort_indicator_changed)
 
+        self.itemSelectionChanged.connect(self._on_selection_model_changed)
+
     def set_linking_gui_handler(self, handler):
         self.linking_gui_handler = handler
 
@@ -208,6 +211,62 @@ class SplitterTable(QtWidgets.QTableWidget):
         self.setRowCount(0)
         self.selectedRows.clear()
         self.lastClickedRow = None
+        self._selection_before_mouse_press = set()
+
+    def _is_toggle_selection_modifier(self, modifiers) -> bool:
+        """Return True when the platform toggle-selection modifier is pressed."""
+        toggle_modifiers = (
+            Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier
+        )
+        return bool(modifiers & toggle_modifiers)
+
+    def _get_selection_model_rows(self) -> Set[int]:
+        """Return the row indices currently selected by Qt's selection model."""
+        selection_model = self.selectionModel()
+        if not selection_model:
+            return set()
+        return {
+            index.row()
+            for index in selection_model.selectedRows()
+            if 0 <= index.row() < self.rowCount()
+        }
+
+    def _apply_selected_rows_to_selection_model(self) -> None:
+        """Synchronize Qt's selection model with the custom selectedRows set."""
+        selection_model = self.selectionModel()
+        model = self.model()
+        if not selection_model or not model:
+            return
+
+        valid_rows = {
+            row
+            for row in self.selectedRows
+            if 0 <= row < self.rowCount()
+        }
+        self.selectedRows = valid_rows
+
+        if not valid_rows or self.columnCount() <= 0:
+            selection_model.clearSelection()
+            return
+
+        item_selection = QtCore.QItemSelection()
+        for row in sorted(valid_rows):
+            top_left_index = model.index(row, 0)
+            bottom_right_index = model.index(row, self.columnCount() - 1)
+            if top_left_index.isValid() and bottom_right_index.isValid():
+                item_selection.select(top_left_index, bottom_right_index)
+
+        selection_model.select(
+            item_selection,
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
+        )
+
+    @QtCore.pyqtSlot()
+    def _on_selection_model_changed(self) -> None:
+        """Keep custom highlighting state aligned with native Qt selection changes."""
+        self.selectedRows = self._get_selection_model_rows()
+        self._update_row_selection_visuals()
 
     def _get_length_column_index(self) -> int:
         """Resolve and cache the current 'Length' column index based on header labels."""
@@ -330,12 +389,14 @@ class SplitterTable(QtWidgets.QTableWidget):
         Records the initial mouse position and the row index at the press location.
         """
         if e:
+            self._selection_before_mouse_press = set(self.selectedRows)
             self._mousePressPos = e.pos()
             index = self.indexAt(self._mousePressPos)
             self._mousePressRow = index.row() if index.isValid() else None
             self._dragging = False
         else:
             # Handle the case where e is None, perhaps reset state or log
+            self._selection_before_mouse_press = set()
             self._mousePressPos = None
             self._mousePressRow = None
             self._dragging = False
@@ -357,8 +418,8 @@ class SplitterTable(QtWidgets.QTableWidget):
     # Fix parameter name mismatch: event -> e
     def mouseReleaseEvent(self, e: QtGui.QMouseEvent | None):
         """
-        If the mouse is released without dragging, interprets the click as a row selection toggle.
-        Supports SHIFT-click for range selection.
+        If the mouse is released without dragging, applies standard row selection behavior.
+        Supports SHIFT-click for range selection and Ctrl/Cmd-click for toggling rows.
         """
         super().mouseReleaseEvent(e)
         if e is None:
@@ -388,14 +449,18 @@ class SplitterTable(QtWidgets.QTableWidget):
                         )
                         self._toggle_expand(clicked_row)
                         e.accept()  # Consume the event if we handled the expand toggle
+                        self._mousePressPos = None
+                        self._mousePressRow = None
+                        self._dragging = False
+                        self._selection_before_mouse_press = set(self.selectedRows)
                         return  # Stop further processing for this click
 
                 # If not an indicator click, proceed with normal selection logic
                 if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                     self._handle_shift_click(clicked_row)
-                elif e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                elif self._is_toggle_selection_modifier(e.modifiers()):
                     logger.debug(
-                        f"[SplitterTable] Ctrl-Click detected on row {clicked_row}"
+                        f"[SplitterTable] Toggle-modifier click detected on row {clicked_row}"
                     )
                     self._toggle_row_selection(clicked_row)
                 else:
@@ -404,6 +469,7 @@ class SplitterTable(QtWidgets.QTableWidget):
                     )
                     self._handle_single_click(clicked_row)
 
+                self._apply_selected_rows_to_selection_model()
                 logger.debug(
                     f"[SplitterTable] mouseReleaseEvent finished click handling. SelectedRows: {self.selectedRows}"
                 )
@@ -411,13 +477,7 @@ class SplitterTable(QtWidgets.QTableWidget):
 
         elif e.button() == Qt.MouseButton.LeftButton and self._dragging:
             # Update selection state after drag
-            selection_model = self.selectionModel()
-            if selection_model:  # Add check
-                selected_indexes = selection_model.selectedRows()
-                self.selectedRows = {index.row() for index in selected_indexes}
-            else:
-                logger.warning("Could not get selection model after drag.")
-                self.selectedRows = set()  # Reset selection if model is None
+            self.selectedRows = self._get_selection_model_rows()
 
             # Update last clicked row based on release position
             index_at_release = self.indexAt(e.pos())
@@ -431,15 +491,13 @@ class SplitterTable(QtWidgets.QTableWidget):
         self._mousePressPos = None
         self._mousePressRow = None
         self._dragging = False
+        self._selection_before_mouse_press = set(self.selectedRows)
 
     def _handle_single_click(self, row):
         """
-        Handles a single click: toggles the row's selection state.
+        Handles a single click: select only the clicked row.
         """
-        if row in self.selectedRows:
-            self.selectedRows.remove(row)
-        else:
-            self.selectedRows.add(row)
+        self.selectedRows = {row}
         self.lastClickedRow = row
         # Log after single click handling
         logger.debug(
@@ -469,12 +527,14 @@ class SplitterTable(QtWidgets.QTableWidget):
 
     def _toggle_row_selection(self, row):
         """
-        Toggles the row selection for CTRL–click.
+        Toggles the row selection for Ctrl/Cmd-click.
         """
-        if row in self.selectedRows:
-            self.selectedRows.remove(row)
+        selected_rows = set(self._selection_before_mouse_press)
+        if row in selected_rows:
+            selected_rows.remove(row)
         else:
-            self.selectedRows.add(row)
+            selected_rows.add(row)
+        self.selectedRows = selected_rows
         self.lastClickedRow = row
         # Log after toggle handling (remove duplicate log)
         logger.debug(
@@ -591,7 +651,7 @@ class SplitterTable(QtWidgets.QTableWidget):
         Captures Ctrl+A to select all rows and Ctrl+C to copy selected rows.
         """
         if e:  # Check if the event object is not None
-            if e.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if self._is_toggle_selection_modifier(e.modifiers()):
                 if e.key() == Qt.Key.Key_A:
                     # Select all rows.
                     self.selectedRows = set(range(self.rowCount()))
@@ -599,22 +659,7 @@ class SplitterTable(QtWidgets.QTableWidget):
                     logger.debug(
                         f"[SplitterTable] keyPressEvent handled Ctrl+A. Selected all {len(self.selectedRows)} rows."
                     )
-                    # Explicitly update the QTableWidget's selection model
-                    selection_model = self.selectionModel()
-                    model = self.model()  # Get model
-                    if selection_model and model:  # Add checks
-                        top_left_index = model.index(0, 0)
-                        bottom_right_index = model.index(
-                            self.rowCount() - 1, self.columnCount() - 1
-                        )
-                        item_selection = QtCore.QItemSelection(
-                            top_left_index, bottom_right_index
-                        )
-                        selection_model.select(
-                            item_selection,
-                            QtCore.QItemSelectionModel.SelectionFlag.Select
-                            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
-                        )
+                    self._apply_selected_rows_to_selection_model()
                     # Update custom visuals (background color)
                     self._update_row_selection_visuals()
                     e.accept()
@@ -813,6 +858,10 @@ class SplitterTable(QtWidgets.QTableWidget):
         """
         Returns a sorted list of selected row indices.
         """
+        selection_model_rows = self._get_selection_model_rows()
+        if selection_model_rows != self.selectedRows:
+            self.selectedRows = selection_model_rows
+            self._update_row_selection_visuals()
         return sorted(list(self.selectedRows))
 
     @QtCore.pyqtSlot(int)
