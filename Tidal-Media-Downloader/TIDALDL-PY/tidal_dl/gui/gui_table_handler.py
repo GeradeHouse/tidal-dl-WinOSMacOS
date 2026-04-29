@@ -98,6 +98,7 @@ class TableHandler(QObject):
         self._quality_executor = ThreadPoolExecutor(max_workers=2)
         self._quality_state_lock = threading.Lock()
         self._quality_cache_access_lock = threading.Lock()
+        self._track_metadata_cache_access_lock = threading.Lock()
         self._quality_inflight_track_ids: Set[str] = set()
         self._quality_attempted_track_ids: Set[str] = set()
         self._completed_status_executor = ThreadPoolExecutor(max_workers=2)
@@ -213,8 +214,9 @@ class TableHandler(QObject):
         quality_item.setToolTip(quality_text)
 
     def _get_requested_metadata_values(self, track: Optional[Track]) -> Dict[str, str]:
-        use_camelot_key = bool(getattr(SETTINGS, "useCamelotKeyNotation", False))
-        return get_track_display_metadata(track, use_camelot_key=use_camelot_key)
+        enriched_track = self._apply_cached_track_metadata(track)
+        use_camelot_key = bool(getattr(SETTINGS, "useCamelotKeyNotation", True))
+        return get_track_display_metadata(enriched_track, use_camelot_key=use_camelot_key)
 
     def _set_row_requested_metadata_text(
         self,
@@ -238,6 +240,8 @@ class TableHandler(QObject):
                 self.table_widget.setItem(row, col, item)
             item.setText(text)
             item.setToolTip(text)
+
+        self.table_widget._update_row_appearance_for_row(row)
 
     def _replace_row_tidal_track_metadata(
         self,
@@ -277,6 +281,52 @@ class TableHandler(QObject):
     def _set_cached_quality_threadsafe(self, track_id: str, quality_text: str) -> None:
         with self._quality_cache_access_lock:
             self.persistence_manager.set_cached_track_quality(track_id, quality_text)
+
+    def _get_cached_track_metadata_threadsafe(self, track_id: str) -> Dict[str, str]:
+        with self._track_metadata_cache_access_lock:
+            return self.persistence_manager.get_cached_track_metadata(track_id)
+
+    def _set_cached_track_metadata_threadsafe(
+        self,
+        track_id: str,
+        metadata: Dict[str, str],
+    ) -> None:
+        with self._track_metadata_cache_access_lock:
+            self.persistence_manager.set_cached_track_metadata(track_id, metadata)
+
+    def _apply_cached_track_metadata(self, track: Optional[Track]) -> Optional[Track]:
+        if not isinstance(track, Track):
+            return track
+
+        track_id = str(getattr(track, "id", "") or "").strip()
+        if not track_id:
+            return track
+
+        cached_metadata = self._get_cached_track_metadata_threadsafe(track_id)
+        cached_genre = cached_metadata.get("genre", "").strip()
+        if cached_genre:
+            if not getattr(track, "genre", None):
+                setattr(track, "genre", cached_genre)
+            if not getattr(track, "genres", None):
+                setattr(
+                    track,
+                    "genres",
+                    [part.strip() for part in cached_genre.split(",") if part.strip()],
+                )
+
+        return track
+
+    def _row_needs_genre_resolution(self, row: int) -> bool:
+        if not self.table_widget:
+            return False
+
+        genre_col = self.column_indices.get("Genre")
+        if genre_col is None:
+            return False
+
+        genre_item = self.table_widget.item(row, genre_col)
+        genre_text = genre_item.text().strip() if genre_item else ""
+        return not genre_text or genre_text == MISSING_METADATA_TEXT
 
     def _enqueue_track_quality_resolution(self, track_id: str) -> None:
         track_id = str(track_id or "").strip()
@@ -351,11 +401,15 @@ class TableHandler(QObject):
             current_text = quality_item.text().strip() if quality_item else ""
 
             if current_text and current_text not in ("-", QUALITY_PLACEHOLDER_TEXT):
+                if self._row_needs_genre_resolution(row):
+                    self._enqueue_track_quality_resolution(track_id)
                 continue
 
             cached_quality = self._get_cached_quality_threadsafe(track_id)
             if cached_quality:
                 self._set_row_quality_text(row, cached_quality)
+                if self._row_needs_genre_resolution(row):
+                    self._enqueue_track_quality_resolution(track_id)
                 continue
 
             self._set_row_quality_text(row, QUALITY_PLACEHOLDER_TEXT)
@@ -379,6 +433,13 @@ class TableHandler(QObject):
             if row_track_id == track_id:
                 self._set_row_quality_text(row, quality_text)
                 if isinstance(resolved_track, Track):
+                    metadata_values = self._get_requested_metadata_values(resolved_track)
+                    genre_text = metadata_values.get("genre", "").strip()
+                    if genre_text and genre_text != MISSING_METADATA_TEXT:
+                        self._set_cached_track_metadata_threadsafe(
+                            track_id,
+                            {"genre": genre_text},
+                        )
                     self._set_row_requested_metadata_text(row, resolved_track)
 
     def show_loading_message(self, message: str):

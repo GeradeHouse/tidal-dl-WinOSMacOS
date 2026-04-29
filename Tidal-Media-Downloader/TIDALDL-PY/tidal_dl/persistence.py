@@ -326,6 +326,89 @@ class LinkPersistenceManager:
                 f"Failed to save track quality cache for track {track_id}"
             )
 
+    def get_cached_track_metadata(self, tidal_track_id: str) -> Dict[str, str]:
+        """
+        Retrieves cached display metadata for a Tidal track ID.
+        """
+        track_id = str(tidal_track_id or "").strip()
+        if not track_id:
+            return {}
+
+        if self.links_data is None:
+            self.load_links()
+
+        links_data_dict = cast(Dict[str, Any], self.links_data)
+        metadata_cache = links_data_dict.get("track_metadata_cache", {})
+        if not isinstance(metadata_cache, dict):
+            return {}
+
+        entry = metadata_cache.get(track_id, {})
+        if not isinstance(entry, dict):
+            return {}
+
+        metadata = entry.get("metadata", {})
+        if not isinstance(metadata, dict):
+            return {}
+
+        cleaned: Dict[str, str] = {}
+        for key, value in metadata.items():
+            if isinstance(key, str) and isinstance(value, str) and value.strip():
+                cleaned[key.strip()] = value.strip()
+        return cleaned
+
+    def set_cached_track_metadata(self, tidal_track_id: str, metadata: Dict[str, str]) -> None:
+        """
+        Stores or updates cached display metadata for a Tidal track ID.
+        """
+        track_id = str(tidal_track_id or "").strip()
+        cleaned_metadata = {
+            str(key).strip(): str(value).strip()
+            for key, value in (metadata or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
+        if not track_id or not cleaned_metadata:
+            return
+
+        if self.links_data is None:
+            self.load_links()
+
+        links_data_dict = cast(Dict[str, Any], self.links_data)
+
+        metadata_cache = links_data_dict.get("track_metadata_cache")
+        if not isinstance(metadata_cache, dict):
+            metadata_cache = {}
+            links_data_dict["track_metadata_cache"] = metadata_cache
+
+        existing_entry = metadata_cache.get(track_id)
+        existing_metadata = (
+            existing_entry.get("metadata", {})
+            if isinstance(existing_entry, dict)
+            else {}
+        )
+        if isinstance(existing_metadata, dict):
+            merged_metadata = {
+                str(key).strip(): str(value).strip()
+                for key, value in existing_metadata.items()
+                if str(key).strip() and str(value).strip()
+            }
+        else:
+            merged_metadata = {}
+
+        merged_metadata.update(cleaned_metadata)
+
+        if isinstance(existing_entry, dict) and existing_metadata == merged_metadata:
+            return
+
+        metadata_cache[track_id] = {
+            "metadata": merged_metadata,
+            "timestamp": self._get_current_timestamp(),
+        }
+
+        if not self.save_links():
+            logger.error(
+                f"Failed to save track metadata cache for track {track_id}"
+            )
+
     def get_playlist_folder_hint(self, playlist_id: str) -> Optional[str]:
         """
         Retrieves a cached playlist folder path hint for a playlist ID.
