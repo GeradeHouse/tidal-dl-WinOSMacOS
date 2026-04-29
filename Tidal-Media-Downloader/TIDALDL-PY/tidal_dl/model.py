@@ -97,13 +97,13 @@ class Track(aigpy.model.ModelBase):
         self.bpm = None
         self.key = None
         self.keyScale = None
-        self.genre = None
-        self.genres = None
         self.explicit = False
         self.audioQuality = None
         self.copyright = None
         self.copyRight = None
         self.mediaMetadata = {}
+        self.genre = None
+        self.genres = []
         self.artist = Artist()
         self.artists = Artist()
         self.album = Album()

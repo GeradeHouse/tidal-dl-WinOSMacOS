@@ -82,6 +82,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Constants from the new implementation
 BASE = "https://api.tidalhifi.com/v1"
 AUTH_URL = "https://auth.tidal.com/v1/oauth2"
+OPENAPI_BASE = "https://openapi.tidal.com/v2"
 
 
 class NonRetriableApiError(Exception):
@@ -97,6 +98,7 @@ class TidalAPI(object):
         # The key will be properly set by the logic in 'login.py' after settings are loaded.
         # This prevents the class from incorrectly selecting the invalid key at index 0 on startup.
         self.apiKey = {}
+        self._openapi_genre_cache: Dict[str, List[str]] = {}
 
         logger.debug(f"TIDAL_API.apiKey initialized empty.")
         
@@ -857,6 +859,205 @@ class TidalAPI(object):
         except Exception as e:
             raise Exception(f"Login failed due to an unexpected error: {e}") from e
 
+    def __get_openapi__(
+        self,
+        path: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Best-effort OpenAPI v2 GET helper for metadata sidecar requests."""
+        request_params = dict(params or {})
+        url = f"{OPENAPI_BASE}/{path.lstrip('/')}"
+        refresh_attempted = False
+
+        for attempt in range(2):
+            headers = {
+                "Authorization": f"Bearer {self.key.accessToken}",
+                "Accept": "application/vnd.api+json",
+            }
+            try:
+                response = self.session.get(
+                    url,
+                    params=request_params,
+                    headers=headers,
+                    timeout=15,
+                )
+
+                if response.status_code == 401:
+                    if self._is_token_expired_response(response):
+                        if not refresh_attempted and self._try_refresh_after_unauthorized():
+                            refresh_attempted = True
+                            continue
+                    logger.debug(
+                        "OpenAPI metadata request unauthorized for path=%s status=%s body=%s",
+                        path,
+                        response.status_code,
+                        response.text[:300],
+                    )
+                    return {}
+
+                if response.status_code in (403, 404):
+                    logger.debug(
+                        "OpenAPI metadata request unavailable for path=%s status=%s body=%s",
+                        path,
+                        response.status_code,
+                        response.text[:300],
+                    )
+                    return {}
+
+                if response.status_code == 429 and attempt == 0:
+                    time.sleep(1)
+                    continue
+
+                response.raise_for_status()
+                payload = response.json()
+                return payload if isinstance(payload, dict) else {}
+
+            except Exception as exc:
+                logger.debug(
+                    "OpenAPI metadata request failed for path=%s: %s",
+                    path,
+                    exc,
+                    exc_info=True,
+                )
+                return {}
+
+        return {}
+
+    @staticmethod
+    def _openapi_genre_names_from_payload(payload: Dict[str, Any]) -> List[str]:
+        """Extract genre names from a JSON:API document if included resources are present."""
+        names: List[str] = []
+
+        def add_name(resource: Any) -> None:
+            if not isinstance(resource, dict):
+                return
+            if str(resource.get("type", "")).lower() != "genres":
+                return
+            attributes = resource.get("attributes")
+            if not isinstance(attributes, dict):
+                return
+            for key in ("name", "title", "label", "value"):
+                value = attributes.get(key)
+                if isinstance(value, str) and value.strip():
+                    names.append(value.strip())
+                    return
+
+        add_name(payload.get("data"))
+
+        included = payload.get("included")
+        if isinstance(included, list):
+            for resource in included:
+                add_name(resource)
+
+        return list(dict.fromkeys(names))
+
+    @staticmethod
+    def _openapi_genre_ids_from_payload(payload: Dict[str, Any]) -> List[str]:
+        """Extract genre IDs from JSON:API data or relationships."""
+        ids: List[str] = []
+
+        def add_id(resource: Any) -> None:
+            if not isinstance(resource, dict):
+                return
+            if str(resource.get("type", "")).lower() != "genres":
+                return
+            genre_id = resource.get("id")
+            if genre_id is not None and str(genre_id).strip():
+                ids.append(str(genre_id).strip())
+
+        data = payload.get("data")
+        if isinstance(data, list):
+            for resource in data:
+                add_id(resource)
+        else:
+            add_id(data)
+            if isinstance(data, dict):
+                relationships = data.get("relationships")
+                if isinstance(relationships, dict):
+                    genres_rel = relationships.get("genres")
+                    if isinstance(genres_rel, dict):
+                        rel_data = genres_rel.get("data")
+                        if isinstance(rel_data, list):
+                            for resource in rel_data:
+                                add_id(resource)
+                        else:
+                            add_id(rel_data)
+
+        return list(dict.fromkeys(ids))
+
+    def getTrackGenresOpenApi(self, id: str, locale: str = "en-US") -> List[str]:
+        """Return track genres from OpenAPI v2 as a best-effort metadata sidecar."""
+        track_id = str(id or "").strip()
+        if not track_id:
+            return []
+
+        if track_id in self._openapi_genre_cache:
+            return self._openapi_genre_cache[track_id]
+
+        country_code = str(getattr(self.key, "countryCode", "") or "").strip()
+        params: Dict[str, Any] = {"include": "genres"}
+        if country_code:
+            params["countryCode"] = country_code
+
+        track_payload = self.__get_openapi__(f"tracks/{track_id}", params=params)
+        genre_names = self._openapi_genre_names_from_payload(track_payload)
+        genre_ids = self._openapi_genre_ids_from_payload(track_payload)
+
+        if not genre_names:
+            relationship_params: Dict[str, Any] = {"include": "genres"}
+            if country_code:
+                relationship_params["countryCode"] = country_code
+            relationship_payload = self.__get_openapi__(
+                f"tracks/{track_id}/relationships/genres",
+                params=relationship_params,
+            )
+            genre_names = self._openapi_genre_names_from_payload(relationship_payload)
+            genre_ids.extend(self._openapi_genre_ids_from_payload(relationship_payload))
+            genre_ids = list(dict.fromkeys(genre_ids))
+
+        if not genre_names:
+            for genre_id in genre_ids:
+                genre_payload = self.__get_openapi__(
+                    f"genres/{genre_id}",
+                    params={"locale": locale},
+                )
+                genre_names.extend(self._openapi_genre_names_from_payload(genre_payload))
+
+        genre_names = list(dict.fromkeys(name for name in genre_names if name))
+        self._openapi_genre_cache[track_id] = genre_names
+        return genre_names
+
+    def enrichTrackGenresOpenApi(self, track: Track) -> Track:
+        """Attach OpenAPI v2 genre metadata to an existing Track object when available."""
+        if not isinstance(track, Track):
+            return track
+
+        existing_genres = getattr(track, "genres", None)
+        existing_genre = getattr(track, "genre", None)
+        if existing_genres or existing_genre:
+            return track
+
+        track_id = str(getattr(track, "id", "") or "").strip()
+        if not track_id:
+            return track
+
+        try:
+            genres = self.getTrackGenresOpenApi(track_id)
+        except Exception as exc:
+            logger.debug(
+                "OpenAPI genre enrichment failed for track %s: %s",
+                track_id,
+                exc,
+                exc_info=True,
+            )
+            return track
+
+        if genres:
+            setattr(track, "genres", genres)
+            setattr(track, "genre", ", ".join(genres))
+
+        return track
+
     def getAlbum(self, id: str) -> Album:
         data: Dict[str, Any] = self.__get__("albums/" + str(id))
         model = aigpy.model.dictToModel(data, Album())
@@ -918,6 +1119,7 @@ class TidalAPI(object):
             logger.debug(
                 f"[DEBUG] getTrack: converted Track object for id {id}: {track_obj} (type: {type(track_obj)})"
             )
+        track_obj = self.enrichTrackGenresOpenApi(cast(Track, track_obj))
         return cast(Track, track_obj)
 
     def getMix(self, id: str) -> Mix:
