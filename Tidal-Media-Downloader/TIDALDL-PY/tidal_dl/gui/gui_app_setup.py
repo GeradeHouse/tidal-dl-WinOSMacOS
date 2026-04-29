@@ -297,21 +297,19 @@ def apply_global_stylesheet(app: QApplication, font_size: int = 11):
         QHeaderView::section {{
             background-color: rgba(36, 36, 41, 0.92);
             color: #d0d0d0;
-            padding: 6px 8px;
+            padding: 3px 5px;
             border: 1px solid rgba(255, 255, 255, 0.10);
             font-weight: bold;
         }}
         QTableWidget::item {{
-            padding: 6px 9px;
+            padding: 0px;
             border: none;
-            color: #f0f0f0;
         }}
         QTableWidget::item:hover {{
             background-color: rgba(255, 255, 255, 0.045);
         }}
         QTableWidget::item:selected {{
             background-color: rgba(58, 58, 63, 0.88);
-            color: #ffffff;
         }}
         QTableWidget::item:focus {{
             outline: 0;

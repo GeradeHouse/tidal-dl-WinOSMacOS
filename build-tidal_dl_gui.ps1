@@ -371,13 +371,34 @@ if ($BuildType -eq "Windowed") {
     Write-Host "Building Console version (no '--noconsole' flag)."
 }
 
+# PyInstaller discovers package-provided hook directories in an isolated child
+# process. qt_material imports itself for that discovery and warns unless a Qt
+# binding is already loaded in that child process.
+$PyInstallerSupportDir = Join-Path $ProjectSourceDir "build\pyinstaller-support"
+$PyInstallerSiteCustomize = Join-Path $PyInstallerSupportDir "sitecustomize.py"
+New-Item -ItemType Directory -Path $PyInstallerSupportDir -Force | Out-Null
+Set-Content -Path $PyInstallerSiteCustomize -Encoding UTF8 -Value @'
+# Imported by Python startup during the PyInstaller build.
+try:
+    import PyQt6  # noqa: F401
+except Exception:
+    pass
+'@
+
 # --- Execute PyInstaller ---
 Write-Host "Running PyInstaller..." -ForegroundColor Yellow
 $PyInstallerBootstrap = "import sys; import PyQt6; from PyInstaller.__main__ import run; run(sys.argv[1:])"
 Write-Host "Command: $PythonPath -c `"$PyInstallerBootstrap`" $($pyinstallerArgs -join ' ')"
 
+$PreviousPythonPath = $env:PYTHONPATH
 try {
-    # Pre-import PyQt6 so qt_material's PyInstaller hook detects the active Qt binding.
+    if ([string]::IsNullOrEmpty($PreviousPythonPath)) {
+        $env:PYTHONPATH = $PyInstallerSupportDir
+    } else {
+        $env:PYTHONPATH = "$PyInstallerSupportDir$([System.IO.Path]::PathSeparator)$PreviousPythonPath"
+    }
+
+    # Pre-import PyQt6 in the parent process; sitecustomize.py handles PyInstaller's child processes.
     & $PythonPath -c $PyInstallerBootstrap @pyinstallerArgs
     # Check the exit code of the last command
     if ($LASTEXITCODE -ne 0) {
@@ -391,6 +412,13 @@ try {
 catch {
     Write-Error "An error occurred during the PyInstaller execution: $($_.Exception.Message)"
     exit 1
+}
+finally {
+    if ($null -eq $PreviousPythonPath) {
+        Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    } else {
+        $env:PYTHONPATH = $PreviousPythonPath
+    }
 }
 
 # --- Restore Original Location ---

@@ -13,7 +13,7 @@ from typing import Optional
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 
-TABLE_TEXT_MARGIN = 9
+TABLE_TEXT_MARGIN = 3
 
 # --- Setup Logging ---
 logger = logging.getLogger(__name__)
@@ -31,6 +31,28 @@ _setup_gui_logging()
 
 class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
     """Keep an item's Qt.ForegroundRole colour even when it is selected."""
+
+    def _foreground_brush(self, index: QtCore.QModelIndex) -> Optional[QtGui.QBrush]:
+        """Return the model foreground brush in a form the style palette can use."""
+        foreground = index.data(QtCore.Qt.ItemDataRole.ForegroundRole)
+        if isinstance(foreground, QtGui.QBrush):
+            return foreground
+        if isinstance(foreground, QtGui.QColor):
+            return QtGui.QBrush(foreground)
+        return None
+
+    def _apply_foreground_brush(
+        self,
+        option: QtWidgets.QStyleOptionViewItem,
+        brush: QtGui.QBrush,
+    ) -> None:
+        """Force item foreground roles so QSS defaults do not hide per-cell colours."""
+        for role in (
+            QtGui.QPalette.ColorRole.Text,
+            QtGui.QPalette.ColorRole.WindowText,
+            QtGui.QPalette.ColorRole.HighlightedText,
+        ):
+            option.palette.setBrush(role, brush)
 
     def initStyleOption(
         self,
@@ -92,6 +114,10 @@ class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
         opt = QtWidgets.QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
 
+        foreground_brush = self._foreground_brush(index)
+        if foreground_brush is not None:
+            self._apply_foreground_brush(opt, foreground_brush)
+
         # Draw the selection/hover panel over the full cell, then inset text for readability.
         background_option = QtWidgets.QStyleOptionViewItem(opt)
         background_option.text = ""
@@ -112,20 +138,34 @@ class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
             -TABLE_TEXT_MARGIN,
             0,
         )
+        if opt.rect.width() <= 0:
+            opt.rect = option.rect.adjusted(
+                TABLE_TEXT_MARGIN,
+                0,
+                -TABLE_TEXT_MARGIN,
+                0,
+            )
 
-        # If selected, pull out any custom brush and push it into the HighlightedText role
-        if opt.state & QtWidgets.QStyle.StateFlag.State_Selected:
-            brush = index.data(QtCore.Qt.ItemDataRole.ForegroundRole)
-            if isinstance(brush, QtGui.QBrush):
-                opt.palette.setBrush(QtGui.QPalette.ColorRole.HighlightedText, brush)
+        display_text = str(index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "")
+        if not display_text:
+            return
 
-        opt.state &= ~QtWidgets.QStyle.StateFlag.State_Selected
-        opt.state &= ~QtWidgets.QStyle.StateFlag.State_MouseOver
-
-        # Finally paint the text with our modified palette and readable inset.
-        style.drawControl(
-            QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
-            opt,
-            painter,  # painter is guaranteed not None here
-            opt.widget,
+        text_color = (
+            foreground_brush.color()
+            if foreground_brush is not None
+            else opt.palette.color(QtGui.QPalette.ColorRole.Text)
         )
+        font_metrics = QtGui.QFontMetrics(opt.font)
+        elided_text = font_metrics.elidedText(
+            display_text,
+            opt.textElideMode,
+            max(0, opt.rect.width()),
+        )
+
+        painter.save()
+        painter.setFont(opt.font)
+        painter.setPen(QtGui.QPen(text_color))
+        alignment = opt.displayAlignment
+        alignment_flags = alignment.value if hasattr(alignment, "value") else int(alignment)
+        painter.drawText(opt.rect, alignment_flags, elided_text)
+        painter.restore()

@@ -41,7 +41,7 @@ class Settings(aigpy.model.ModelBase):
     playlistIconSize = 25
     playbackOutputDeviceId = ""
     playbackOutputDeviceName = "Default Playback Device"
-    useCamelotKeyNotation = False
+    useCamelotKeyNotation = True
 
     downloadPath = "./Downloads/"
     audioQuality = enums.AudioQuality.LOSSLESS
@@ -124,7 +124,7 @@ class Settings(aigpy.model.ModelBase):
         if not hasattr(self, "playbackOutputDeviceName") or not self.playbackOutputDeviceName:
             self.playbackOutputDeviceName = "Default Playback Device"
         if not hasattr(self, "useCamelotKeyNotation"):
-            self.useCamelotKeyNotation = False
+            self.useCamelotKeyNotation = True
         if not hasattr(self, "playlistCoverCachePath"):
             self.playlistCoverCachePath = None
         if (

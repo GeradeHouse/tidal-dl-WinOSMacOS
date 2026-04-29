@@ -305,6 +305,11 @@ class TableHandler(QObject):
         cached_metadata = self._get_cached_track_metadata_threadsafe(track_id)
         cached_genre = cached_metadata.get("genre", "").strip()
         if cached_genre:
+            logger.info(
+                "TABLE_METADATA_DIAG applied_cached_genre track_id=%s genre=%s",
+                track_id,
+                cached_genre,
+            )
             if not getattr(track, "genre", None):
                 setattr(track, "genre", cached_genre)
             if not getattr(track, "genres", None):
@@ -436,6 +441,11 @@ class TableHandler(QObject):
                     metadata_values = self._get_requested_metadata_values(resolved_track)
                     genre_text = metadata_values.get("genre", "").strip()
                     if genre_text and genre_text != MISSING_METADATA_TEXT:
+                        logger.info(
+                            "TABLE_METADATA_DIAG caching_resolved_genre track_id=%s genre=%s",
+                            track_id,
+                            genre_text,
+                        )
                         self._set_cached_track_metadata_threadsafe(
                             track_id,
                             {"genre": genre_text},

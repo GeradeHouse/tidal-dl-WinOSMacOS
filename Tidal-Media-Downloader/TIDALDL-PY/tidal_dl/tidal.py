@@ -698,7 +698,8 @@ class TidalAPI(object):
             raise Exception(f"Authentication failed: {error_message}")
 
         # Success - extract token data
-        user_info = result.get("user") if isinstance(result.get("user"), dict) else {}
+        raw_user_info = result.get("user")
+        user_info = cast(Dict[str, Any], raw_user_info) if isinstance(raw_user_info, dict) else {}
         access_token = result.get("access_token")
         refresh_token = result.get("refresh_token")
         expires_in = result.get("expires_in")
@@ -881,6 +882,12 @@ class TidalAPI(object):
                     headers=headers,
                     timeout=15,
                 )
+                logger.info(
+                    "OPENAPI_GENRE_DIAG request path=%s status=%s url=%s",
+                    path,
+                    response.status_code,
+                    response.url,
+                )
 
                 if response.status_code == 401:
                     if self._is_token_expired_response(response):
@@ -1002,6 +1009,12 @@ class TidalAPI(object):
         track_payload = self.__get_openapi__(f"tracks/{track_id}", params=params)
         genre_names = self._openapi_genre_names_from_payload(track_payload)
         genre_ids = self._openapi_genre_ids_from_payload(track_payload)
+        logger.info(
+            "OPENAPI_GENRE_DIAG track_include track_id=%s names=%s ids=%s",
+            track_id,
+            genre_names,
+            genre_ids,
+        )
 
         if not genre_names:
             relationship_params: Dict[str, Any] = {"include": "genres"}
@@ -1014,6 +1027,12 @@ class TidalAPI(object):
             genre_names = self._openapi_genre_names_from_payload(relationship_payload)
             genre_ids.extend(self._openapi_genre_ids_from_payload(relationship_payload))
             genre_ids = list(dict.fromkeys(genre_ids))
+            logger.info(
+                "OPENAPI_GENRE_DIAG relationship track_id=%s names=%s ids=%s",
+                track_id,
+                genre_names,
+                genre_ids,
+            )
 
         if not genre_names:
             for genre_id in genre_ids:
@@ -1022,8 +1041,19 @@ class TidalAPI(object):
                     params={"locale": locale},
                 )
                 genre_names.extend(self._openapi_genre_names_from_payload(genre_payload))
+                logger.info(
+                    "OPENAPI_GENRE_DIAG genre_lookup track_id=%s genre_id=%s names=%s",
+                    track_id,
+                    genre_id,
+                    genre_names,
+                )
 
         genre_names = list(dict.fromkeys(name for name in genre_names if name))
+        logger.info(
+            "OPENAPI_GENRE_DIAG final track_id=%s names=%s",
+            track_id,
+            genre_names,
+        )
         self._openapi_genre_cache[track_id] = genre_names
         return genre_names
 
@@ -1203,9 +1233,9 @@ class TidalAPI(object):
 
     def _emptyLyrics(self, id: str) -> Lyrics:
         lyrics = Lyrics()
-        lyrics.trackId = str(id)
-        lyrics.lyrics = ""
-        lyrics.subtitles = ""
+        setattr(lyrics, "trackId", str(id))
+        setattr(lyrics, "lyrics", "")
+        setattr(lyrics, "subtitles", "")
         return lyrics
 
     def getLyrics(self, id: str) -> Lyrics:
@@ -1251,9 +1281,9 @@ class TidalAPI(object):
 
             lyrics_model = cast(Lyrics, model)
             if lyrics_model.lyrics is None:
-                lyrics_model.lyrics = ""
+                setattr(lyrics_model, "lyrics", "")
             if lyrics_model.subtitles is None:
-                lyrics_model.subtitles = ""
+                setattr(lyrics_model, "subtitles", "")
             return lyrics_model
 
         except requests.exceptions.RequestException as e:

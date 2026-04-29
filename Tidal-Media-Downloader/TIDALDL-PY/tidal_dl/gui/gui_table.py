@@ -62,6 +62,21 @@ logger.setLevel(logging.WARNING)  # Set specific level for this module
 
 TABLE_ROW_HEIGHT = 70
 
+_CAMELOT_WHEEL_COLORS: Dict[int, str] = {
+    1: "#e53935",
+    2: "#fb8c00",
+    3: "#fdd835",
+    4: "#c0ca33",
+    5: "#43a047",
+    6: "#00897b",
+    7: "#00acc1",
+    8: "#1e88e5",
+    9: "#3949ab",
+    10: "#ab47bc",
+    11: "#ec407a",
+    12: "#f06292",
+}
+
 # Set up GUI logging with INFO level for this modul- LAZY LOADED
 def _setup_gui_logging():
     """Lazy-load GUI logging setup to avoid circular imports."""
@@ -297,6 +312,29 @@ class SplitterTable(QtWidgets.QTableWidget):
                 return i
         return -1
 
+    def _extract_camelot_number(self, value: str) -> Optional[int]:
+        text = str(value or "").strip().upper()
+        if len(text) < 2:
+            return None
+        if text[-1] not in {"A", "B"}:
+            return None
+        number_text = text[:-1].strip()
+        if not number_text.isdigit():
+            return None
+        number = int(number_text)
+        if 1 <= number <= 12:
+            return number
+        return None
+
+    def _get_camelot_wheel_color(self, value: str) -> Optional[QtGui.QColor]:
+        number = self._extract_camelot_number(value)
+        if number is None:
+            return None
+        color_hex = _CAMELOT_WHEEL_COLORS.get(number)
+        if not color_hex:
+            return None
+        return QtGui.QColor(color_hex)
+
     def setRowData(
         self,
         row: int,
@@ -311,20 +349,24 @@ class SplitterTable(QtWidgets.QTableWidget):
         if row >= self.rowCount():
             self.setRowCount(row + 1)
 
-        length_col_index = self._get_length_column_index()
         quality_col_index = self._get_column_index_by_header("Quality")
         total_cols = self.columnCount()
+        centered_headers = {"Release Year", "BPM", "Key", "Length"}
 
         for col_index in range(total_cols):
             cell_text = str(row_data[col_index]) if col_index < len(row_data) else ""
             item = QtWidgets.QTableWidgetItem(cell_text)
             item.setToolTip(cell_text)
+            header_item = self.horizontalHeaderItem(col_index)
+            header_text = header_item.text() if header_item else ""
 
             # Right-align '#' column (index 0)
             if col_index == 0:
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                 )
+            elif header_text in centered_headers:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             else:
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
@@ -333,10 +375,6 @@ class SplitterTable(QtWidgets.QTableWidget):
             # Set tooltip for Quality column
             if col_index == quality_col_index:
                 item.setToolTip(cell_text)
-
-            # Center align 'Length' column
-            if col_index == length_col_index:
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
             # Store original item data (Track object or Spotify dict) in the title column (column 1)
             if col_index == 1 and track is not None:
@@ -388,6 +426,7 @@ class SplitterTable(QtWidgets.QTableWidget):
                     | QtCore.Qt.ItemFlag.ItemIsEnabled
                 )
                 self.setItem(row, col, item)
+            self._update_row_appearance_for_row(row)
         else:
             while self.rowCount() <= row:
                 self.insertRow(self.rowCount())
@@ -626,7 +665,27 @@ class SplitterTable(QtWidgets.QTableWidget):
             item = self.item(row, col)
             if item:
                 item.setBackground(bg_color_to_apply)
-                item.setForeground(fg_color_to_apply)  # Set foreground
+                foreground_brush = QtGui.QBrush(fg_color_to_apply)
+                item.setForeground(foreground_brush)  # Set foreground
+                item.setData(QtCore.Qt.ItemDataRole.ForegroundRole, foreground_brush)
+
+        key_col = self._get_column_index_by_header("Key")
+        if key_col >= 0:
+            key_item = self.item(row, key_col)
+            if key_item:
+                camelot_color = self._get_camelot_wheel_color(key_item.text())
+                if camelot_color is not None:
+                    camelot_brush = QtGui.QBrush(camelot_color)
+                    key_item.setForeground(camelot_brush)
+                    key_item.setData(QtCore.Qt.ItemDataRole.ForegroundRole, camelot_brush)
+                elif is_manual_review:
+                    manual_link_brush = QtGui.QBrush(manual_link_fg_color)
+                    key_item.setForeground(manual_link_brush)
+                    key_item.setData(QtCore.Qt.ItemDataRole.ForegroundRole, manual_link_brush)
+                else:
+                    default_brush = QtGui.QBrush(default_fg_color)
+                    key_item.setForeground(default_brush)
+                    key_item.setData(QtCore.Qt.ItemDataRole.ForegroundRole, default_brush)
 
         # Update indicator text (existing logic)
         indicator_item = self.item(row, 0)  # INDICATOR_COLUMN_INDEX = 0
@@ -753,6 +812,37 @@ class SplitterTable(QtWidgets.QTableWidget):
 
         # DO NOT call self.adjustColumnWidths() here anymore. Let Qt handle resizing.
 
+    def _compact_columns_to_viewport(self, minimum_widths_by_header: Dict[str, int]) -> None:
+        """Reduce lower-priority columns until the initial table fits the viewport."""
+        viewport = self.viewport()
+        if not viewport:
+            return
+
+        target_width = max(0, viewport.width() - 2)
+        if target_width <= 0:
+            return
+
+        total_width = sum(self.columnWidth(i) for i in range(self.columnCount()))
+        overflow = total_width - target_width
+        if overflow <= 0:
+            return
+
+        for header_text, min_width in minimum_widths_by_header.items():
+            col_index = self._get_column_index_by_header(header_text)
+            if col_index < 0:
+                continue
+
+            current_width = self.columnWidth(col_index)
+            reducible_width = max(0, current_width - min_width)
+            if reducible_width <= 0:
+                continue
+
+            reduction = min(reducible_width, overflow)
+            self.setColumnWidth(col_index, current_width - reduction)
+            overflow -= reduction
+            if overflow <= 0:
+                return
+
     def adjustColumnWidths(self):
         """
         Sets specific initial widths for some columns using fixed indices,
@@ -792,7 +882,9 @@ class SplitterTable(QtWidgets.QTableWidget):
             logger.debug("[SplitterTable] All columns set to Interactive.")
 
             # 2. Set specific initial widths using fixed indices
-            initial_wide_width = 200
+            title_width = 195
+            artists_width = 190
+            album_width = 155
 
             # Use fixed indices: 0='#', 1='Title', 2='Artists', 3='Album'
             hash_col = 0
@@ -810,30 +902,30 @@ class SplitterTable(QtWidgets.QTableWidget):
                     f"[SplitterTable] Set fixed width for # (col {hash_col}) to 40"
                 )
             if title_col < num_cols:
-                self.setColumnWidth(title_col, initial_wide_width)
+                self.setColumnWidth(title_col, title_width)
                 logger.debug(
-                    f"[SplitterTable] Set width for Title (col {title_col}) to {initial_wide_width} and mode to Stretch"
+                    f"[SplitterTable] Set width for Title (col {title_col}) to {title_width} and mode to Stretch"
                 )
             if artists_col < num_cols:
-                self.setColumnWidth(artists_col, initial_wide_width)
+                self.setColumnWidth(artists_col, artists_width)
                 logger.debug(
-                    f"[SplitterTable] Set width for Artists (col {artists_col}) to {initial_wide_width} and mode to Stretch"
+                    f"[SplitterTable] Set width for Artists (col {artists_col}) to {artists_width} and mode to Stretch"
                 )
             if album_col < num_cols:
-                self.setColumnWidth(album_col, initial_wide_width)
+                self.setColumnWidth(album_col, album_width)
                 logger.debug(
-                    f"[SplitterTable] Set width for Album (col {album_col}) to {initial_wide_width} and mode to Stretch"
+                    f"[SplitterTable] Set width for Album (col {album_col}) to {album_width} and mode to Stretch"
                 )
 
             preferred_widths = {
-                "Release Year": 95,
-                "BPM": 65,
-                "Key": 80,
-                "Genre": 140,
-                "Label": 160,
-                "Length": 75,
+                "Release Year": 88,
+                "BPM": 72,
+                "Key": 64,
+                "Genre": 120,
+                "Label": 145,
+                "Length": 70,
                 "Quality": 150,
-                "Status": 220,
+                "Status": 190,
                 "Progress": 120,
             }
             for header_text, width in preferred_widths.items():
@@ -843,6 +935,18 @@ class SplitterTable(QtWidgets.QTableWidget):
                     logger.debug(
                         f"[SplitterTable] Set width for {header_text} (col {col_index}) to {width}"
                     )
+
+            self._compact_columns_to_viewport(
+                {
+                    "Album": 110,
+                    "Label": 115,
+                    "Genre": 95,
+                    "Status": 150,
+                    "Artists": 165,
+                    "Title": 165,
+                    "Quality": 130,
+                }
+            )
 
             # Other columns ('Length', 'Quality', 'Link Status') will size interactively.
             # The last column will stretch due to stretchLastSection=True.

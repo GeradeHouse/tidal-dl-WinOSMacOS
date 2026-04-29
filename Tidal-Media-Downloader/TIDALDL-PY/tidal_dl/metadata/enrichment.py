@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable, Dict, Iterable, Optional
 
 from .album import extract_label_from_copyright
@@ -144,13 +145,18 @@ def normalize_key_name(value: Any) -> str:
         .replace("_", " ")
         .replace("-", " ")
     )
-    normalized = " ".join(normalized.split()).upper()
-    normalized = (
-        normalized.replace(" MAJOR", "")
-        .replace(" MINOR", "")
-        .replace(" MAJ", "")
-        .replace(" MIN", "")
-    )
+    normalized = " ".join(normalized.split()).upper().strip()
+    normalized = re.sub(r"\b(MAJOR|MINOR|MAJ|MIN)\b", " ", normalized)
+    normalized = re.sub(r"(MAJOR|MINOR|MAJ|MIN)$", "", normalized)
+    normalized = " ".join(normalized.split()).strip()
+    normalized = re.sub(r"^([A-G](?:#|B)?)M$", r"\1", normalized)
+
+    match = re.match(r"^([A-G])(?:\s*|_|-)?(SHARP|FLAT)$", normalized)
+    if match:
+        letter = match.group(1)
+        modifier = match.group(2)
+        normalized = f"{letter} {'SHARP' if modifier == 'SHARP' else 'FLAT'}"
+
     return _NOTE_ALIASES.get(normalized, text.strip())
 
 
@@ -158,18 +164,33 @@ def normalize_key_scale(value: Any) -> str:
     text = _clean_text(value).lower()
     if not text:
         return ""
-    if "minor" in text or text in {"min", "m"}:
+
+    normalized_text = (
+        text.replace("♯", "#")
+        .replace("♭", "b")
+        .replace("_", " ")
+        .replace("-", " ")
+    )
+
+    if "minor" in normalized_text or re.search(r"\bmin\b", normalized_text):
         return "minor"
-    if "major" in text or text in {"maj"}:
+    if "major" in normalized_text or re.search(r"\bmaj\b", normalized_text):
         return "major"
-    parts = text.replace("_", " ").replace("-", " ").split()
+
+    compact = "".join(normalized_text.split())
+    if compact in {"m", "min"} or re.match(r"^[a-g](?:#|b)?m$", compact):
+        return "minor"
+    if compact in {"maj", "major"} or re.match(r"^[a-g](?:#|b)?maj$", compact):
+        return "major"
+
+    parts = normalized_text.split()
     if parts:
         tail = parts[-1]
         if tail in {"min", "m"}:
             return "minor"
         if tail == "maj":
             return "major"
-    return text
+    return normalized_text.strip()
 
 
 def format_track_key(track: Any, *, use_camelot_key: bool = False) -> str:
