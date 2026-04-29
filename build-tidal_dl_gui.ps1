@@ -186,8 +186,15 @@ if (-not $BuildType) {
     }
 }
 
-# --- Define PyInstaller Path ---
+# --- Define Build Tool Paths ---
+$PythonPath = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 $PyInstallerPath = Join-Path $PSScriptRoot ".venv\Scripts\pyinstaller.exe"
+
+if (-not (Test-Path $PythonPath)) {
+    Write-Error "Python not found at $PythonPath."
+    Write-Error "Please ensure the virtual environment is set up."
+    exit 1
+}
 
 if (-not (Test-Path $PyInstallerPath)) {
     Write-Error "PyInstaller not found at $PyInstallerPath."
@@ -242,6 +249,7 @@ if ($BuildMode -eq "Full") {
 }
 
 Write-Host "Using PyInstaller from: $PyInstallerPath" -ForegroundColor Green
+Write-Host "Using Python from: $PythonPath" -ForegroundColor Green
 
 # --- Build Variables ---
 $AppName = "tidal-dl-gui"
@@ -365,11 +373,12 @@ if ($BuildType -eq "Windowed") {
 
 # --- Execute PyInstaller ---
 Write-Host "Running PyInstaller..." -ForegroundColor Yellow
-Write-Host "Command: $PyInstallerPath $($pyinstallerArgs -join ' ')"
+$PyInstallerBootstrap = "import sys; import PyQt6; from PyInstaller.__main__ import run; run(sys.argv[1:])"
+Write-Host "Command: $PythonPath -c `"$PyInstallerBootstrap`" $($pyinstallerArgs -join ' ')"
 
 try {
-    # Use the call operator '&' with the full path and splatting '@' for the argument array
-    & $PyInstallerPath @pyinstallerArgs
+    # Pre-import PyQt6 so qt_material's PyInstaller hook detects the active Qt binding.
+    & $PythonPath -c $PyInstallerBootstrap @pyinstallerArgs
     # Check the exit code of the last command
     if ($LASTEXITCODE -ne 0) {
         Write-Error "PyInstaller failed with exit code $LASTEXITCODE."
