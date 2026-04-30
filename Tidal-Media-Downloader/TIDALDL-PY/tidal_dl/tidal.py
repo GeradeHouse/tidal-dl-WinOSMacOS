@@ -57,7 +57,7 @@ from tidal_dl.settings import SETTINGS
 
 # Create a logger instance for this module
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.ERROR)  # Set specific level for this module
+logger.setLevel(logging.INFO)  # Keep OpenAPI metadata diagnostics visible in GUI/console logs
 
 TIDAL_COVER_ALLOWED_SIZES: Tuple[int, ...] = (80, 160, 320, 640, 1280)
 
@@ -99,6 +99,7 @@ class TidalAPI(object):
         # This prevents the class from incorrectly selecting the invalid key at index 0 on startup.
         self.apiKey = {}
         self._openapi_genre_cache: Dict[str, List[str]] = {}
+        self._openapi_genre_id_name_cache: Dict[str, str] = {}
 
         logger.debug(f"TIDAL_API.apiKey initialized empty.")
         
@@ -931,8 +932,54 @@ class TidalAPI(object):
         return {}
 
     @staticmethod
-    def _openapi_genre_names_from_payload(payload: Dict[str, Any]) -> List[str]:
-        """Extract genre names from a JSON:API document if included resources are present."""
+    def _first_openapi_text(value: Any, locale: str = "en-US") -> Optional[str]:
+        """Return the first usable text value from direct, nested, or localized OpenAPI values."""
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+
+        if isinstance(value, dict):
+            language = locale.split("-", 1)[0] if locale else "en"
+            preferred_keys = (
+                locale,
+                locale.lower(),
+                language,
+                language.lower(),
+                "en-US",
+                "en",
+                "default",
+                "name",
+                "title",
+                "label",
+                "value",
+                "text",
+                "displayName",
+            )
+            for key in preferred_keys:
+                if key in value:
+                    nested = TidalAPI._first_openapi_text(value.get(key), locale=locale)
+                    if nested:
+                        return nested
+
+            for nested_value in value.values():
+                nested = TidalAPI._first_openapi_text(nested_value, locale=locale)
+                if nested:
+                    return nested
+
+        if isinstance(value, list):
+            for item in value:
+                nested = TidalAPI._first_openapi_text(item, locale=locale)
+                if nested:
+                    return nested
+
+        return None
+
+    @staticmethod
+    def _openapi_genre_names_from_payload(
+        payload: Dict[str, Any],
+        locale: str = "en-US",
+    ) -> List[str]:
+        """Extract genre names from direct, included, nested, or localized JSON:API resources."""
         names: List[str] = []
 
         def add_name(resource: Any) -> None:
@@ -940,16 +987,45 @@ class TidalAPI(object):
                 return
             if str(resource.get("type", "")).lower() != "genres":
                 return
+
             attributes = resource.get("attributes")
-            if not isinstance(attributes, dict):
-                return
-            for key in ("name", "title", "label", "value"):
-                value = attributes.get(key)
-                if isinstance(value, str) and value.strip():
-                    names.append(value.strip())
+            if isinstance(attributes, dict):
+                for key in (
+                    "name",
+                    "title",
+                    "label",
+                    "value",
+                    "text",
+                    "displayName",
+                    "localizedName",
+                    "translations",
+                ):
+                    value = TidalAPI._first_openapi_text(
+                        attributes.get(key),
+                        locale=locale,
+                    )
+                    if value:
+                        names.append(value)
+                        return
+
+                for value in attributes.values():
+                    text = TidalAPI._first_openapi_text(value, locale=locale)
+                    if text:
+                        names.append(text)
+                        return
+
+            for key in ("name", "title", "label", "value", "text", "displayName"):
+                value = TidalAPI._first_openapi_text(resource.get(key), locale=locale)
+                if value:
+                    names.append(value)
                     return
 
-        add_name(payload.get("data"))
+        data = payload.get("data")
+        if isinstance(data, list):
+            for resource in data:
+                add_name(resource)
+        else:
+            add_name(data)
 
         included = payload.get("included")
         if isinstance(included, list):
@@ -1007,7 +1083,7 @@ class TidalAPI(object):
             params["countryCode"] = country_code
 
         track_payload = self.__get_openapi__(f"tracks/{track_id}", params=params)
-        genre_names = self._openapi_genre_names_from_payload(track_payload)
+        genre_names = self._openapi_genre_names_from_payload(track_payload, locale=locale)
         genre_ids = self._openapi_genre_ids_from_payload(track_payload)
         logger.info(
             "OPENAPI_GENRE_DIAG track_include track_id=%s names=%s ids=%s",
@@ -1024,7 +1100,10 @@ class TidalAPI(object):
                 f"tracks/{track_id}/relationships/genres",
                 params=relationship_params,
             )
-            genre_names = self._openapi_genre_names_from_payload(relationship_payload)
+            genre_names = self._openapi_genre_names_from_payload(
+                relationship_payload,
+                locale=locale,
+            )
             genre_ids.extend(self._openapi_genre_ids_from_payload(relationship_payload))
             genre_ids = list(dict.fromkeys(genre_ids))
             logger.info(
@@ -1036,11 +1115,29 @@ class TidalAPI(object):
 
         if not genre_names:
             for genre_id in genre_ids:
+                cached_genre_name = self._openapi_genre_id_name_cache.get(genre_id)
+                if cached_genre_name:
+                    genre_names.append(cached_genre_name)
+                    logger.info(
+                        "OPENAPI_GENRE_DIAG genre_lookup_cache track_id=%s genre_id=%s name=%s",
+                        track_id,
+                        genre_id,
+                        cached_genre_name,
+                    )
+                    continue
+
                 genre_payload = self.__get_openapi__(
                     f"genres/{genre_id}",
                     params={"locale": locale},
                 )
-                genre_names.extend(self._openapi_genre_names_from_payload(genre_payload))
+                lookup_names = self._openapi_genre_names_from_payload(
+                    genre_payload,
+                    locale=locale,
+                )
+                if lookup_names:
+                    self._openapi_genre_id_name_cache[genre_id] = lookup_names[0]
+                    genre_names.extend(lookup_names)
+
                 logger.info(
                     "OPENAPI_GENRE_DIAG genre_lookup track_id=%s genre_id=%s names=%s",
                     track_id,

@@ -407,6 +407,11 @@ class TableHandler(QObject):
 
             if current_text and current_text not in ("-", QUALITY_PLACEHOLDER_TEXT):
                 if self._row_needs_genre_resolution(row):
+                    logger.info(
+                        "TABLE_METADATA_DIAG enqueue_genre_resolution row=%s track_id=%s reason=quality_present",
+                        row,
+                        track_id,
+                    )
                     self._enqueue_track_quality_resolution(track_id)
                 continue
 
@@ -414,6 +419,11 @@ class TableHandler(QObject):
             if cached_quality:
                 self._set_row_quality_text(row, cached_quality)
                 if self._row_needs_genre_resolution(row):
+                    logger.info(
+                        "TABLE_METADATA_DIAG enqueue_genre_resolution row=%s track_id=%s reason=cached_quality",
+                        row,
+                        track_id,
+                    )
                     self._enqueue_track_quality_resolution(track_id)
                 continue
 
@@ -1711,14 +1721,9 @@ class TableHandler(QObject):
                                     status_item.setText("Failed")
                                     status_item.setToolTip(download_state.get("error", ""))
                             else:
-                                track_for_completion = self._extract_tidal_track_from_item_data(item_metadata)
-                                if track_for_completion:
-                                    self._enqueue_completed_status_resolution(
-                                        track_for_completion,
-                                        cast(Optional[Union[Playlist, Album, Dict[str, Any]]], playlist_context_for_display),
-                                        row=index,
-                                        reason="populate_table_idle_row",
-                                    )
+                                # Avoid scanning local download folders for every row during initial table population.
+                                # Completed-status lookup remains available through active download completion paths.
+                                pass
 
                 except Exception as e:
                     logger.error(
@@ -1889,12 +1894,13 @@ class TableHandler(QObject):
             "not_linked",
             "not_found",
             "error",
-            "linking",
             "candidates_only",
-            "manual_review_needed",
         }:
             self._set_row_requested_metadata_text(row_index, None)
             self._set_row_quality_text(row_index, "-")
+        elif status in {"linking", "manual_review_needed"}:
+            # Preserve existing matched metadata during transient/manual-review updates.
+            pass
 
         indicator_item = table.item(row_index, 0)
         if not indicator_item:
