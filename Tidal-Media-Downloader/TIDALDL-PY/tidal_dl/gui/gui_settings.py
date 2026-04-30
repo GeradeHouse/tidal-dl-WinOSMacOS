@@ -137,6 +137,8 @@ class SettingsPage(QtWidgets.QWidget):
         self.albumFolderFormatEdit: Optional[QLineEdit] = None
         self.playlistFolderFormatEdit: Optional[QLineEdit] = None
         self.trackFileFormatEdit: Optional[QLineEdit] = None
+        self.btnRestructureDownloads: Optional[QPushButton] = None
+        self.chkDebugOpenApiProviderLabel: Optional[QCheckBox] = None
         self.cmbLanguage: Optional[QComboBox] = None
         self.spinFontSize: Optional[QSpinBox] = None
         self.chkLyricFile: Optional[QCheckBox] = None
@@ -192,6 +194,10 @@ class SettingsPage(QtWidgets.QWidget):
         Opens a directory selection dialog for choosing the download location.
         """
         gui_settings_handlers.browse_directory(self)
+
+    @pyqtSlot()
+    def _trigger_download_structure_reorganization(self) -> None:
+        gui_settings_handlers._trigger_download_structure_reorganization(self)
 
     @pyqtSlot()
     def saveSettings(self):

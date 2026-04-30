@@ -74,7 +74,7 @@ class TableHandler(QObject):
     with data and handling context menus specific to the table content.
     """
 
-    trackQualityResolved = pyqtSignal(str, str, object)
+    trackMetadataResolved = pyqtSignal(str, str, object)
     completedStatusResolved = pyqtSignal(str, str, str)
 
     def __init__(
@@ -94,26 +94,26 @@ class TableHandler(QObject):
         # Initialize column_indices to prevent AttributeError if accessed before population
         self.column_indices: Dict[str, int] = {}
 
-        # Lazy quality resolution state
-        self._quality_executor = ThreadPoolExecutor(max_workers=2)
-        self._quality_state_lock = threading.Lock()
+        # Lazy track metadata resolution state
+        self._metadata_executor = ThreadPoolExecutor(max_workers=2)
+        self._metadata_state_lock = threading.Lock()
         self._quality_cache_access_lock = threading.Lock()
         self._track_metadata_cache_access_lock = threading.Lock()
-        self._quality_inflight_track_ids: Set[str] = set()
-        self._quality_attempted_track_ids: Set[str] = set()
+        self._metadata_inflight_track_ids: Set[str] = set()
+        self._metadata_attempted_track_ids: Set[str] = set()
         self._completed_status_executor = ThreadPoolExecutor(max_workers=2)
         self._completed_status_lock = threading.Lock()
         self._completed_status_inflight_keys: Set[str] = set()
         self._completed_status_cache: Dict[str, Optional[str]] = {}
         self._active_table_playlist_context_key: str = ""
         self._executors_shutdown: bool = False
-        self._visible_quality_refresh_timer = QTimer(self)
-        self._visible_quality_refresh_timer.setSingleShot(True)
-        self._visible_quality_refresh_timer.setInterval(120)
-        self._visible_quality_refresh_timer.timeout.connect(
-            self._resolve_visible_rows_quality
+        self._visible_metadata_refresh_timer = QTimer(self)
+        self._visible_metadata_refresh_timer.setSingleShot(True)
+        self._visible_metadata_refresh_timer.setInterval(120)
+        self._visible_metadata_refresh_timer.timeout.connect(
+            self._resolve_visible_rows_metadata
         )
-        self.trackQualityResolved.connect(self._on_track_quality_resolved)
+        self.trackMetadataResolved.connect(self._on_track_metadata_resolved)
         self.completedStatusResolved.connect(self._on_completed_status_resolved)
 
         if self.table_widget:
@@ -156,16 +156,16 @@ class TableHandler(QObject):
         vertical_scrollbar = self.table_widget.verticalScrollBar()
         if vertical_scrollbar:
             vertical_scrollbar.valueChanged.connect(
-                self._schedule_visible_quality_resolution
+                self._schedule_visible_metadata_resolution
             )
 
     def clear_table(self):
         if not self.table_widget:
             return
-        self._visible_quality_refresh_timer.stop()
-        with self._quality_state_lock:
-            self._quality_inflight_track_ids.clear()
-            self._quality_attempted_track_ids.clear()
+        self._visible_metadata_refresh_timer.stop()
+        with self._metadata_state_lock:
+            self._metadata_inflight_track_ids.clear()
+            self._metadata_attempted_track_ids.clear()
         with self._completed_status_lock:
             self._completed_status_inflight_keys.clear()
             self._completed_status_cache.clear()
@@ -213,10 +213,74 @@ class TableHandler(QObject):
         quality_item.setText(quality_text)
         quality_item.setToolTip(quality_text)
 
+    @staticmethod
+    def _is_missing_metadata_value(value: Optional[str]) -> bool:
+        cleaned = str(value or "").strip()
+        return not cleaned or cleaned == MISSING_METADATA_TEXT
+
+    @staticmethod
+    def _compact_metadata_display_text(header: str, value: str) -> str:
+        text = str(value or "").strip()
+        if header not in {"Genre", "Label"}:
+            return text
+
+        max_length = 34 if header == "Genre" else 30
+        if len(text) <= max_length:
+            return text
+
+        if header == "Genre":
+            parts = [part.strip() for part in text.split(",") if part.strip()]
+            if len(parts) > 2:
+                compact = ", ".join(parts[:2])
+                if len(compact) <= max_length:
+                    return f"{compact}, …"
+
+        return f"{text[: max_length - 1].rstrip()}…"
+
     def _get_requested_metadata_values(self, track: Optional[Track]) -> Dict[str, str]:
         enriched_track = self._apply_cached_track_metadata(track)
         use_camelot_key = bool(getattr(SETTINGS, "useCamelotKeyNotation", True))
-        return get_track_display_metadata(enriched_track, use_camelot_key=use_camelot_key)
+        metadata_values = get_track_display_metadata(
+            enriched_track,
+            use_camelot_key=use_camelot_key,
+        )
+
+        if isinstance(enriched_track, Track):
+            track_id = str(getattr(enriched_track, "id", "") or "").strip()
+            if track_id:
+                cached_metadata = self._get_cached_track_metadata_threadsafe(track_id)
+                for _header, key in REQUESTED_METADATA_COLUMNS:
+                    cached_value = cached_metadata.get(key, "").strip()
+                    if cached_value and self._is_missing_metadata_value(
+                        metadata_values.get(key)
+                    ):
+                        metadata_values[key] = cached_value
+
+        return metadata_values
+
+    def _merge_metadata_with_existing_row_values(
+        self,
+        row: int,
+        metadata_values: Dict[str, str],
+    ) -> Dict[str, str]:
+        if not self.table_widget:
+            return metadata_values
+
+        merged = dict(metadata_values)
+        for header, key in REQUESTED_METADATA_COLUMNS:
+            if not self._is_missing_metadata_value(merged.get(key)):
+                continue
+
+            col = self.column_indices.get(header)
+            if col is None:
+                continue
+
+            existing_item = self.table_widget.item(row, col)
+            existing_text = existing_item.text().strip() if existing_item else ""
+            if not self._is_missing_metadata_value(existing_text):
+                merged[key] = existing_text
+
+        return merged
 
     def _set_row_requested_metadata_text(
         self,
@@ -227,21 +291,53 @@ class TableHandler(QObject):
             return
 
         metadata_values = self._get_requested_metadata_values(track)
+        if isinstance(track, Track):
+            metadata_values = self._merge_metadata_with_existing_row_values(
+                row,
+                metadata_values,
+            )
         self._replace_row_tidal_track_metadata(row, track)
         for header, key in REQUESTED_METADATA_COLUMNS:
             col = self.column_indices.get(header)
             if col is None:
                 continue
 
-            text = metadata_values.get(key, MISSING_METADATA_TEXT) or MISSING_METADATA_TEXT
+            full_text = metadata_values.get(key, MISSING_METADATA_TEXT) or MISSING_METADATA_TEXT
+            display_text = self._compact_metadata_display_text(header, full_text)
             item = self.table_widget.item(row, col)
             if not item:
                 item = QTableWidgetItem()
                 self.table_widget.setItem(row, col, item)
-            item.setText(text)
-            item.setToolTip(text)
+            item.setText(display_text)
+            item.setToolTip(full_text)
+            item.setData(Qt.ItemDataRole.ToolTipRole, full_text)
+            item.setData(Qt.ItemDataRole.StatusTipRole, full_text)
 
         self.table_widget._update_row_appearance_for_row(row)
+
+    def _apply_metadata_tooltips_for_row(
+        self,
+        row: int,
+        metadata_values: Dict[str, str],
+    ) -> None:
+        if not self.table_widget:
+            return
+
+        for header, key in REQUESTED_METADATA_COLUMNS:
+            col = self.column_indices.get(header)
+            if col is None:
+                continue
+
+            item = self.table_widget.item(row, col)
+            if not item:
+                continue
+
+            full_text = metadata_values.get(key, MISSING_METADATA_TEXT) or MISSING_METADATA_TEXT
+            display_text = self._compact_metadata_display_text(header, full_text)
+            item.setText(display_text)
+            item.setToolTip(full_text)
+            item.setData(Qt.ItemDataRole.ToolTipRole, full_text)
+            item.setData(Qt.ItemDataRole.StatusTipRole, full_text)
 
     def _replace_row_tidal_track_metadata(
         self,
@@ -269,10 +365,10 @@ class TableHandler(QObject):
                 item_data["tidal_track_id"] = str(track.id)
                 title_item.setData(Qt.ItemDataRole.UserRole, item_data)
 
-    def _schedule_visible_quality_resolution(self, *_args: Any) -> None:
+    def _schedule_visible_metadata_resolution(self, *_args: Any) -> None:
         if not self.table_widget or "Quality" not in self.column_indices:
             return
-        self._visible_quality_refresh_timer.start()
+        self._visible_metadata_refresh_timer.start()
 
     def _get_cached_quality_threadsafe(self, track_id: str) -> Optional[str]:
         with self._quality_cache_access_lock:
@@ -305,8 +401,8 @@ class TableHandler(QObject):
         cached_metadata = self._get_cached_track_metadata_threadsafe(track_id)
         cached_genre = cached_metadata.get("genre", "").strip()
         if cached_genre:
-            logger.info(
-                "TABLE_METADATA_DIAG applied_cached_genre track_id=%s genre=%s",
+            logger.debug(
+                "Applied cached track genre metadata track_id=%s genre=%s",
                 track_id,
                 cached_genre,
             )
@@ -333,28 +429,28 @@ class TableHandler(QObject):
         genre_text = genre_item.text().strip() if genre_item else ""
         return not genre_text or genre_text == MISSING_METADATA_TEXT
 
-    def _enqueue_track_quality_resolution(self, track_id: str) -> None:
+    def _enqueue_track_metadata_resolution(self, track_id: str) -> None:
         track_id = str(track_id or "").strip()
         if not track_id:
             return
 
-        with self._quality_state_lock:
+        with self._metadata_state_lock:
             if self._executors_shutdown:
                 return
-            if track_id in self._quality_attempted_track_ids:
+            if track_id in self._metadata_attempted_track_ids:
                 return
-            if track_id in self._quality_inflight_track_ids:
+            if track_id in self._metadata_inflight_track_ids:
                 return
-            self._quality_attempted_track_ids.add(track_id)
-            self._quality_inflight_track_ids.add(track_id)
+            self._metadata_attempted_track_ids.add(track_id)
+            self._metadata_inflight_track_ids.add(track_id)
 
         try:
-            self._quality_executor.submit(self._resolve_track_quality_in_background, track_id)
+            self._metadata_executor.submit(self._resolve_track_metadata_in_background, track_id)
         except RuntimeError:
-            with self._quality_state_lock:
-                self._quality_inflight_track_ids.discard(track_id)
+            with self._metadata_state_lock:
+                self._metadata_inflight_track_ids.discard(track_id)
 
-    def _resolve_track_quality_in_background(self, track_id: str) -> None:
+    def _resolve_track_metadata_in_background(self, track_id: str) -> None:
         quality_text: Optional[str] = None
         track_obj: Optional[Track] = None
         try:
@@ -365,19 +461,19 @@ class TableHandler(QObject):
 
             quality_text = (quality_text or "-").strip() or "-"
 
-            self.trackQualityResolved.emit(track_id, quality_text, track_obj)
+            self.trackMetadataResolved.emit(track_id, quality_text, track_obj)
 
         except Exception as ex:
             logger.debug(
-                f"Failed to resolve quality for track {track_id}: {ex}",
+                f"Failed to resolve track metadata for track {track_id}: {ex}",
                 exc_info=True,
             )
-            self.trackQualityResolved.emit(track_id, "-", None)
+            self.trackMetadataResolved.emit(track_id, "-", None)
         finally:
-            with self._quality_state_lock:
-                self._quality_inflight_track_ids.discard(track_id)
+            with self._metadata_state_lock:
+                self._metadata_inflight_track_ids.discard(track_id)
 
-    def _resolve_visible_rows_quality(self) -> None:
+    def _resolve_visible_rows_metadata(self) -> None:
         if not self.table_widget or "Quality" not in self.column_indices:
             return
 
@@ -407,31 +503,31 @@ class TableHandler(QObject):
 
             if current_text and current_text not in ("-", QUALITY_PLACEHOLDER_TEXT):
                 if self._row_needs_genre_resolution(row):
-                    logger.info(
-                        "TABLE_METADATA_DIAG enqueue_genre_resolution row=%s track_id=%s reason=quality_present",
+                    logger.debug(
+                        "Enqueue track metadata resolution row=%s track_id=%s reason=quality_present",
                         row,
                         track_id,
                     )
-                    self._enqueue_track_quality_resolution(track_id)
+                    self._enqueue_track_metadata_resolution(track_id)
                 continue
 
             cached_quality = self._get_cached_quality_threadsafe(track_id)
             if cached_quality:
                 self._set_row_quality_text(row, cached_quality)
                 if self._row_needs_genre_resolution(row):
-                    logger.info(
-                        "TABLE_METADATA_DIAG enqueue_genre_resolution row=%s track_id=%s reason=cached_quality",
+                    logger.debug(
+                        "Enqueue track metadata resolution row=%s track_id=%s reason=cached_quality",
                         row,
                         track_id,
                     )
-                    self._enqueue_track_quality_resolution(track_id)
+                    self._enqueue_track_metadata_resolution(track_id)
                 continue
 
             self._set_row_quality_text(row, QUALITY_PLACEHOLDER_TEXT)
-            self._enqueue_track_quality_resolution(track_id)
+            self._enqueue_track_metadata_resolution(track_id)
 
     @pyqtSlot(str, str, object)
-    def _on_track_quality_resolved(
+    def _on_track_metadata_resolved(
         self,
         track_id: str,
         quality_text: str,
@@ -449,16 +545,25 @@ class TableHandler(QObject):
                 self._set_row_quality_text(row, quality_text)
                 if isinstance(resolved_track, Track):
                     metadata_values = self._get_requested_metadata_values(resolved_track)
-                    genre_text = metadata_values.get("genre", "").strip()
-                    if genre_text and genre_text != MISSING_METADATA_TEXT:
-                        logger.info(
-                            "TABLE_METADATA_DIAG caching_resolved_genre track_id=%s genre=%s",
+                    metadata_values = self._merge_metadata_with_existing_row_values(
+                        row,
+                        metadata_values,
+                    )
+                    cacheable_metadata = {
+                        key: value.strip()
+                        for _header, key in REQUESTED_METADATA_COLUMNS
+                        for value in [metadata_values.get(key, "").strip()]
+                        if value and value != MISSING_METADATA_TEXT
+                    }
+                    if cacheable_metadata:
+                        logger.debug(
+                            "Caching resolved track metadata track_id=%s metadata=%s",
                             track_id,
-                            genre_text,
+                            cacheable_metadata,
                         )
                         self._set_cached_track_metadata_threadsafe(
                             track_id,
-                            {"genre": genre_text},
+                            cacheable_metadata,
                         )
                     self._set_row_requested_metadata_text(row, resolved_track)
 
@@ -853,6 +958,16 @@ class TableHandler(QObject):
         indexed_track_ids: Set[str] = set()
         allowed_extensions = {".flac", ".mp3", ".m4a", ".mp4"}
 
+        expected_normalized_stems: Set[str] = set()
+        for track in tracks:
+            if not isinstance(track, Track):
+                continue
+            for candidate_path in self._build_candidate_track_paths(track, playlist_context):
+                candidate_stem = os.path.splitext(os.path.basename(candidate_path))[0]
+                normalized_candidate_stem = self._normalize_stem_for_match(candidate_stem)
+                if normalized_candidate_stem:
+                    expected_normalized_stems.add(normalized_candidate_stem)
+
         for target_dir in target_dirs:
             with suppress(OSError):
                 for entry in os.scandir(target_dir):
@@ -867,9 +982,21 @@ class TableHandler(QObject):
                     if normalized_stem:
                         indexed_stems.add(normalized_stem)
 
-                    tags_track_id = self._extract_track_id_from_audio_tags(entry.path)
-                    if tags_track_id:
-                        indexed_track_ids.add(tags_track_id)
+                    likely_candidate = (
+                        normalized_stem in expected_normalized_stems
+                        or any(
+                            normalized_stem
+                            and (
+                                normalized_stem in expected_stem
+                                or expected_stem in normalized_stem
+                            )
+                            for expected_stem in expected_normalized_stems
+                        )
+                    )
+                    if likely_candidate:
+                        tags_track_id = self._extract_track_id_from_audio_tags(entry.path)
+                        if tags_track_id:
+                            indexed_track_ids.add(tags_track_id)
 
         return indexed_stems, indexed_track_ids
 
@@ -1265,21 +1392,21 @@ class TableHandler(QObject):
                 self._completed_status_inflight_keys.discard(cache_key)
 
     def shutdown_background_workers(self, wait: bool = False) -> None:
-        self._visible_quality_refresh_timer.stop()
+        self._visible_metadata_refresh_timer.stop()
 
-        with self._quality_state_lock:
+        with self._metadata_state_lock:
             self._executors_shutdown = True
-            self._quality_inflight_track_ids.clear()
+            self._metadata_inflight_track_ids.clear()
 
         with self._completed_status_lock:
             self._completed_status_inflight_keys.clear()
 
         try:
-            self._quality_executor.shutdown(wait=wait, cancel_futures=True)
+            self._metadata_executor.shutdown(wait=wait, cancel_futures=True)
         except TypeError:
-            self._quality_executor.shutdown(wait=wait)
+            self._metadata_executor.shutdown(wait=wait)
         except Exception:
-            logger.debug("Failed to shut down quality executor cleanly.", exc_info=True)
+            logger.debug("Failed to shut down metadata executor cleanly.", exc_info=True)
 
         try:
             self._completed_status_executor.shutdown(wait=wait, cancel_futures=True)
@@ -1287,6 +1414,68 @@ class TableHandler(QObject):
             self._completed_status_executor.shutdown(wait=wait)
         except Exception:
             logger.debug("Failed to shut down completed-status executor cleanly.", exc_info=True)
+
+    def _visible_row_indices(self) -> List[int]:
+        if not self.table_widget or self.table_widget.rowCount() <= 0:
+            return []
+
+        first_visible_row = self.table_widget.rowAt(0)
+        if first_visible_row < 0:
+            first_visible_row = 0
+
+        last_visible_row = self.table_widget.rowAt(
+            self.table_widget.viewport().height() - 1
+        )
+        if last_visible_row < 0:
+            last_visible_row = self.table_widget.rowCount() - 1
+
+        return list(
+            range(
+                first_visible_row,
+                min(last_visible_row, self.table_widget.rowCount() - 1) + 1,
+            )
+        )
+
+    def check_completed_status_for_rows(
+        self,
+        rows: List[int],
+        *,
+        reason: str = "manual_completed_status_check",
+    ) -> None:
+        if not self.table_widget:
+            return
+
+        current_playlist_context = cast(
+            Optional[Union[Playlist, Album, Dict[str, Any]]],
+            getattr(self.main_view, "s_playlist_obj", None),
+        )
+        self._active_table_playlist_context_key = self._build_playlist_context_key(
+            current_playlist_context
+        )
+
+        for row in rows:
+            title_item = self.table_widget.item(row, 1)
+            if not title_item:
+                continue
+
+            track_obj = self._extract_tidal_track_from_item_data(
+                title_item.data(Qt.ItemDataRole.UserRole)
+            )
+            if not track_obj:
+                continue
+
+            self._enqueue_completed_status_resolution(
+                track_obj,
+                current_playlist_context,
+                row=row,
+                reason=reason,
+            )
+
+    def check_completed_status_for_visible_rows(self) -> None:
+        self.check_completed_status_for_rows(
+            self._visible_row_indices(),
+            reason="manual_visible_rows",
+        )
 
     def _resolve_completed_status_in_background(
         self,
@@ -1442,9 +1631,9 @@ class TableHandler(QObject):
         if sorting_was_enabled:
             table.setSortingEnabled(False)
         table.clearRows()
-        with self._quality_state_lock:
-            self._quality_inflight_track_ids.clear()
-            self._quality_attempted_track_ids.clear()
+        with self._metadata_state_lock:
+            self._metadata_inflight_track_ids.clear()
+            self._metadata_attempted_track_ids.clear()
 
         is_spotify_track_list = (
             result_type == Type.Track
@@ -1470,6 +1659,8 @@ class TableHandler(QObject):
         table.setColumnCount(len(column_headers))
         table.setHorizontalHeaderLabels(column_headers)
         self.column_indices = {header: i for i, header in enumerate(column_headers)}
+        if hasattr(table, "apply_column_visibility_preferences"):
+            table.apply_column_visibility_preferences()
 
         if not results_array:
             table.update()
@@ -1656,6 +1847,14 @@ class TableHandler(QObject):
                             track=item_metadata,
                             apply_row_style=False,
                         )
+                        current_track_for_metadata = self._extract_tidal_track_from_item_data(item_metadata)
+                        if current_track_for_metadata:
+                            self._apply_metadata_tooltips_for_row(
+                                index,
+                                self._get_requested_metadata_values(
+                                    current_track_for_metadata
+                                ),
+                            )
                         
                         # Set Indicator Data (Column 0) for Candidates
                         if has_candidates:
@@ -1741,7 +1940,7 @@ class TableHandler(QObject):
 
             table.adjustColumnWidths()
             table.update()
-            self._schedule_visible_quality_resolution()
+            self._schedule_visible_metadata_resolution()
             elapsed_ms = (time.perf_counter() - populate_start) * 1000.0
             logger.info(
                 "Table populated with %s items in %.1fms (spotify=%s, playlist_id=%s)",
@@ -1827,6 +2026,35 @@ class TableHandler(QObject):
                 context_menu, selected_rows_indices
             )
 
+        if selected_rows_indices:
+            if not context_menu.isEmpty():
+                context_menu.addSeparator()
+
+            check_selected_action = context_menu.addAction(
+                f"Check completed status for {len(selected_rows_indices)} selected row"
+                + ("s" if len(selected_rows_indices) != 1 else "")
+            )
+            if check_selected_action:
+                check_selected_action.triggered.connect(
+                    lambda _checked=False, rows=list(selected_rows_indices): self.check_completed_status_for_rows(
+                        rows,
+                        reason="manual_selected_rows",
+                    )
+                )
+
+        visible_rows = self._visible_row_indices()
+        if visible_rows:
+            if not context_menu.isEmpty():
+                context_menu.addSeparator()
+            check_visible_action = context_menu.addAction(
+                f"Check completed status for {len(visible_rows)} visible row"
+                + ("s" if len(visible_rows) != 1 else "")
+            )
+            if check_visible_action:
+                check_visible_action.triggered.connect(
+                    lambda _checked=False: self.check_completed_status_for_visible_rows()
+                )
+
         if not context_menu.isEmpty():
             viewport = table.viewport()
             if viewport:
@@ -1889,7 +2117,7 @@ class TableHandler(QObject):
                 self._set_row_quality_text(row_index, cached_quality)
             else:
                 self._set_row_quality_text(row_index, QUALITY_PLACEHOLDER_TEXT)
-                self._enqueue_track_quality_resolution(tidal_track_id)
+                self._enqueue_track_metadata_resolution(tidal_track_id)
         elif status in {
             "not_linked",
             "not_found",
@@ -1973,7 +2201,7 @@ class TableHandler(QObject):
         self._populate_table_generic(
             self.main_view.s_array, self.main_view.s_type or Type.Null, playlist_id
         )
-        self._schedule_visible_quality_resolution()
+        self._schedule_visible_metadata_resolution()
 
     def _find_row_for_track_id(self, track_id_to_find: str) -> Optional[int]:
         if not self.table_widget:
@@ -2115,7 +2343,7 @@ class TableHandler(QObject):
         if self.table_widget:
             logger.debug(f"Sort indicator changed for column {logicalIndex}. Collapsing all sub-rows.")
             self.table_widget.collapse_all_sub_rows()
-            self._schedule_visible_quality_resolution()
+            self._schedule_visible_metadata_resolution()
             # The table will proceed with its internal sorting *after* this slot completes.
 
     @pyqtSlot(int, Qt.SortOrder)
@@ -2192,14 +2420,6 @@ class TableHandler(QObject):
 
             state = self.download_handler.active_downloads.get(track_id)
             if not state:
-                if track_obj:
-                    self._enqueue_completed_status_resolution(
-                        track_obj,
-                        current_playlist_context,
-                        row=row,
-                        reason="rebuild_status_idle_row",
-                    )
-
                 # Restore link-state text for non-active rows
                 link_text = ""
                 if title_item:
@@ -2236,14 +2456,9 @@ class TableHandler(QObject):
                     or cast(Optional[str], state.get("requested_quality"))
                 )
                 if not completed_quality and track_obj:
-                    self._enqueue_completed_status_resolution(
-                        track_obj,
-                        cast(
-                            Optional[Union[Playlist, Album, Dict[str, Any]]],
-                            state.get("playlist_context", current_playlist_context),
-                        ),
-                        row=row,
-                        reason="rebuild_status_completed_fallback",
+                    logger.debug(
+                        "Completed quality missing for track %s; skipping automatic file scan during status rebuild.",
+                        getattr(track_obj, "id", ""),
                     )
                 status_item.setText(self._format_completed_status_text(completed_quality))
                 status_item.setToolTip(completed_quality)

@@ -57,16 +57,16 @@ from tidal_dl.settings import SETTINGS
 
 # Create a logger instance for this module
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)  # Keep OpenAPI metadata diagnostics visible in GUI/console logs
+logger.setLevel(logging.WARNING)  # Keep normal TIDAL logs quiet; warnings/errors remain visible
 
 TIDAL_COVER_ALLOWED_SIZES: Tuple[int, ...] = (80, 160, 320, 640, 1280)
 
-# Set up GUI logging with INFO level for this modul- LAZY LOADED
+# Set up GUI logging with WARNING level for this modul- LAZY LOADED
 def _setup_gui_logging():
     """Lazy-load GUI logging setup to avoid circular imports."""
     try:
         from tidal_dl.gui.gui_logging import setup_gui_logger
-        setup_gui_logger(__name__, logging.INFO)
+        setup_gui_logger(__name__, logging.WARNING)
     except ImportError:
         # GUI logging not available during non-GUI operations (e.g., headless downloads)
         pass
@@ -100,6 +100,7 @@ class TidalAPI(object):
         self.apiKey = {}
         self._openapi_genre_cache: Dict[str, List[str]] = {}
         self._openapi_genre_id_name_cache: Dict[str, str] = {}
+        self._openapi_provider_diag_seen_track_ids: set[str] = set()
 
         logger.debug(f"TIDAL_API.apiKey initialized empty.")
         
@@ -266,6 +267,31 @@ class TidalAPI(object):
         logger.warning("Automatic token refresh failed.")
         return False
 
+    def _ensure_access_token_fresh(self, min_valid_seconds: int = 60) -> bool:
+        """
+        Refreshes the access token before a request when the stored expiry is near.
+        """
+        expires_after = 0
+        try:
+            from tidal_dl.settings import TOKEN
+
+            expires_after = int(getattr(TOKEN, "expiresAfter", 0) or 0)
+        except Exception:
+            expires_after = 0
+
+        if expires_after <= 0:
+            return True
+
+        if expires_after - int(time.time()) > int(min_valid_seconds):
+            return True
+
+        refreshed = self._try_refresh_after_unauthorized()
+        if not refreshed:
+            logger.warning(
+                "Access token is expired or near expiry, and automatic refresh did not succeed."
+            )
+        return refreshed
+ 
     # --------------------------------------------------------------------- #
     #                           Internal helpers                            #
     # --------------------------------------------------------------------- #
@@ -307,7 +333,8 @@ class TidalAPI(object):
         result: Dict[str, Any] = {}
         respond: Optional[requests.Response] = None
         refresh_attempted = False
-
+        self._ensure_access_token_fresh(min_valid_seconds=60)
+ 
         for attempt in range(0, 3):
             try:
                 # --- MODIFICATION: Use the session object ---
@@ -870,6 +897,7 @@ class TidalAPI(object):
         request_params = dict(params or {})
         url = f"{OPENAPI_BASE}/{path.lstrip('/')}"
         refresh_attempted = False
+        self._ensure_access_token_fresh(min_valid_seconds=60)
 
         for attempt in range(2):
             headers = {
@@ -883,8 +911,8 @@ class TidalAPI(object):
                     headers=headers,
                     timeout=15,
                 )
-                logger.info(
-                    "OPENAPI_GENRE_DIAG request path=%s status=%s url=%s",
+                logger.debug(
+                    "OpenAPI metadata request path=%s status=%s url=%s",
                     path,
                     response.status_code,
                     response.url,
@@ -1085,8 +1113,8 @@ class TidalAPI(object):
         track_payload = self.__get_openapi__(f"tracks/{track_id}", params=params)
         genre_names = self._openapi_genre_names_from_payload(track_payload, locale=locale)
         genre_ids = self._openapi_genre_ids_from_payload(track_payload)
-        logger.info(
-            "OPENAPI_GENRE_DIAG track_include track_id=%s names=%s ids=%s",
+        logger.debug(
+            "OpenAPI genre track_include track_id=%s names=%s ids=%s",
             track_id,
             genre_names,
             genre_ids,
@@ -1106,8 +1134,8 @@ class TidalAPI(object):
             )
             genre_ids.extend(self._openapi_genre_ids_from_payload(relationship_payload))
             genre_ids = list(dict.fromkeys(genre_ids))
-            logger.info(
-                "OPENAPI_GENRE_DIAG relationship track_id=%s names=%s ids=%s",
+            logger.debug(
+                "OpenAPI genre relationship track_id=%s names=%s ids=%s",
                 track_id,
                 genre_names,
                 genre_ids,
@@ -1118,8 +1146,8 @@ class TidalAPI(object):
                 cached_genre_name = self._openapi_genre_id_name_cache.get(genre_id)
                 if cached_genre_name:
                     genre_names.append(cached_genre_name)
-                    logger.info(
-                        "OPENAPI_GENRE_DIAG genre_lookup_cache track_id=%s genre_id=%s name=%s",
+                    logger.debug(
+                        "OpenAPI genre lookup cache track_id=%s genre_id=%s name=%s",
                         track_id,
                         genre_id,
                         cached_genre_name,
@@ -1138,34 +1166,154 @@ class TidalAPI(object):
                     self._openapi_genre_id_name_cache[genre_id] = lookup_names[0]
                     genre_names.extend(lookup_names)
 
-                logger.info(
-                    "OPENAPI_GENRE_DIAG genre_lookup track_id=%s genre_id=%s names=%s",
+                logger.debug(
+                    "OpenAPI genre lookup track_id=%s genre_id=%s names=%s",
                     track_id,
                     genre_id,
                     genre_names,
                 )
 
         genre_names = list(dict.fromkeys(name for name in genre_names if name))
-        logger.info(
-            "OPENAPI_GENRE_DIAG final track_id=%s names=%s",
+        logger.debug(
+            "OpenAPI genre final track_id=%s names=%s",
             track_id,
             genre_names,
         )
         self._openapi_genre_cache[track_id] = genre_names
         return genre_names
 
+    def inspectTrackProvidersOpenApi(self, id: str, locale: str = "en-US") -> Dict[str, Any]:
+        """
+        Best-effort provider/label diagnostics for future Label enrichment.
+        This is intentionally diagnostic-only and does not change table metadata.
+        """
+        track_id = str(id or "").strip()
+        if not track_id:
+            return {}
+
+        country_code = str(getattr(self.key, "countryCode", "") or "").strip()
+        params: Dict[str, Any] = {"include": "providers"}
+        if country_code:
+            params["countryCode"] = country_code
+
+        payload = self.__get_openapi__(f"tracks/{track_id}", params=params)
+        provider_summary: List[Dict[str, Any]] = []
+
+        def summarize(resource: Any) -> None:
+            if not isinstance(resource, dict):
+                return
+            if str(resource.get("type", "")).lower() != "providers":
+                return
+            attributes = resource.get("attributes")
+            if not isinstance(attributes, dict):
+                attributes = {}
+            provider_summary.append(
+                {
+                    "id": resource.get("id"),
+                    "type": resource.get("type"),
+                    "attribute_keys": sorted(str(key) for key in attributes.keys()),
+                    "name": self._first_openapi_text(attributes, locale=locale),
+                    "raw_attributes": attributes,
+                }
+            )
+
+        data = payload.get("data")
+        if isinstance(data, dict):
+            relationships = data.get("relationships")
+            if isinstance(relationships, dict):
+                provider_rel = relationships.get("providers")
+                if isinstance(provider_rel, dict):
+                    rel_data = provider_rel.get("data")
+                    if isinstance(rel_data, list):
+                        for resource in rel_data:
+                            summarize(resource)
+                    else:
+                        summarize(rel_data)
+
+        included = payload.get("included")
+        if isinstance(included, list):
+            for resource in included:
+                summarize(resource)
+
+        if provider_summary:
+            logger.info(
+                "OPENAPI_PROVIDER_LABEL_DIAG track_id=%s providers=%s",
+                track_id,
+                provider_summary,
+            )
+        else:
+            logger.info(
+                "OPENAPI_PROVIDER_LABEL_DIAG track_id=%s providers=[] payload_keys=%s",
+                track_id,
+                sorted(str(key) for key in payload.keys()),
+            )
+
+        return {"track_id": track_id, "providers": provider_summary}
+
+    def _shouldInspectProvidersForMissingDisplayLabel(self, track: Track) -> bool:
+        """
+        Return True when the table/display metadata layer would show a missing Label.
+        """
+        try:
+            from tidal_dl.metadata.enrichment import (
+                MISSING_METADATA_TEXT,
+                get_track_display_metadata,
+            )
+
+            display_metadata = get_track_display_metadata(
+                track,
+                use_camelot_key=bool(getattr(SETTINGS, "useCamelotKeyNotation", True)),
+            )
+            display_label = str(display_metadata.get("label", "") or "").strip()
+            return not display_label or display_label == MISSING_METADATA_TEXT
+        except Exception:
+            logger.debug(
+                "Failed to evaluate display Label for OpenAPI provider diagnostics.",
+                exc_info=True,
+            )
+            return False
+
+    def _maybeInspectProvidersForMissingDisplayLabel(
+        self,
+        track: Track,
+        track_id: str,
+    ) -> None:
+        """
+        Diagnostic-only provider lookup for tracks whose table/display Label is missing.
+        """
+        if not bool(getattr(SETTINGS, "debugOpenApiProviderLabel", False)):
+            return
+
+        if not track_id or track_id in self._openapi_provider_diag_seen_track_ids:
+            return
+
+        if not self._shouldInspectProvidersForMissingDisplayLabel(track):
+            return
+
+        self._openapi_provider_diag_seen_track_ids.add(track_id)
+        try:
+            self.inspectTrackProvidersOpenApi(track_id)
+        except Exception:
+            logger.debug(
+                "OpenAPI provider/label diagnostics failed for track %s",
+                track_id,
+                exc_info=True,
+            )
+
     def enrichTrackGenresOpenApi(self, track: Track) -> Track:
         """Attach OpenAPI v2 genre metadata to an existing Track object when available."""
         if not isinstance(track, Track):
             return track
 
+        track_id = str(getattr(track, "id", "") or "").strip()
+        if not track_id:
+            return track
+
+        self._maybeInspectProvidersForMissingDisplayLabel(track, track_id)
+
         existing_genres = getattr(track, "genres", None)
         existing_genre = getattr(track, "genre", None)
         if existing_genres or existing_genre:
-            return track
-
-        track_id = str(getattr(track, "id", "") or "").strip()
-        if not track_id:
             return track
 
         try:
@@ -1289,7 +1437,15 @@ class TidalAPI(object):
             "limit": limit,
             "types": typeStr,
         }
-        get_result = self.__get__("search", params=params, return_raw=return_raw)
+        try:
+            get_result = self.__get__("search", params=params, return_raw=return_raw)
+        except NonRetriableApiError as exc:
+            message = str(exc)
+            if "Access token expired" in message:
+                raise NonRetriableApiError(
+                    "TIDAL search failed because the access token expired and automatic refresh failed. Please log in again."
+                ) from exc
+            raise
 
         if return_raw:
             if not isinstance(get_result, tuple):

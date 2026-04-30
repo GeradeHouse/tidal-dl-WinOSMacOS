@@ -163,6 +163,14 @@ def load_initial_settings(self: "SettingsPage"):
         self.chkShowPlaylistIcons.setChecked(bool(getattr(SETTINGS, "showPlaylistIcons", True)))
         self.spinPlaylistIconSize.setValue(getattr(SETTINGS, "playlistIconSize", 35))
         self.spinPlaylistIconSize.setEnabled(self.chkShowPlaylistIcons.isChecked())
+        if hasattr(self, "chkDebugOpenApiProviderLabel"):
+            self.chkDebugOpenApiProviderLabel.setChecked(
+                bool(getattr(SETTINGS, "debugOpenApiProviderLabel", False))
+            )
+        if hasattr(self, "btnRestructureDownloads"):
+            self.btnRestructureDownloads.clicked.connect(
+                self._trigger_download_structure_reorganization
+            )
         self.chkUseCamelotKeyNotation.setChecked(
             bool(getattr(SETTINGS, "useCamelotKeyNotation", False))
         )
@@ -319,6 +327,15 @@ def browse_directory(self: "SettingsPage"):
         self.downloadPathEdit.setText(directory)
 
 
+def _trigger_download_structure_reorganization(self: "SettingsPage") -> None:
+    main_window = self.window()
+    handler = getattr(main_window, "start_download_structure_reorganization", None)
+    if callable(handler):
+        handler(force_prompt=True, manual=True)
+    else:
+        logger.warning("Download structure reorganization handler is not available.")
+
+
 def save_settings(self: "SettingsPage"):
     """
     Saves all settings from the UI controls to the global SETTINGS object.
@@ -411,6 +428,8 @@ def save_settings(self: "SettingsPage"):
 
         SETTINGS.saveAlbumInfo = self.chkSaveAlbumInfo.isChecked()
         SETTINGS.showPlaylistIcons = self.chkShowPlaylistIcons.isChecked()
+        if hasattr(self, "chkDebugOpenApiProviderLabel"):
+            SETTINGS.debugOpenApiProviderLabel = self.chkDebugOpenApiProviderLabel.isChecked()
         SETTINGS.playlistIconSize = self.spinPlaylistIconSize.value()
         SETTINGS.useCamelotKeyNotation = self.chkUseCamelotKeyNotation.isChecked()
         key_notation_changed = (

@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QStackedLayout,
     QApplication,
     QMenu,
+    QProgressDialog,
 )
 from PyQt6.QtCore import (
     Qt,
@@ -32,6 +33,7 @@ from PyQt6.QtCore import (
     QPoint,
     QEvent,
     QRectF,
+    QTimer,
 )
 from PyQt6.QtGui import (
     QPixmap,
@@ -51,6 +53,7 @@ from tidal_dl.tidal import Track, Playlist, AudioQuality, Type, TIDAL_API
 from tidal_dl.printf import Printf
 from tidal_dl import paths
 from tidal_dl.settings import SETTINGS
+from tidal_dl.paths import getSettingsFilePath, get_user_download_path
 from tidal_dl.linking import LinkingWorker
 from tidal_dl.persistence import LinkPersistenceManager
 from tidal_dl.gui.gui_cover_cache import CoverCache
@@ -73,6 +76,10 @@ from .gui_resize_handler import ResizeHandler
 from .gui_event_handlers import MainViewEventHandlers
 from .gui_task_queue_manager import TaskQueueManager # Import the new manager
 from .gui_logging import setup_gui_logger, get_gui_manager
+from .download_structure_migration import (
+    DownloadStructureMigrationWorker,
+    DownloadMigrationResult,
+)
 
 if TYPE_CHECKING:
     from tidal_dl.gui.gui_table_handler import TableHandler
@@ -204,6 +211,9 @@ class MainView(QWidget):
             self.stackedLayout, self.mainPage, self.settingsPage, parent=self
         )
         self.resize_handler = ResizeHandler(self, self.title_bar)
+        self._download_migration_thread: Optional[QThread] = None
+        self._download_migration_worker: Optional[DownloadStructureMigrationWorker] = None
+        self._download_migration_progress: Optional[QProgressDialog] = None
 
 
         # --- Redirect stdout to the log widget ---
@@ -267,6 +277,7 @@ class MainView(QWidget):
                 "Connected app aboutToQuit signal to cover_cache._save_cache."
             )
 
+        QTimer.singleShot(1500, lambda: self.start_download_structure_reorganization())
         logger_gui.debug("MainView initialization complete.")
 
     def initView(self):
@@ -1016,6 +1027,170 @@ class MainView(QWidget):
         self.s_linkingFinished.connect(_on_linking_finished)
         self.s_linkingError.connect(_on_linking_error)
         self.startLinkingWorker([(row, spotify_info)], playlist_id, _on_link_worker_done)
+
+    def _save_settings_safely(self) -> None:
+        try:
+            SETTINGS.save(getSettingsFilePath())
+        except Exception:
+            logger_gui.warning("Failed to save settings.", exc_info=True)
+
+    def _download_structure_migration_needed(self) -> bool:
+        if bool(getattr(SETTINGS, "downloadStructureMigrationDone", False)):
+            return False
+        if bool(getattr(SETTINGS, "downloadStructureMigrationDoNotRemind", False)):
+            return False
+
+        worker = DownloadStructureMigrationWorker(self)
+        return bool(worker.build_plan())
+
+    def start_download_structure_reorganization(
+        self,
+        *,
+        force_prompt: bool = False,
+        manual: bool = False,
+    ) -> None:
+        if self._download_migration_thread is not None:
+            return
+
+        if not force_prompt and not self._download_structure_migration_needed():
+            return
+
+        worker_probe = DownloadStructureMigrationWorker(self)
+        plan_count = len(worker_probe.build_plan())
+        if plan_count <= 0:
+            if manual:
+                CustomQMessageBox.information(
+                    self,
+                    "Download Folder Structure",
+                    "No legacy downloads found.",
+                    "No audio files need to be moved into the audio-type folder structure.",
+                )
+            SETTINGS.downloadStructureMigrationDone = True
+            self._save_settings_safely()
+            return
+
+        accepted, do_not_remind = CustomQMessageBox.question_with_checkbox(
+            self,
+            "Download Folder Structure Changed",
+            "The download folder structure has changed.",
+            (
+                "Downloads are now grouped by audio type, for example flac, mp3, "
+                f"m4a, and mp4.\n\n{plan_count} legacy audio file(s) can be moved "
+                "into the new structure.\n\n"
+                f"Download root:\n{get_user_download_path(SETTINGS.downloadPath)}"
+            ),
+            checkbox_text="Do not remind again",
+            checkbox_checked=False,
+        )
+        if not accepted:
+            if do_not_remind:
+                SETTINGS.downloadStructureMigrationDoNotRemind = True
+                self._save_settings_safely()
+            return
+
+        self._run_download_structure_migration()
+
+    def _run_download_structure_migration(self) -> None:
+        self._download_migration_thread = QThread(self)
+        self._download_migration_worker = DownloadStructureMigrationWorker()
+        self._download_migration_worker.moveToThread(self._download_migration_thread)
+
+        self._download_migration_progress = QProgressDialog(
+            "Restructuring downloaded audio files...",
+            "Cancel",
+            0,
+            0,
+            self,
+        )
+        self._download_migration_progress.setWindowTitle("Restructuring Downloads")
+        self._download_migration_progress.setMinimumDuration(0)
+        self._download_migration_progress.setAutoClose(False)
+        self._download_migration_progress.setAutoReset(False)
+        self._download_migration_progress.canceled.connect(
+            lambda: logger_gui.warning(
+                "Download-folder migration cancellation requested; current file operation will finish first."
+            )
+        )
+
+        self._download_migration_thread.started.connect(
+            self._download_migration_worker.run
+        )
+        self._download_migration_worker.progress.connect(
+            self._on_download_migration_progress
+        )
+        self._download_migration_worker.finished.connect(
+            self._on_download_migration_finished
+        )
+        self._download_migration_worker.finished.connect(
+            self._download_migration_thread.quit
+        )
+        self._download_migration_thread.finished.connect(
+            self._download_migration_worker.deleteLater
+        )
+        self._download_migration_thread.finished.connect(
+            self._download_migration_thread.deleteLater
+        )
+        self._download_migration_thread.finished.connect(
+            self._clear_download_migration_worker
+        )
+        self._download_migration_thread.start()
+
+    def _on_download_migration_progress(
+        self,
+        current: int,
+        total: int,
+        source_path: str,
+    ) -> None:
+        if not self._download_migration_progress:
+            return
+        self._download_migration_progress.setMaximum(max(total, 1))
+        self._download_migration_progress.setValue(min(current, max(total, 1)))
+        self._download_migration_progress.setLabelText(
+            f"Moving audio files... {current}/{total}\n{source_path}"
+        )
+
+    def _on_download_migration_finished(self, result: DownloadMigrationResult) -> None:
+        if self._download_migration_progress:
+            self._download_migration_progress.setValue(
+                self._download_migration_progress.maximum()
+            )
+            self._download_migration_progress.close()
+
+        SETTINGS.downloadStructureMigrationDone = True
+        SETTINGS.downloadStructureMigrationDoNotRemind = True
+        self._save_settings_safely()
+
+        destination_lines = [
+            f"{folder}: {count} file(s)"
+            for folder, count in sorted(result.destination_counts.items())
+        ]
+        if not destination_lines:
+            destination_lines = ["No destination folders received moved files."]
+
+        detail_lines = [
+            f"Download root: {result.root_path}",
+            "",
+            "Destination summary:",
+            *destination_lines,
+            "",
+            f"Moved: {result.moved}",
+            f"Skipped: {result.skipped}",
+            f"Failed: {result.failed}",
+        ]
+        if result.failures:
+            detail_lines.extend(["", "First skipped/failed paths:", *result.failures])
+
+        CustomQMessageBox.information(
+            self,
+            "Download Folder Structure",
+            "Download reorganization finished.",
+            "\n".join(detail_lines),
+        )
+
+    def _clear_download_migration_worker(self) -> None:
+        self._download_migration_thread = None
+        self._download_migration_worker = None
+        self._download_migration_progress = None
 
     @pyqtSlot(QtWidgets.QTableWidgetItem)
     def _on_table_item_double_clicked(self, item: QtWidgets.QTableWidgetItem):

@@ -365,6 +365,21 @@ class DownloadHandler(QObject):
             if tidal_track:
                 tracks_with_rows.append((r_idx, tidal_track))
 
+        table_handler = getattr(self.main_view, "table_handler", None)
+        if table_handler and tracks_with_rows:
+            menu.addSeparator()
+            check_completed_action = menu.addAction(
+                f"Check completed status for {len(tracks_with_rows)} selected Track"
+                + ("s" if len(tracks_with_rows) != 1 else "")
+            )
+            if check_completed_action:
+                check_completed_action.triggered.connect(
+                    lambda _checked=False, rows=[row for row, _track in tracks_with_rows]: table_handler.check_completed_status_for_rows(
+                        rows,
+                        reason="download_context_selected_rows",
+                    )
+                )
+
         if not tracks_with_rows:
             no_valid_tracks_action = menu.addAction(
                 "No downloadable tracks in selection"
@@ -398,7 +413,6 @@ class DownloadHandler(QObject):
                     partial(self.startContextMenuDownload, tracks_with_rows, qual_enum)
                 )
 
-        table_handler = getattr(self.main_view, "table_handler", None)
         current_playlist_context = getattr(self.main_view, "s_playlist_obj", None)
         non_completed_tracks_with_rows: List[Tuple[int, Track]] = []
         if table_handler:

@@ -53,6 +53,8 @@ import aigpy
 # Local application imports
 from tidal_dl.model import Track
 from tidal_dl.printf import Printf
+from tidal_dl.settings import SETTINGS
+from tidal_dl.paths import getSettingsFilePath
 from .gui_table_delegate import HighlightPreservingDelegate
 from .gui_table_candidate_widget import CandidateWidget
 
@@ -130,6 +132,10 @@ class SplitterTable(QtWidgets.QTableWidget):
         if h_header:  # Add check
             h_header.setStretchLastSection(True)  # Make last section stretch
             h_header.setSortIndicatorShown(True)  # Show sort indicator
+            h_header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            h_header.customContextMenuRequested.connect(
+                self._show_column_visibility_menu
+            )
             # Apply stylesheet for smaller header padding (ensure correct syntax)
             base_header_style = "QHeaderView::section { background-color: transparent; padding-top: 2px; padding-bottom: 2px; padding-left: 4px; padding-right: 4px; }"
             h_header.setStyleSheet(base_header_style)  # Apply base style first
@@ -190,6 +196,8 @@ class SplitterTable(QtWidgets.QTableWidget):
             """
             # Combine and set the full stylesheet
             h_header.setStyleSheet(base_header_style + indicator_style)
+
+        self.apply_column_visibility_preferences()
 
         # Data structures for row selection.
         self.selectedRows = set()
@@ -843,6 +851,127 @@ class SplitterTable(QtWidgets.QTableWidget):
             if overflow <= 0:
                 return
 
+    def _column_header_text(self, column: int) -> str:
+        header_item = self.horizontalHeaderItem(column)
+        return header_item.text().strip() if header_item else ""
+
+    def _protected_visible_columns(self) -> set[str]:
+        return {"#", "Title"}
+
+    def _get_column_visibility_preferences(self) -> Dict[str, bool]:
+        raw_preferences = getattr(SETTINGS, "tableColumnVisibility", {}) or {}
+        if not isinstance(raw_preferences, dict):
+            return {}
+        return {
+            str(key).strip(): bool(value)
+            for key, value in raw_preferences.items()
+            if str(key).strip()
+        }
+
+    def _save_column_visibility_preferences(self, preferences: Dict[str, bool]) -> None:
+        SETTINGS.tableColumnVisibility = dict(preferences)
+        try:
+            SETTINGS.save(getSettingsFilePath())
+        except Exception:
+            logger.warning(
+                "Failed to persist table column visibility preferences.",
+                exc_info=True,
+            )
+
+    def apply_column_visibility_preferences(self) -> None:
+        preferences = self._get_column_visibility_preferences()
+        protected_columns = self._protected_visible_columns()
+
+        for column in range(self.columnCount()):
+            header_text = self._column_header_text(column)
+            if not header_text:
+                continue
+            visible = preferences.get(header_text, True)
+            if header_text in protected_columns:
+                visible = True
+            self.setColumnHidden(column, not visible)
+
+    def _set_column_visible_by_name(self, header_text: str, visible: bool) -> None:
+        header_text = str(header_text or "").strip()
+        if not header_text:
+            return
+
+        if header_text in self._protected_visible_columns():
+            visible = True
+
+        preferences = self._get_column_visibility_preferences()
+        preferences[header_text] = bool(visible)
+        self._save_column_visibility_preferences(preferences)
+
+        for column in range(self.columnCount()):
+            if self._column_header_text(column) == header_text:
+                self.setColumnHidden(column, not visible)
+                break
+
+        self.apply_column_visibility_preferences()
+        self.viewport().update()
+
+    def _show_column_visibility_menu(self, position: QtCore.QPoint) -> None:
+        header = self.horizontalHeader()
+        if not header:
+            return
+
+        menu = QtWidgets.QMenu(self)
+        menu.setStyleSheet(
+            """
+            QMenu {
+                background-color: #2d2d31;
+                color: #ffffff;
+                border: 1px solid #5a5a5f;
+                padding: 4px;
+            }
+            QMenu::item {
+                background-color: transparent;
+                padding: 4px 28px 4px 24px;
+            }
+            QMenu::item:selected {
+                background-color: #3f3f46;
+            }
+            QMenu::indicator {
+                width: 14px;
+                height: 14px;
+            }
+            QMenu::item:disabled {
+                color: #8a8a8f;
+            }
+            """
+        )
+        protected_columns = self._protected_visible_columns()
+        preferences = self._get_column_visibility_preferences()
+
+        for column in range(self.columnCount()):
+            header_text = self._column_header_text(column)
+            if not header_text:
+                continue
+
+            action = menu.addAction(header_text)
+            if not action:
+                continue
+
+            action.setCheckable(True)
+            is_visible = preferences.get(header_text, not self.isColumnHidden(column))
+            if header_text in protected_columns:
+                is_visible = True
+                action.setEnabled(False)
+
+            action.setChecked(is_visible)
+            action.toggled.connect(
+                lambda checked, text=header_text: self._set_column_visible_by_name(
+                    text,
+                    checked,
+                )
+            )
+
+        if menu.isEmpty():
+            return
+
+        menu.exec(header.mapToGlobal(position))
+
     def adjustColumnWidths(self):
         """
         Sets specific initial widths for some columns using fixed indices,
@@ -869,6 +998,7 @@ class SplitterTable(QtWidgets.QTableWidget):
                 for i in range(num_cols)
             )
             if header_signature == self._last_adjust_signature:
+                self.apply_column_visibility_preferences()
                 logger.debug(
                     "[SplitterTable] Skipping adjustColumnWidths; column signature unchanged."
                 )
@@ -918,14 +1048,14 @@ class SplitterTable(QtWidgets.QTableWidget):
                 )
 
             preferred_widths = {
-                "Release Year": 88,
-                "BPM": 72,
+                "Release Year": 92,
+                "BPM": 70,
                 "Key": 64,
-                "Genre": 120,
-                "Label": 145,
-                "Length": 70,
-                "Quality": 150,
-                "Status": 190,
+                "Genre": 175,
+                "Label": 170,
+                "Length": 72,
+                "Quality": 155,
+                "Status": 185,
                 "Progress": 120,
             }
             for header_text, width in preferred_widths.items():
@@ -938,10 +1068,10 @@ class SplitterTable(QtWidgets.QTableWidget):
 
             self._compact_columns_to_viewport(
                 {
-                    "Album": 110,
-                    "Label": 115,
-                    "Genre": 95,
-                    "Status": 150,
+                    "Album": 115,
+                    "Label": 130,
+                    "Genre": 130,
+                    "Status": 145,
                     "Artists": 165,
                     "Title": 165,
                     "Quality": 130,
@@ -951,6 +1081,7 @@ class SplitterTable(QtWidgets.QTableWidget):
             # Other columns ('Length', 'Quality', 'Link Status') will size interactively.
             # The last column will stretch due to stretchLastSection=True.
 
+            self.apply_column_visibility_preferences()
             self._last_adjust_signature = header_signature
 
             # --- ADD LOGGING AT END ---

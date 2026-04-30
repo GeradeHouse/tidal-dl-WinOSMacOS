@@ -4,7 +4,7 @@
 
 import logging
 import os
-from typing import Optional, Callable, List
+from typing import Optional, Callable, List, Tuple
 from .. import paths
 
 from PyQt6.QtWidgets import (
@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QStyleOption,
     QStyle,
     QApplication,
+    QCheckBox,
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import (
@@ -61,6 +62,8 @@ class ModernDarkDialog(QDialog):
         buttons: List[str] = ["OK"],  # Options: ["OK"], ["Yes", "No"]
         show_folder_path: Optional[str] = None,
         show_in_folder_func: Optional[Callable] = None,
+        checkbox_text: Optional[str] = None,
+        checkbox_checked: bool = False,
     ):
         super().__init__(parent)
 
@@ -71,6 +74,9 @@ class ModernDarkDialog(QDialog):
         self.buttons = buttons
         self.show_folder_path = show_folder_path
         self.show_in_folder_func = show_in_folder_func
+        self.checkbox_text = checkbox_text
+        self.checkbox_checked = checkbox_checked
+        self.checkbox: Optional[QCheckBox] = None
 
         self._init_ui()
 
@@ -171,7 +177,14 @@ class ModernDarkDialog(QDialog):
             self.informative_text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
             self.informative_text_label.setOpenExternalLinks(True)
             text_layout.addWidget(self.informative_text_label)
-        
+
+        if self.checkbox_text:
+            self.checkbox = QCheckBox(self.checkbox_text)
+            self.checkbox.setChecked(bool(self.checkbox_checked))
+            self.checkbox.setFont(QFont("Segoe UI Variable", 10))
+            self.checkbox.setStyleSheet(self._get_checkbox_style())
+            text_layout.addWidget(self.checkbox)
+
         content_layout.addLayout(text_layout, 1)
         middle_layout.addLayout(content_layout)
         overall_content_layout.addLayout(middle_layout, 1)
@@ -225,7 +238,33 @@ class ModernDarkDialog(QDialog):
             self.ok_button.setFocus()
 
         overall_content_layout.addWidget(bottom_widget)
-        self.setFixedSize(450, 280)
+        self.setFixedSize(470, 320 if self.checkbox_text else 280)
+
+    def _get_checkbox_style(self) -> str:
+        """Returns the stylesheet for dialog checkboxes."""
+        return """
+            QCheckBox {
+                color: #d6d6d6;
+                spacing: 8px;
+                padding: 4px 0px;
+                background-color: transparent;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #666666;
+                border-radius: 3px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:hover {
+                border: 1px solid #888888;
+                background-color: #333333;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #00c8c8;
+                border: 1px solid #00c8c8;
+            }
+        """
 
     def _get_button_style(self, primary=False):
         """Returns the stylesheet for buttons."""
@@ -247,6 +286,9 @@ class ModernDarkDialog(QDialog):
             QPushButton:pressed {{ background-color: #1f1f1f; }}
             QPushButton:focus {{ outline: none; border: 1px solid #666666; }}
         """
+
+    def is_checkbox_checked(self) -> bool:
+        return bool(self.checkbox and self.checkbox.isChecked())
 
     def paintEvent(self, a0):
         painter = QPainter(self)
@@ -330,3 +372,31 @@ class CustomQMessageBox:
         )
         result = dlg.exec()
         return result == QDialog.DialogCode.Accepted
+
+    @staticmethod
+    def question_with_checkbox(
+        parent: Optional[QWidget],
+        title: str,
+        main_message: str,
+        informative_text: str = "",
+        checkbox_text: str = "",
+        checkbox_checked: bool = False,
+        icon_path: Optional[str] = None,
+    ) -> Tuple[bool, bool]:
+        """
+        Displays a dark themed Yes/No question dialog with an optional checkbox.
+        Returns: (accepted, checkbox_checked).
+        """
+        icon = icon_path if icon_path else CustomQMessageBox._get_icon("question.png")
+        dlg = ModernDarkDialog(
+            title=title,
+            main_message=main_message,
+            informative_text=informative_text,
+            icon_path=icon,
+            parent=parent,
+            buttons=["Yes", "No"],
+            checkbox_text=checkbox_text,
+            checkbox_checked=checkbox_checked,
+        )
+        result = dlg.exec()
+        return result == QDialog.DialogCode.Accepted, dlg.is_checkbox_checked()

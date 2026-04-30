@@ -539,6 +539,11 @@ class SearchHandler(QObject):
         except Exception as e:
             error_msg = f"An error occurred during search: {e}"
             logger.error(error_msg, exc_info=True)
+            if "Please log in again" in str(e):
+                self.main_view.table_handler.show_error_message(
+                    "TIDAL login expired. Please log in again, then retry the search."
+                )
+                return
             self._emit_search_failed(f"Search failed: {e}")
             # Emit empty results on error
             self._emit_search_results(

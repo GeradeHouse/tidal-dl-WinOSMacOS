@@ -1,0 +1,167 @@
+#!/usr/bin/env python
+# -*- encoding: utf-8 -*-
+"""
+One-time/manual migration for legacy download folders into audio-type folders.
+"""
+
+import logging
+import os
+import shutil
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+
+from PyQt6.QtCore import QObject, pyqtSignal
+
+from tidal_dl.paths import get_user_download_path
+from tidal_dl.settings import SETTINGS
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)
+
+AUDIO_EXTENSIONS_TO_FOLDER = {
+    ".flac": "flac",
+    ".mp3": "mp3",
+    ".m4a": "m4a",
+    ".mp4": "mp4",
+}
+AUDIO_TYPE_FOLDERS = set(AUDIO_EXTENSIONS_TO_FOLDER.values())
+
+
+@dataclass
+class DownloadMigrationPlanItem:
+    source_path: str
+    destination_path: str
+    audio_folder: str
+
+
+@dataclass
+class DownloadMigrationResult:
+    root_path: str
+    moved: int
+    skipped: int
+    failed: int
+    destination_counts: Dict[str, int]
+    failures: List[str]
+
+
+class DownloadStructureMigrationWorker(QObject):
+    progress = pyqtSignal(int, int, str)
+    finished = pyqtSignal(object)
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+
+    def _download_root(self) -> str:
+        return os.path.abspath(get_user_download_path(SETTINGS.downloadPath))
+
+    def _is_already_inside_audio_folder(self, root_path: str, file_path: str) -> bool:
+        rel_path = os.path.relpath(file_path, root_path)
+        first_part = rel_path.split(os.sep, 1)[0].lower()
+        return first_part in AUDIO_TYPE_FOLDERS
+
+    def build_plan(self) -> List[DownloadMigrationPlanItem]:
+        root_path = self._download_root()
+        if not os.path.isdir(root_path):
+            return []
+
+        plan: List[DownloadMigrationPlanItem] = []
+        for current_root, dirnames, filenames in os.walk(root_path):
+            dirnames[:] = [
+                dirname
+                for dirname in dirnames
+                if dirname.lower() not in AUDIO_TYPE_FOLDERS
+            ]
+
+            for filename in filenames:
+                ext = os.path.splitext(filename)[1].lower()
+                audio_folder = AUDIO_EXTENSIONS_TO_FOLDER.get(ext)
+                if not audio_folder:
+                    continue
+
+                source_path = os.path.join(current_root, filename)
+                if self._is_already_inside_audio_folder(root_path, source_path):
+                    continue
+
+                relative_path = os.path.relpath(source_path, root_path)
+                destination_path = os.path.join(root_path, audio_folder, relative_path)
+                if os.path.normcase(os.path.abspath(source_path)) == os.path.normcase(
+                    os.path.abspath(destination_path)
+                ):
+                    continue
+
+                plan.append(
+                    DownloadMigrationPlanItem(
+                        source_path=source_path,
+                        destination_path=destination_path,
+                        audio_folder=audio_folder,
+                    )
+                )
+
+        return plan
+
+    def run(self) -> None:
+        root_path = self._download_root()
+        plan = self.build_plan()
+        destination_counts: Dict[str, int] = {}
+        failures: List[str] = []
+        moved = 0
+        skipped = 0
+        failed = 0
+        total = len(plan)
+
+        for index, item in enumerate(plan, start=1):
+            self.progress.emit(index, total, item.source_path)
+
+            try:
+                if not os.path.exists(item.source_path):
+                    skipped += 1
+                    continue
+
+                if os.path.exists(item.destination_path):
+                    skipped += 1
+                    failures.append(
+                        f"Skipped existing destination: {item.destination_path}"
+                    )
+                    continue
+
+                os.makedirs(os.path.dirname(item.destination_path), exist_ok=True)
+                shutil.move(item.source_path, item.destination_path)
+                moved += 1
+                destination_counts[item.audio_folder] = (
+                    destination_counts.get(item.audio_folder, 0) + 1
+                )
+            except Exception as exc:
+                failed += 1
+                failures.append(f"{item.source_path} -> {item.destination_path}: {exc}")
+                logger.warning(
+                    "Failed to migrate download file %s",
+                    item.source_path,
+                    exc_info=True,
+                )
+
+        self._remove_empty_legacy_dirs(root_path)
+
+        self.finished.emit(
+            DownloadMigrationResult(
+                root_path=root_path,
+                moved=moved,
+                skipped=skipped,
+                failed=failed,
+                destination_counts=destination_counts,
+                failures=failures[:20],
+            )
+        )
+
+    def _remove_empty_legacy_dirs(self, root_path: str) -> None:
+        for current_root, _dirnames, _filenames in os.walk(root_path, topdown=False):
+            if os.path.abspath(current_root) == os.path.abspath(root_path):
+                continue
+            rel_path = os.path.relpath(current_root, root_path)
+            first_part = rel_path.split(os.sep, 1)[0].lower()
+            if first_part in AUDIO_TYPE_FOLDERS:
+                continue
+            try:
+                if not os.listdir(current_root):
+                    os.rmdir(current_root)
+            except Exception:
+                logger.debug("Failed to remove empty legacy directory %s", current_root)

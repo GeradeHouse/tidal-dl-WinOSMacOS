@@ -42,6 +42,11 @@ class Settings(aigpy.model.ModelBase):
     playbackOutputDeviceId = ""
     playbackOutputDeviceName = "Default Playback Device"
     useCamelotKeyNotation = True
+    tableColumnVisibility = {}
+    debugOpenApiProviderLabel = False
+    downloadStructureMigrationDone = False
+    downloadStructureMigrationDoNotRemind = False
+    downloadStructureMigrationVersion = 1
 
     downloadPath = "./Downloads/"
     audioQuality = enums.AudioQuality.LOSSLESS
@@ -125,6 +130,16 @@ class Settings(aigpy.model.ModelBase):
             self.playbackOutputDeviceName = "Default Playback Device"
         if not hasattr(self, "useCamelotKeyNotation"):
             self.useCamelotKeyNotation = True
+        if not hasattr(self, "tableColumnVisibility") or not isinstance(self.tableColumnVisibility, dict):
+            self.tableColumnVisibility = {}
+        if not hasattr(self, "debugOpenApiProviderLabel"):
+            self.debugOpenApiProviderLabel = False
+        if not hasattr(self, "downloadStructureMigrationDone"):
+            self.downloadStructureMigrationDone = False
+        if not hasattr(self, "downloadStructureMigrationDoNotRemind"):
+            self.downloadStructureMigrationDoNotRemind = False
+        if not hasattr(self, "downloadStructureMigrationVersion"):
+            self.downloadStructureMigrationVersion = 1
         if not hasattr(self, "playlistCoverCachePath"):
             self.playlistCoverCachePath = None
         if (
@@ -166,7 +181,9 @@ class Settings(aigpy.model.ModelBase):
             except Exception as e:
                 print(f"Error: Could not write default settings to {self._path_}: {e}")
 
-    def save(self):
+    def save(self, path: Optional[str] = None):
+        if path is not None:
+            self._path_ = path
         data = aigpy.model.modelToDict(self)
         if data is None:  # Ensure data is a dict to satisfy Pylance
             data = {}
@@ -191,6 +208,11 @@ class Settings(aigpy.model.ModelBase):
         data["playbackOutputDeviceId"] = self.playbackOutputDeviceId
         data["playbackOutputDeviceName"] = self.playbackOutputDeviceName
         data["useCamelotKeyNotation"] = self.useCamelotKeyNotation
+        data["tableColumnVisibility"] = self.tableColumnVisibility
+        data["debugOpenApiProviderLabel"] = self.debugOpenApiProviderLabel
+        data["downloadStructureMigrationDone"] = self.downloadStructureMigrationDone
+        data["downloadStructureMigrationDoNotRemind"] = self.downloadStructureMigrationDoNotRemind
+        data["downloadStructureMigrationVersion"] = self.downloadStructureMigrationVersion
         data["fontSize"] = self.fontSize
         txt = json.dumps(data, indent=4)  # Add indent for readability
         aigpy.file.write(self._path_, txt, "w+")

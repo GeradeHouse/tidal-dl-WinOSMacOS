@@ -192,6 +192,8 @@ def initialize_controls(self: "SettingsPage"):
     self.albumFolderFormatEdit = QLineEdit()
     self.playlistFolderFormatEdit = QLineEdit()
     self.trackFileFormatEdit = QLineEdit()
+    self.btnRestructureDownloads = QPushButton("Restructure existing downloads...")
+    self.chkDebugOpenApiProviderLabel = QCheckBox("Log OpenAPI provider/label diagnostics")
 
     # UI Options
     self.cmbLanguage = QtWidgets.QComboBox()
@@ -335,6 +337,8 @@ def create_paths_section(self: "SettingsPage"):
     assert self.albumFolderFormatEdit is not None
     assert self.playlistFolderFormatEdit is not None
     assert self.trackFileFormatEdit is not None
+    assert self.btnRestructureDownloads is not None
+    assert self.chkDebugOpenApiProviderLabel is not None
     assert self.mainLayout is not None
 
     paths_icon_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons", "folder-white.png"))
@@ -387,6 +391,15 @@ def create_paths_section(self: "SettingsPage"):
     paths_layout.addRow("Album Folder Format:", self.albumFolderFormatEdit)
     paths_layout.addRow("Playlist Folder Format:", self.playlistFolderFormatEdit)
     paths_layout.addRow("Track File Format:", self.trackFileFormatEdit)
+    self.btnRestructureDownloads.setToolTip(
+        "Move legacy downloads into the current audio-type folder structure."
+    )
+    paths_layout.addRow("Download Folder Structure:", self.btnRestructureDownloads)
+
+    self.chkDebugOpenApiProviderLabel.setToolTip(
+        "Diagnostic option for investigating whether OpenAPI provider metadata can improve Label values."
+    )
+    paths_layout.addRow("Label Diagnostics:", self.chkDebugOpenApiProviderLabel)
 
     self.paths_section.addLayout(paths_layout)
     self.mainLayout.addWidget(self.paths_section)

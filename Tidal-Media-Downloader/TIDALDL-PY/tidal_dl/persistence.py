@@ -54,9 +54,26 @@ logger.setLevel(
     logging.WARNING
 )  # Set specific level for this module to only receive warnings
 
-# Set up GUI logging with DEBUG level for this module (debugging persistence operations)
+# Set up GUI logging with WARNING level for this module; cache debug noise stays hidden by default.
 from tidal_dl.gui.gui_logging import setup_gui_logger
-setup_gui_logger(__name__, logging.DEBUG)
+setup_gui_logger(__name__, logging.WARNING)
+
+TRACK_METADATA_CACHE_VERSION = 1
+TRACK_METADATA_CACHE_TTL_SECONDS = 90 * 24 * 60 * 60
+TRACK_METADATA_CACHE_ALLOWED_KEYS = {
+    "release_year",
+    "bpm",
+    "key",
+    "genre",
+    "label",
+}
+TRACK_METADATA_CACHE_PLACEHOLDER_VALUES = {
+    "",
+    "-",
+    "Loading...",
+    "Unknown",
+    "Unknown Quality",
+}
 
 # ########## CLASS DEFINITIONS ##########
 
@@ -103,8 +120,59 @@ class LinkPersistenceManager:
         Returns:
             str: The current UTC timestamp as an ISO 8601 formatted string.
         """
-        # Get current time in UTC, format it, and append 'Z' for UTC indication.
-        return datetime.now(timezone.utc).isoformat(timespec="seconds") + "Z"
+        # Store UTC timestamps in standard ISO-8601 Z form.
+        return (
+            datetime.now(timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
+
+    @staticmethod
+    def _clean_track_metadata_cache_values(metadata: Dict[str, Any]) -> Dict[str, str]:
+        """
+        Keep only supported, non-placeholder display metadata values.
+        """
+        cleaned: Dict[str, str] = {}
+        for raw_key, raw_value in (metadata or {}).items():
+            key = str(raw_key or "").strip()
+            if key not in TRACK_METADATA_CACHE_ALLOWED_KEYS:
+                continue
+
+            value = str(raw_value or "").strip()
+            if value in TRACK_METADATA_CACHE_PLACEHOLDER_VALUES:
+                continue
+
+            cleaned[key] = value
+
+        return cleaned
+
+    @staticmethod
+    def _is_track_metadata_cache_stale(timestamp: Any) -> bool:
+        """
+        Return True when a metadata-cache entry is too old or has an invalid timestamp.
+        """
+        if not isinstance(timestamp, str) or not timestamp.strip():
+            return True
+
+        try:
+            normalized = timestamp.strip()
+
+            # Accept legacy cache values accidentally written as "...+00:00Z".
+            if normalized.endswith("+00:00Z"):
+                normalized = normalized[:-1]
+            elif normalized.endswith("Z"):
+                normalized = f"{normalized[:-1]}+00:00"
+
+            parsed = datetime.fromisoformat(normalized)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+
+            age_seconds = (
+                datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)
+            ).total_seconds()
+            return age_seconds > TRACK_METADATA_CACHE_TTL_SECONDS
+        except Exception:
+            return True
 
     # --- Core Data Handling Methods ---
 
@@ -338,6 +406,10 @@ class LinkPersistenceManager:
             self.load_links()
 
         links_data_dict = cast(Dict[str, Any], self.links_data)
+        cache_version = links_data_dict.get("track_metadata_cache_version")
+        if cache_version is not None and cache_version != TRACK_METADATA_CACHE_VERSION:
+            return {}
+
         metadata_cache = links_data_dict.get("track_metadata_cache", {})
         if not isinstance(metadata_cache, dict):
             return {}
@@ -346,26 +418,27 @@ class LinkPersistenceManager:
         if not isinstance(entry, dict):
             return {}
 
+        entry_version = entry.get("version")
+        if entry_version is not None and entry_version != TRACK_METADATA_CACHE_VERSION:
+            return {}
+
+        if self._is_track_metadata_cache_stale(entry.get("timestamp")):
+            return {}
+
         metadata = entry.get("metadata", {})
         if not isinstance(metadata, dict):
             return {}
 
-        cleaned: Dict[str, str] = {}
-        for key, value in metadata.items():
-            if isinstance(key, str) and isinstance(value, str) and value.strip():
-                cleaned[key.strip()] = value.strip()
-        return cleaned
+        return self._clean_track_metadata_cache_values(metadata)
 
     def set_cached_track_metadata(self, tidal_track_id: str, metadata: Dict[str, str]) -> None:
         """
         Stores or updates cached display metadata for a Tidal track ID.
         """
         track_id = str(tidal_track_id or "").strip()
-        cleaned_metadata = {
-            str(key).strip(): str(value).strip()
-            for key, value in (metadata or {}).items()
-            if str(key).strip() and str(value).strip()
-        }
+        cleaned_metadata = self._clean_track_metadata_cache_values(
+            cast(Dict[str, Any], metadata or {})
+        )
         if not track_id or not cleaned_metadata:
             return
 
@@ -373,6 +446,7 @@ class LinkPersistenceManager:
             self.load_links()
 
         links_data_dict = cast(Dict[str, Any], self.links_data)
+        links_data_dict["track_metadata_cache_version"] = TRACK_METADATA_CACHE_VERSION
 
         metadata_cache = links_data_dict.get("track_metadata_cache")
         if not isinstance(metadata_cache, dict):
@@ -380,26 +454,35 @@ class LinkPersistenceManager:
             links_data_dict["track_metadata_cache"] = metadata_cache
 
         existing_entry = metadata_cache.get(track_id)
-        existing_metadata = (
+        existing_metadata_raw = (
             existing_entry.get("metadata", {})
             if isinstance(existing_entry, dict)
             else {}
         )
-        if isinstance(existing_metadata, dict):
-            merged_metadata = {
-                str(key).strip(): str(value).strip()
-                for key, value in existing_metadata.items()
-                if str(key).strip() and str(value).strip()
-            }
-        else:
-            merged_metadata = {}
+        existing_metadata = (
+            self._clean_track_metadata_cache_values(existing_metadata_raw)
+            if isinstance(existing_metadata_raw, dict)
+            else {}
+        )
 
+        merged_metadata = dict(existing_metadata)
         merged_metadata.update(cleaned_metadata)
 
-        if isinstance(existing_entry, dict) and existing_metadata == merged_metadata:
+        existing_version = (
+            existing_entry.get("version")
+            if isinstance(existing_entry, dict)
+            else None
+        )
+        if (
+            isinstance(existing_entry, dict)
+            and existing_version == TRACK_METADATA_CACHE_VERSION
+            and existing_metadata == merged_metadata
+            and not self._is_track_metadata_cache_stale(existing_entry.get("timestamp"))
+        ):
             return
 
         metadata_cache[track_id] = {
+            "version": TRACK_METADATA_CACHE_VERSION,
             "metadata": merged_metadata,
             "timestamp": self._get_current_timestamp(),
         }
