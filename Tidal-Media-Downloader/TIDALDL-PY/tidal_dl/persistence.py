@@ -40,10 +40,13 @@ Example:
 # ########## IMPORTS ##########
 import json
 import os
+import re
+import shutil
 import time
 from datetime import datetime, timezone
 import logging
-from typing import Dict, Optional, List, Any, cast  # Added cast for type narrowing
+from threading import RLock
+from typing import Dict, Optional, List, Any, cast
 from . import paths
 import aigpy  # type: ignore
 from .model import Track  # Added for type hints and checks
@@ -75,6 +78,12 @@ TRACK_METADATA_CACHE_PLACEHOLDER_VALUES = {
     "Unknown Quality",
 }
 
+LINKS_BACKUP_KEEP_COUNT = 8
+LINKS_FILE_BASENAME = "spotify_to_tidal_links.json"
+LINKS_TEMP_SUFFIX = ".tmp"
+LINKS_BACKUP_SUFFIX = ".bak"
+LINKS_CORRUPT_SUFFIX = ".corrupt"
+
 # ########## CLASS DEFINITIONS ##########
 
 
@@ -98,6 +107,9 @@ class LinkPersistenceManager:
         # Initialize links_data as None to enable lazy loading.
         # Data will be loaded from the file only when first needed.
         self.links_data: Optional[Dict[str, Any]] = None  # Use more specific type hint
+        self._io_lock = RLock()
+        self._load_failed_due_to_unresolved_corruption = False
+        self._last_recovery_source: Optional[str] = None
 
     # --- Private Helper Methods ---
 
@@ -111,7 +123,7 @@ class LinkPersistenceManager:
         # Retrieve the base profile directory using the paths module.
         profile_path = paths.getProfilePath()
         # Combine the profile path and the filename.
-        return os.path.join(profile_path, "spotify_to_tidal_links.json")
+        return os.path.join(profile_path, LINKS_FILE_BASENAME)
 
     def _get_current_timestamp(self) -> str:
         """
@@ -174,69 +186,381 @@ class LinkPersistenceManager:
         except Exception:
             return True
 
+    @staticmethod
+    def _default_links_structure() -> Dict[str, Any]:
+        return {"playlists": {}}
+
+    @staticmethod
+    def _normalize_loaded_links_data(raw_data: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw_data, dict):
+            return None
+
+        playlists = raw_data.get("playlists")
+        if not isinstance(playlists, dict):
+            return None
+
+        normalized = dict(raw_data)
+        normalized["playlists"] = playlists
+        return normalized
+
+    def _timestamp_for_filename(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+    def _json_file_candidates(self, suffix: str) -> List[str]:
+        directory = os.path.dirname(self.file_path)
+        basename = os.path.basename(self.file_path)
+        if not os.path.isdir(directory):
+            return []
+
+        candidates: List[str] = []
+        prefix = f"{basename}{suffix}"
+        for filename in os.listdir(directory):
+            if filename == prefix or filename.startswith(f"{prefix}."):
+                candidates.append(os.path.join(directory, filename))
+
+        candidates.sort(
+            key=lambda path: os.path.getmtime(path) if os.path.exists(path) else 0,
+            reverse=True,
+        )
+        return candidates
+
+    def _backup_candidates(self) -> List[str]:
+        return self._json_file_candidates(LINKS_BACKUP_SUFFIX)
+
+    def _load_and_validate_json_file(self, path: str) -> Optional[Dict[str, Any]]:
+        with open(path, "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+        return self._normalize_loaded_links_data(raw_data)
+
+    def _copy_current_file_to_backup_if_valid(self) -> Optional[str]:
+        if not os.path.exists(self.file_path):
+            return None
+
+        try:
+            valid_data = self._load_and_validate_json_file(self.file_path)
+            if valid_data is None:
+                logger.warning(
+                    "Current links file was not backed up because it does not contain a valid links structure."
+                )
+                return None
+
+            backup_path = (
+                f"{self.file_path}{LINKS_BACKUP_SUFFIX}.{self._timestamp_for_filename()}"
+            )
+            shutil.copy2(self.file_path, backup_path)
+            self._rotate_link_backups()
+            logger.info("Created links backup: %s", backup_path)
+            return backup_path
+        except Exception as exc:
+            logger.warning(
+                "Current links file was not backed up because validation failed: %s",
+                exc,
+            )
+            return None
+
+    def _copy_corrupt_file_as_preserved_copy(self, reason: str) -> Optional[str]:
+        if not os.path.exists(self.file_path):
+            return None
+
+        try:
+            corrupt_path = (
+                f"{self.file_path}{LINKS_CORRUPT_SUFFIX}.{self._timestamp_for_filename()}"
+            )
+            shutil.copy2(self.file_path, corrupt_path)
+            logger.error(
+                "Preserved corrupt links file copy: %s | reason=%s",
+                corrupt_path,
+                reason,
+            )
+            return corrupt_path
+        except Exception:
+            logger.error(
+                "Failed to preserve corrupt links file copy for '%s'.",
+                self.file_path,
+                exc_info=True,
+            )
+            return None
+
+    def _rotate_link_backups(self) -> None:
+        backups = self._backup_candidates()
+        for old_backup in backups[LINKS_BACKUP_KEEP_COUNT:]:
+            try:
+                os.remove(old_backup)
+                logger.debug("Removed old links backup: %s", old_backup)
+            except Exception:
+                logger.debug(
+                    "Failed to remove old links backup: %s",
+                    old_backup,
+                    exc_info=True,
+                )
+
+    def _find_object_start_after_key(self, text: str, key: str) -> int:
+        key_match = re.search(rf'"{re.escape(key)}"\s*:', text)
+        if not key_match:
+            return -1
+
+        object_start = text.find("{", key_match.end())
+        return object_start
+
+    def _salvage_top_level_object(self, text: str, key: str) -> Optional[Dict[str, Any]]:
+        object_start = self._find_object_start_after_key(text, key)
+        if object_start < 0:
+            return None
+
+        decoder = json.JSONDecoder()
+        try:
+            parsed, _end = decoder.raw_decode(text[object_start:])
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+
+    def _salvage_playlists_from_corrupt_text(self, text: str) -> Dict[str, Any]:
+        playlists_start = self._find_object_start_after_key(text, "playlists")
+        if playlists_start < 0:
+            return self._default_links_structure()
+
+        decoder = json.JSONDecoder()
+        index = playlists_start + 1
+        recovered_playlists: Dict[str, Any] = {}
+        skipped_entries = 0
+
+        while index < len(text):
+            while index < len(text) and text[index] in " \r\n\t,":
+                index += 1
+
+            if index >= len(text) or text[index] == "}":
+                break
+
+            try:
+                playlist_id, key_end = decoder.raw_decode(text[index:])
+                if not isinstance(playlist_id, str):
+                    raise ValueError("playlist key is not a string")
+
+                index += key_end
+                while index < len(text) and text[index] in " \r\n\t":
+                    index += 1
+                if index >= len(text) or text[index] != ":":
+                    raise ValueError("missing colon after playlist key")
+
+                index += 1
+                while index < len(text) and text[index] in " \r\n\t":
+                    index += 1
+
+                playlist_value, value_end = decoder.raw_decode(text[index:])
+                if isinstance(playlist_value, dict):
+                    recovered_playlists[playlist_id] = playlist_value
+
+                index += value_end
+            except Exception:
+                skipped_entries += 1
+                next_candidate = re.search(r',\s*"[^"]+"\s*:\s*\{', text[index:])
+                if not next_candidate:
+                    break
+                index += next_candidate.start() + 1
+
+        recovered: Dict[str, Any] = {"playlists": recovered_playlists}
+
+        for optional_key in (
+            "track_quality_cache",
+            "track_metadata_cache",
+            "track_metadata_cache_version",
+        ):
+            optional_value = self._salvage_top_level_object(text, optional_key)
+            if optional_value is not None:
+                recovered[optional_key] = optional_value
+
+        logger.warning(
+            "Corrupt links salvage completed | recovered_playlists=%d skipped_entries=%d",
+            len(recovered_playlists),
+            skipped_entries,
+        )
+        return recovered
+
+    def _recover_links_data_after_decode_error(
+        self,
+        decode_error: json.JSONDecodeError,
+    ) -> Optional[Dict[str, Any]]:
+        self._copy_corrupt_file_as_preserved_copy(str(decode_error))
+
+        for backup_path in self._backup_candidates():
+            try:
+                recovered = self._load_and_validate_json_file(backup_path)
+                if recovered is not None:
+                    self._last_recovery_source = backup_path
+                    logger.warning(
+                        "Recovered links data from backup '%s' after main JSON decode failure.",
+                        backup_path,
+                    )
+                    if self._write_links_data_atomic(recovered, create_backup=False):
+                        logger.warning(
+                            "Repaired main links file from backup '%s'.",
+                            backup_path,
+                        )
+                    return recovered
+            except Exception:
+                logger.warning(
+                    "Skipping invalid links backup during recovery: %s",
+                    backup_path,
+                    exc_info=True,
+                )
+
+        try:
+            with open(self.file_path, "r", encoding="utf-8", errors="replace") as f:
+                corrupt_text = f.read()
+
+            recovered = self._salvage_playlists_from_corrupt_text(corrupt_text)
+            normalized = self._normalize_loaded_links_data(recovered)
+            if normalized and normalized.get("playlists"):
+                self._last_recovery_source = "corrupt-file-salvage"
+                logger.warning(
+                    "Recovered links data by salvaging corrupt file | playlists=%d",
+                    len(normalized.get("playlists", {})),
+                )
+                if self._write_links_data_atomic(normalized, create_backup=False):
+                    logger.warning("Repaired main links file from salvaged data.")
+                return normalized
+        except Exception:
+            logger.error(
+                "Failed to salvage corrupted links file '%s'.",
+                self.file_path,
+                exc_info=True,
+            )
+
+        return None
+
+    def _validate_temp_json_file(self, temp_path: str) -> bool:
+        try:
+            return self._load_and_validate_json_file(temp_path) is not None
+        except Exception:
+            return False
+
+    def _write_links_data_atomic(
+        self,
+        links_data_to_save: Dict[str, Any],
+        *,
+        create_backup: bool = True,
+    ) -> bool:
+        directory = os.path.dirname(self.file_path)
+        os.makedirs(directory, exist_ok=True)
+
+        temp_path = (
+            f"{self.file_path}{LINKS_TEMP_SUFFIX}."
+            f"{os.getpid()}.{self._timestamp_for_filename()}"
+        )
+
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    links_data_to_save,
+                    f,
+                    indent=4,
+                    ensure_ascii=False,
+                    sort_keys=False,
+                )
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+
+            if not self._validate_temp_json_file(temp_path):
+                logger.error(
+                    "Refusing to replace links file because temp JSON validation failed: %s",
+                    temp_path,
+                )
+                return False
+
+            if create_backup:
+                self._copy_current_file_to_backup_if_valid()
+
+            os.replace(temp_path, self.file_path)
+
+            try:
+                directory_fd = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except Exception:
+                logger.debug(
+                    "Directory fsync was not available for '%s'.",
+                    directory,
+                    exc_info=True,
+                )
+
+            logger.debug("Atomically saved links to '%s'.", self.file_path)
+            return True
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    logger.debug(
+                        "Failed to remove temp links file: %s",
+                        temp_path,
+                        exc_info=True,
+                    )
+
     # --- Core Data Handling Methods ---
 
     # Return type annotation remains Dict[str, Any] as the function guarantees it
     def load_links(self) -> Dict[str, Any]:
         """
-        Loads the links data from the JSON file into memory.
-
-        If the file doesn't exist or is invalid JSON, it returns a default
-        empty structure and logs a warning/error. This method populates
-        `self.links_data`.
-
-        Returns:
-            Dict[str, Any]: The loaded link data, or `{"playlists": {}}` on error/not found.
+        Loads the links data from disk, with backup/salvage recovery for corrupt JSON.
         """
-        # Check if data is already loaded to avoid redundant file reads.
         if self.links_data is not None:
             return self.links_data
 
-        # Default structure in case of errors
-        default_structure: Dict[str, Any] = {"playlists": {}}
+        default_structure = self._default_links_structure()
+        loaded_data: Dict[str, Any] = default_structure
 
-        # Block: Attempt to read and parse the JSON file.
-        try:
-            # Open the file in read mode with UTF-8 encoding.
-            with open(self.file_path, "r", encoding="utf-8") as f:
-                # Parse the JSON content.
-                raw_data = json.load(f)
-                # Ensure the basic structure exists, default if necessary.
-                if "playlists" not in raw_data or not isinstance(
-                    raw_data.get("playlists"), dict
-                ):
+        with self._io_lock:
+            try:
+                raw_data = self._load_and_validate_json_file(self.file_path)
+                if raw_data is None:
                     logger.warning(
-                        f"File '{self.file_path}' lacks 'playlists' key or it's not a dict. Initializing."
+                        "Links file '%s' lacks a valid 'playlists' dictionary. Initializing with empty structure.",
+                        self.file_path,
                     )
-                    loaded_data: Dict[str, Any] = default_structure
+                    loaded_data = default_structure
                 else:
                     loaded_data = raw_data
-                logger.debug(f"Successfully loaded links from '{self.file_path}'.")
-        # Handle case where the file does not exist.
-        except FileNotFoundError:
-            logger.warning(
-                f"Links file '{self.file_path}' not found. Initializing with empty structure."
-            )
-            loaded_data = default_structure
-            logger.debug(
-                f"[DIAGNOSIS] load_links returning default structure due to FileNotFoundError: {loaded_data}"
-            )
-        # Handle case where the file contains invalid JSON.
-        except json.JSONDecodeError as e:
-            logger.error(
-                f"Failed to decode JSON from '{self.file_path}': {e}. Initializing with empty structure."
-            )
-            loaded_data = default_structure
-        # Handle other potential file reading errors.
-        except IOError as e:
-            logger.error(
-                f"Error reading links file '{self.file_path}': {str(e)}. Initializing with empty structure."
-            )
-            loaded_data = default_structure
+                    self._load_failed_due_to_unresolved_corruption = False
+                    logger.debug("Successfully loaded links from '%s'.", self.file_path)
 
-        # Assign loaded data and return
-        self.links_data = loaded_data
-        return loaded_data
+            except FileNotFoundError:
+                logger.warning(
+                    "Links file '%s' not found. Initializing with empty structure.",
+                    self.file_path,
+                )
+                loaded_data = default_structure
+
+            except json.JSONDecodeError as exc:
+                logger.error(
+                    "Failed to decode JSON from '%s': %s. Attempting recovery before falling back to empty structure.",
+                    self.file_path,
+                    exc,
+                )
+                recovered_data = self._recover_links_data_after_decode_error(exc)
+                if recovered_data is not None:
+                    loaded_data = recovered_data
+                    self._load_failed_due_to_unresolved_corruption = False
+                else:
+                    loaded_data = default_structure
+                    self._load_failed_due_to_unresolved_corruption = True
+                    logger.critical(
+                        "Unable to recover links data from '%s'. Empty in-memory structure will be used, but automatic saving is protected.",
+                        self.file_path,
+                    )
+
+            except IOError as exc:
+                logger.error(
+                    "Error reading links file '%s': %s. Initializing with empty structure.",
+                    self.file_path,
+                    exc,
+                )
+                loaded_data = default_structure
+
+            self.links_data = loaded_data
+            return loaded_data
 
     def save_links(self) -> bool:
         """
@@ -251,49 +575,77 @@ class LinkPersistenceManager:
         Returns:
             bool: True if saving was successful, False otherwise.
         """
-        # Ensure data is loaded before saving.
-        if self.links_data is None:
-            logger.warning("Attempted to save links before loading. Loading first.")
-            self.load_links()
+        with self._io_lock:
+            if self.links_data is None:
+                logger.warning("Attempted to save links before loading. Loading first.")
+                self.load_links()
 
-        # Now self.links_data is guaranteed to be a Dict[str, Any]
-        links_data_to_save = cast(Dict[str, Any], self.links_data)
+            links_data_to_save = cast(Dict[str, Any], self.links_data)
 
-        # Retry logic for file locking issues
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                # Ensure the directory exists before writing.
-                os.makedirs(os.path.dirname(self.file_path), exist_ok=True)
-                # Open the file in write mode with UTF-8 encoding.
-                with open(self.file_path, "w", encoding="utf-8") as f:
-                    # Dump the current links data to the file.
-                    json.dump(
-                        links_data_to_save,  # Use the guaranteed dict variable
-                        f,
-                        indent=4,  # Pretty-print with 4 spaces.
-                        ensure_ascii=False,  # Allow non-ASCII characters.
-                        sort_keys=False,  # Maintain insertion order where possible.
-                    )
-                logger.debug(f"Successfully saved links to '{self.file_path}'.")
-                return True
-            
-            except IOError as e:
-                # Check if it's a permission error (often caused by file locking)
-                # Errno 13 is Permission denied
-                if attempt < max_retries - 1:
-                    logger.warning(f"Save attempt {attempt + 1} failed ({e}). Retrying in 0.2s...")
-                    time.sleep(0.2)
-                    continue
-                else:
-                    logger.error(f"Error saving links file '{self.file_path}' after {max_retries} attempts: {str(e)}")
-                    return False
-            
-            except Exception as e:  # Catch unexpected errors during save
-                logger.error(f"An unexpected error occurred during save: {str(e)}")
+            if (
+                self._load_failed_due_to_unresolved_corruption
+                and links_data_to_save == self._default_links_structure()
+                and os.path.exists(self.file_path)
+            ):
+                logger.critical(
+                    "Refusing to overwrite unresolved corrupt links file with an empty default structure: %s",
+                    self.file_path,
+                )
                 return False
-        
-        return False
+
+            normalized = self._normalize_loaded_links_data(links_data_to_save)
+            if normalized is None:
+                logger.error(
+                    "Refusing to save links because in-memory data does not contain a valid 'playlists' dictionary."
+                )
+                return False
+
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    if self._write_links_data_atomic(normalized, create_backup=True):
+                        self._load_failed_due_to_unresolved_corruption = False
+                        return True
+                    raise IOError("atomic links write returned False")
+
+                except IOError as exc:
+                    if attempt < max_retries - 1:
+                        logger.warning(
+                            "Save attempt %d failed (%s). Retrying...",
+                            attempt + 1,
+                            exc,
+                        )
+                        time.sleep(1)
+                    else:
+                        logger.error(
+                            "Failed to save links to '%s' after %d attempts: %s",
+                            self.file_path,
+                            max_retries,
+                            exc,
+                        )
+                        return False
+
+                except Exception as exc:
+                    logger.error(
+                        "Unexpected error saving links to '%s': %s",
+                        self.file_path,
+                        exc,
+                        exc_info=True,
+                    )
+                    return False
+
+            return False
+
+    def get_recovery_status(self) -> Dict[str, Any]:
+        """
+        Returns diagnostic information about the most recent persistence recovery state.
+        """
+        return {
+            "file_path": self.file_path,
+            "load_failed_due_to_unresolved_corruption": self._load_failed_due_to_unresolved_corruption,
+            "last_recovery_source": self._last_recovery_source,
+            "backup_count": len(self._backup_candidates()),
+        }
 
     # --- Public Data Access and Modification Methods ---
 
