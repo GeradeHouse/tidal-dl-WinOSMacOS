@@ -18,8 +18,9 @@ from PyQt6.QtWidgets import (
     QStyle,
     QApplication,
     QCheckBox,
+    QProgressBar,
 )
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import (
     QPixmap,
     QIcon,
@@ -289,6 +290,156 @@ class ModernDarkDialog(QDialog):
 
     def is_checkbox_checked(self) -> bool:
         return bool(self.checkbox and self.checkbox.isChecked())
+
+
+class ModernDarkProgressDialog(QDialog):
+    """Dark themed non-blocking progress dialog for long-running GUI tasks."""
+
+    canceled = pyqtSignal()
+
+    def __init__(
+        self,
+        title: str,
+        label_text: str = "",
+        cancel_text: str = "Cancel",
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+
+        self._maximum = 0
+        self._value = 0
+
+        self.setWindowTitle(title)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+
+        self.content_widget = StyledWidget(self)
+        self.content_widget.setObjectName("progressDialogContentWidget")
+        self.content_widget.setStyleSheet(
+            """
+            QWidget#progressDialogContentWidget {
+                background-color: #222222;
+                border: 1px solid #444444;
+                border-radius: 8px;
+                color: #ffffff;
+            }
+            """
+        )
+        self.main_layout.addWidget(self.content_widget)
+
+        layout = QVBoxLayout(self.content_widget)
+        layout.setContentsMargins(22, 18, 22, 18)
+        layout.setSpacing(14)
+
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(10)
+
+        title_label = QLabel(title)
+        title_label.setFont(QFont("Segoe UI Variable", 12, QFont.Weight.Bold))
+        title_label.setStyleSheet("color: #ffffff; background: transparent;")
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        layout.addLayout(header_layout)
+
+        self.label = QLabel(label_text)
+        self.label.setFont(QFont("Segoe UI Variable", 9))
+        self.label.setWordWrap(True)
+        self.label.setMinimumHeight(44)
+        self.label.setStyleSheet(
+            """
+            QLabel {
+                color: #d6d6d6;
+                background: transparent;
+            }
+            """
+        )
+        layout.addWidget(self.label)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(0)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFixedHeight(18)
+        self.progress_bar.setStyleSheet(
+            """
+            QProgressBar {
+                background-color: #111111;
+                color: #ffffff;
+                border: 1px solid #555555;
+                border-radius: 8px;
+                text-align: center;
+            }
+            QProgressBar::chunk {
+                background-color: #00c8c8;
+                border-radius: 7px;
+            }
+            """
+        )
+        layout.addWidget(self.progress_bar)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+
+        self.cancel_button = QPushButton(cancel_text)
+        self.cancel_button.setFixedHeight(32)
+        self.cancel_button.setMinimumWidth(96)
+        self.cancel_button.setFont(QFont("Segoe UI Variable", 9))
+        self.cancel_button.setStyleSheet(self._get_cancel_button_style())
+        self.cancel_button.clicked.connect(self._on_cancel_clicked)
+        button_layout.addWidget(self.cancel_button)
+
+        layout.addLayout(button_layout)
+
+        self.setFixedSize(620, 210)
+
+    def _get_cancel_button_style(self) -> str:
+        return """
+            QPushButton {
+                background-color: #3a3a3a;
+                color: #ffffff;
+                border: 1px solid #5a5a5a;
+                border-radius: 6px;
+                padding: 6px 14px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+            }
+            QPushButton:pressed {
+                background-color: #2f2f2f;
+            }
+            QPushButton:disabled {
+                color: #888888;
+                background-color: #2a2a2a;
+                border: 1px solid #3a3a3a;
+            }
+        """
+
+    def _on_cancel_clicked(self) -> None:
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.setText("Cancel requested")
+        self.canceled.emit()
+
+    def setMaximum(self, maximum: int) -> None:
+        self._maximum = max(int(maximum), 0)
+        self.progress_bar.setMaximum(self._maximum)
+
+    def maximum(self) -> int:
+        return self._maximum
+
+    def setValue(self, value: int) -> None:
+        self._value = max(int(value), 0)
+        self.progress_bar.setValue(self._value)
+
+    def setLabelText(self, text: str) -> None:
+        self.label.setText(str(text or ""))
 
     def paintEvent(self, a0):
         painter = QPainter(self)

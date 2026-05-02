@@ -24,14 +24,20 @@ AUDIO_EXTENSIONS_TO_FOLDER = {
     ".m4a": "m4a",
     ".mp4": "mp4",
 }
-AUDIO_TYPE_FOLDERS = set(AUDIO_EXTENSIONS_TO_FOLDER.values())
+LYRICS_EXTENSIONS_TO_FOLDER = {
+    ".lrc": "lyrics",
+}
+MANAGED_TOP_LEVEL_FOLDERS = set(AUDIO_EXTENSIONS_TO_FOLDER.values()) | set(
+    LYRICS_EXTENSIONS_TO_FOLDER.values()
+)
+AUDIO_DESTINATION_PRIORITY = ("flac", "m4a", "mp3", "mp4")
 
 
 @dataclass
 class DownloadMigrationPlanItem:
     source_path: str
     destination_path: str
-    audio_folder: str
+    destination_folder: str
 
 
 @dataclass
@@ -54,10 +60,56 @@ class DownloadStructureMigrationWorker(QObject):
     def _download_root(self) -> str:
         return os.path.abspath(get_user_download_path(SETTINGS.downloadPath))
 
-    def _is_already_inside_audio_folder(self, root_path: str, file_path: str) -> bool:
+    def _is_already_inside_managed_folder(self, root_path: str, file_path: str) -> bool:
         rel_path = os.path.relpath(file_path, root_path)
         first_part = rel_path.split(os.sep, 1)[0].lower()
-        return first_part in AUDIO_TYPE_FOLDERS
+        return first_part in MANAGED_TOP_LEVEL_FOLDERS
+
+    def _relative_stem_key(self, root_path: str, file_path: str) -> str:
+        relative_path = os.path.relpath(file_path, root_path)
+        relative_stem, _ext = os.path.splitext(relative_path)
+        return os.path.normcase(os.path.normpath(relative_stem))
+
+    def _existing_audio_folder_for_lyrics(
+        self,
+        root_path: str,
+        lyrics_relative_stem: str,
+    ) -> Optional[str]:
+        for audio_folder in AUDIO_DESTINATION_PRIORITY:
+            for audio_ext in AUDIO_EXTENSIONS_TO_FOLDER:
+                candidate_path = os.path.join(
+                    root_path,
+                    audio_folder,
+                    f"{lyrics_relative_stem}{audio_ext}",
+                )
+                if os.path.exists(candidate_path):
+                    return audio_folder
+        return None
+
+    def _lyrics_destination_folder(
+        self,
+        root_path: str,
+        lyrics_source_path: str,
+        planned_audio_folders_by_relative_stem: Dict[str, str],
+    ) -> str:
+        relative_path = os.path.relpath(lyrics_source_path, root_path)
+        relative_stem, _ext = os.path.splitext(relative_path)
+        normalized_stem = os.path.normcase(os.path.normpath(relative_stem))
+
+        planned_audio_folder = planned_audio_folders_by_relative_stem.get(
+            normalized_stem
+        )
+        if planned_audio_folder:
+            return planned_audio_folder
+
+        existing_audio_folder = self._existing_audio_folder_for_lyrics(
+            root_path,
+            relative_stem,
+        )
+        if existing_audio_folder:
+            return existing_audio_folder
+
+        return LYRICS_EXTENSIONS_TO_FOLDER[".lrc"]
 
     def build_plan(self) -> List[DownloadMigrationPlanItem]:
         root_path = self._download_root()
@@ -65,37 +117,68 @@ class DownloadStructureMigrationWorker(QObject):
             return []
 
         plan: List[DownloadMigrationPlanItem] = []
+        legacy_lyrics_paths: List[str] = []
+        planned_audio_folders_by_relative_stem: Dict[str, str] = {}
+
         for current_root, dirnames, filenames in os.walk(root_path):
             dirnames[:] = [
                 dirname
                 for dirname in dirnames
-                if dirname.lower() not in AUDIO_TYPE_FOLDERS
+                if dirname.lower() not in MANAGED_TOP_LEVEL_FOLDERS
             ]
 
             for filename in filenames:
                 ext = os.path.splitext(filename)[1].lower()
-                audio_folder = AUDIO_EXTENSIONS_TO_FOLDER.get(ext)
-                if not audio_folder:
-                    continue
-
                 source_path = os.path.join(current_root, filename)
-                if self._is_already_inside_audio_folder(root_path, source_path):
+
+                if self._is_already_inside_managed_folder(root_path, source_path):
                     continue
 
-                relative_path = os.path.relpath(source_path, root_path)
-                destination_path = os.path.join(root_path, audio_folder, relative_path)
-                if os.path.normcase(os.path.abspath(source_path)) == os.path.normcase(
-                    os.path.abspath(destination_path)
-                ):
-                    continue
+                audio_folder = AUDIO_EXTENSIONS_TO_FOLDER.get(ext)
+                if audio_folder:
+                    relative_path = os.path.relpath(source_path, root_path)
+                    destination_path = os.path.join(root_path, audio_folder, relative_path)
+                    if os.path.normcase(os.path.abspath(source_path)) == os.path.normcase(
+                        os.path.abspath(destination_path)
+                    ):
+                        continue
 
-                plan.append(
-                    DownloadMigrationPlanItem(
-                        source_path=source_path,
-                        destination_path=destination_path,
-                        audio_folder=audio_folder,
+                    planned_audio_folders_by_relative_stem[
+                        self._relative_stem_key(root_path, source_path)
+                    ] = audio_folder
+                    plan.append(
+                        DownloadMigrationPlanItem(
+                            source_path=source_path,
+                            destination_path=destination_path,
+                            destination_folder=audio_folder,
+                        )
                     )
+                    continue
+
+                if ext in LYRICS_EXTENSIONS_TO_FOLDER:
+                    legacy_lyrics_paths.append(source_path)
+
+        for lyrics_source_path in legacy_lyrics_paths:
+            relative_path = os.path.relpath(lyrics_source_path, root_path)
+            destination_folder = self._lyrics_destination_folder(
+                root_path,
+                lyrics_source_path,
+                planned_audio_folders_by_relative_stem,
+            )
+            destination_path = os.path.join(root_path, destination_folder, relative_path)
+
+            if os.path.normcase(os.path.abspath(lyrics_source_path)) == os.path.normcase(
+                os.path.abspath(destination_path)
+            ):
+                continue
+
+            plan.append(
+                DownloadMigrationPlanItem(
+                    source_path=lyrics_source_path,
+                    destination_path=destination_path,
+                    destination_folder=destination_folder,
                 )
+            )
 
         return plan
 
@@ -127,8 +210,8 @@ class DownloadStructureMigrationWorker(QObject):
                 os.makedirs(os.path.dirname(item.destination_path), exist_ok=True)
                 shutil.move(item.source_path, item.destination_path)
                 moved += 1
-                destination_counts[item.audio_folder] = (
-                    destination_counts.get(item.audio_folder, 0) + 1
+                destination_counts[item.destination_folder] = (
+                    destination_counts.get(item.destination_folder, 0) + 1
                 )
             except Exception as exc:
                 failed += 1
@@ -158,7 +241,7 @@ class DownloadStructureMigrationWorker(QObject):
                 continue
             rel_path = os.path.relpath(current_root, root_path)
             first_part = rel_path.split(os.sep, 1)[0].lower()
-            if first_part in AUDIO_TYPE_FOLDERS:
+            if first_part in MANAGED_TOP_LEVEL_FOLDERS:
                 continue
             try:
                 if not os.listdir(current_root):

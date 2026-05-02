@@ -287,6 +287,29 @@ class DownloadHandler(QObject):
         self.btn_stop.setEnabled(True)
         logger.debug("[GUI] Set download UI: Showing Pause/Stop")
 
+    def _is_visible_table_context_for_playlist(
+        self,
+        playlist_id: Optional[str],
+        playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
+    ) -> bool:
+        if not playlist_id:
+            return True
+
+        current_context = getattr(self.main_view, "s_playlist_obj", None)
+        current_playlist_id: Optional[str] = None
+
+        if isinstance(current_context, dict):
+            current_type = current_context.get("type")
+            current_data = current_context.get("data")
+            if current_type == "spotify" and isinstance(current_data, dict):
+                current_playlist_id = str(current_data.get("id") or "").strip() or None
+            elif current_type == "tidal" and isinstance(current_data, Playlist):
+                current_playlist_id = str(getattr(current_data, "uuid", "") or "").strip() or None
+        elif isinstance(current_context, Playlist):
+            current_playlist_id = str(getattr(current_context, "uuid", "") or "").strip() or None
+
+        return bool(current_playlist_id and current_playlist_id == str(playlist_id))
+
     @pyqtSlot()
     def onActuallyPaused(self):
         logger.debug(
@@ -325,6 +348,8 @@ class DownloadHandler(QObject):
 
         current_playlist_context = getattr(self.main_view, "s_playlist_obj", None)
         filtered_tracks_with_rows = tracks_with_rows
+        # Non-completed filtering is intentionally done only after the user selects
+        # this action, not while the right-click menu is being built.
         if non_completed_only:
             table_handler = getattr(self.main_view, "table_handler", None)
             if table_handler:
@@ -366,19 +391,6 @@ class DownloadHandler(QObject):
                 tracks_with_rows.append((r_idx, tidal_track))
 
         table_handler = getattr(self.main_view, "table_handler", None)
-        if table_handler and tracks_with_rows:
-            menu.addSeparator()
-            check_completed_action = menu.addAction(
-                f"Check completed status for {len(tracks_with_rows)} selected Track"
-                + ("s" if len(tracks_with_rows) != 1 else "")
-            )
-            if check_completed_action:
-                check_completed_action.triggered.connect(
-                    lambda _checked=False, rows=[row for row, _track in tracks_with_rows]: table_handler.check_completed_status_for_rows(
-                        rows,
-                        reason="download_context_selected_rows",
-                    )
-                )
 
         if not tracks_with_rows:
             no_valid_tracks_action = menu.addAction(
@@ -413,23 +425,11 @@ class DownloadHandler(QObject):
                     partial(self.startContextMenuDownload, tracks_with_rows, qual_enum)
                 )
 
-        current_playlist_context = getattr(self.main_view, "s_playlist_obj", None)
-        non_completed_tracks_with_rows: List[Tuple[int, Track]] = []
-        if table_handler:
-            non_completed_tracks_with_rows = [
-                (row_index, tidal_track)
-                for row_index, tidal_track in tracks_with_rows
-                if not table_handler.is_track_completed(tidal_track, current_playlist_context)
-            ]
-
-        if non_completed_tracks_with_rows:
+        # Do not call is_track_completed(...) while building the context menu.
+        # That path may perform local file/index work and can delay right-click menu display.
+        if num_downloadable > 1 and table_handler:
             menu.addSeparator()
-            non_completed_menu_title = (
-                f"Download non-completed {len(non_completed_tracks_with_rows)} Track"
-            )
-            if len(non_completed_tracks_with_rows) > 1:
-                non_completed_menu_title += "s"
-
+            non_completed_menu_title = f"Download non-completed {num_downloadable} Tracks"
             non_completed_menu = menu.addMenu(non_completed_menu_title)
             if non_completed_menu:
                 for text, qual_enum in dlQualities:
@@ -438,7 +438,7 @@ class DownloadHandler(QObject):
                         action.triggered.connect(
                             partial(
                                 self.startContextMenuDownload,
-                                non_completed_tracks_with_rows,
+                                tracks_with_rows,
                                 qual_enum,
                                 True,
                             )
@@ -626,9 +626,17 @@ class DownloadHandler(QObject):
         )
 
         self._update_ui_for_download_start()
-        self.main_view.table_handler.refresh_view_for_pending_downloads(
-            tracks_to_start
-        )
+        if self._is_visible_table_context_for_playlist(playlist_id, playlist_context):
+            self.main_view.table_handler.refresh_view_for_pending_downloads(
+                tracks_to_start
+            )
+        else:
+            logger.info(
+                "Skipping pending-download table refresh for non-visible queued playlist | "
+                "playlist_id=%s track_count=%d",
+                playlist_id,
+                len(tracks_to_start),
+            )
 
         self.download_thread = QThread(self.main_view)
         self.download_worker = DownloadWorker(

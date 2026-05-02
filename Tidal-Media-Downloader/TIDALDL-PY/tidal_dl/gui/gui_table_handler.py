@@ -1566,13 +1566,21 @@ class TableHandler(QObject):
         self,
         tracks: List[Track],
         playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None,
+        *,
+        allow_slow_fallback: bool = True,
+        reason: str = "filter_non_completed_tracks",
     ) -> List[Track]:
+        filter_start = time.perf_counter()
         indexed_stems, indexed_track_ids = self._build_existing_playlist_file_index(
             tracks,
             playlist_context,
         )
 
         non_completed_tracks: List[Track] = []
+        skipped_by_stem = 0
+        skipped_by_track_id = 0
+        slow_fallback_checks = 0
+
         for track in tracks:
             if not isinstance(track, Track):
                 continue
@@ -1585,14 +1593,42 @@ class TableHandler(QObject):
                     for candidate_path in self._build_candidate_track_paths(track, playlist_context)
                 }
                 if candidate_stems.intersection(indexed_stems):
+                    skipped_by_stem += 1
                     continue
 
             track_id_str = str(getattr(track, "id", "") or "").strip()
             if track_id_str and track_id_str in indexed_track_ids:
+                skipped_by_track_id += 1
                 continue
 
+            if not allow_slow_fallback:
+                non_completed_tracks.append(track)
+                continue
+
+            slow_fallback_checks += 1
             if not self.is_track_completed(track, playlist_context):
                 non_completed_tracks.append(track)
+
+        elapsed_ms = (time.perf_counter() - filter_start) * 1000
+        if (
+            elapsed_ms > 500
+            or len(tracks) >= 500
+            or not allow_slow_fallback
+        ):
+            logger.info(
+                "Non-completed filter result | reason=%s tracks=%d remaining=%d "
+                "removed=%d skipped_by_stem=%d skipped_by_track_id=%d "
+                "slow_fallback_checks=%d allow_slow_fallback=%s elapsed_ms=%.1f",
+                reason,
+                len(tracks),
+                len(non_completed_tracks),
+                len(tracks) - len(non_completed_tracks),
+                skipped_by_stem,
+                skipped_by_track_id,
+                slow_fallback_checks,
+                allow_slow_fallback,
+                elapsed_ms,
+            )
 
         return non_completed_tracks
 
@@ -2031,7 +2067,7 @@ class TableHandler(QObject):
                 context_menu.addSeparator()
 
             check_selected_action = context_menu.addAction(
-                f"Check completed status for {len(selected_rows_indices)} selected row"
+                f"Check completed status for {len(selected_rows_indices)} selected track"
                 + ("s" if len(selected_rows_indices) != 1 else "")
             )
             if check_selected_action:

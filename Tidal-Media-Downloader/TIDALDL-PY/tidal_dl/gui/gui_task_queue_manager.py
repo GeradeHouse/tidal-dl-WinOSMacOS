@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, List, Dict, Any, Optional, Union, cast
@@ -23,6 +24,8 @@ logger.setLevel(logging.DEBUG)  # Set specific level for this module
 # Set up GUI logging with INFO level for this module (task operations need visibility)
 from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
+
+BULK_NON_COMPLETED_PREVIEW_LIMIT = 3
 
 class TaskQueueManager(QObject):
     """Manages a queue of linking and downloading jobs to run them sequentially."""
@@ -66,6 +69,16 @@ class TaskQueueManager(QObject):
             return
 
         queue_was_idle = (not self.is_running_task) and (len(self.task_queue) == 0)
+        bulk_missing_queue = bool(
+            non_completed_only
+            and len(spotify_playlists_data) > BULK_NON_COMPLETED_PREVIEW_LIMIT
+        )
+        if bulk_missing_queue:
+            logger.info(
+                "Bulk Spotify missing-download queue detected; suppressing queued previews | playlist_count=%d",
+                len(spotify_playlists_data),
+            )
+
         for index, p_data in enumerate(spotify_playlists_data):
             job = {
                 "type": "download_spotify",
@@ -78,10 +91,24 @@ class TaskQueueManager(QObject):
             logger.info(f"Queued job: {job['description']}")
             if non_completed_only:
                 playlist_id = str(p_data.get("data", {}).get("id") or "").strip()
+                first_job_starts_immediately = queue_was_idle and index == 0
+
                 if playlist_id and not self._is_playlist_currently_processing(playlist_id):
-                    self._emit_calculating_missing_tracks_status(playlist_id)
-                if not (queue_was_idle and index == 0):
-                    self._schedule_spotify_non_completed_preview(p_data)
+                    if bulk_missing_queue and not first_job_starts_immediately:
+                        self._emit_queued_missing_download_status(playlist_id)
+                    else:
+                        self._emit_calculating_missing_tracks_status(playlist_id)
+
+                if not first_job_starts_immediately:
+                    if bulk_missing_queue:
+                        logger.info(
+                            "Skipping queued Spotify missing preview | playlist_id=%s index=%d playlist_count=%d",
+                            playlist_id,
+                            index,
+                            len(spotify_playlists_data),
+                        )
+                    else:
+                        self._schedule_spotify_non_completed_preview(p_data)
 
         self.process_next_job()
 
@@ -96,6 +123,16 @@ class TaskQueueManager(QObject):
             return
 
         queue_was_idle = (not self.is_running_task) and (len(self.task_queue) == 0)
+        bulk_missing_queue = bool(
+            non_completed_only
+            and len(tidal_playlists) > BULK_NON_COMPLETED_PREVIEW_LIMIT
+        )
+        if bulk_missing_queue:
+            logger.info(
+                "Bulk TIDAL missing-download queue detected; suppressing queued previews | playlist_count=%d",
+                len(tidal_playlists),
+            )
+
         for index, playlist in enumerate(tidal_playlists):
             job = {
                 "type": "download_tidal",
@@ -108,10 +145,24 @@ class TaskQueueManager(QObject):
             logger.info(f"Queued job: {job['description']}")
             if non_completed_only:
                 playlist_id = str(getattr(playlist, "uuid", "") or "").strip()
+                first_job_starts_immediately = queue_was_idle and index == 0
+
                 if playlist_id and not self._is_playlist_currently_processing(playlist_id):
-                    self._emit_calculating_missing_tracks_status(playlist_id)
-                if not (queue_was_idle and index == 0):
-                    self._schedule_tidal_non_completed_preview(playlist)
+                    if bulk_missing_queue and not first_job_starts_immediately:
+                        self._emit_queued_missing_download_status(playlist_id)
+                    else:
+                        self._emit_calculating_missing_tracks_status(playlist_id)
+
+                if not first_job_starts_immediately:
+                    if bulk_missing_queue:
+                        logger.info(
+                            "Skipping queued TIDAL missing preview | playlist_id=%s index=%d playlist_count=%d",
+                            playlist_id,
+                            index,
+                            len(tidal_playlists),
+                        )
+                    else:
+                        self._schedule_tidal_non_completed_preview(playlist)
 
         self.process_next_job()
 
@@ -185,6 +236,11 @@ class TaskQueueManager(QObject):
     def _emit_calculating_missing_tracks_status(self, playlist_id: str):
         """Show an immediate non-generic state while missing-count preview is being computed."""
         self.jobStarted.emit(str(playlist_id), "Calculating missing tracks", 0)
+
+    @pyqtSlot(str)
+    def _emit_queued_missing_download_status(self, playlist_id: str):
+        """Show a lightweight queued state without starting a filesystem preview."""
+        self.jobStarted.emit(str(playlist_id), "Queued for missing download", 0)
 
     def _extract_playlist_id_from_job(self, job: Optional[Dict[str, Any]]) -> Optional[str]:
         if not isinstance(job, dict):
@@ -538,6 +594,12 @@ class TaskQueueManager(QObject):
             return
 
         def pre_download_thread():
+            pre_download_start = time.perf_counter()
+            logger.info(
+                "Spotify queued download preparation started | playlist_id=%s non_completed_only=%s",
+                playlist_id,
+                non_completed_only,
+            )
             all_tracks_meta = self.main_view.spotify_api.get_playlist_tracks(playlist_id)
             # Emit jobStarted for the download action
             initial_action = "Checking missing tracks" if non_completed_only else "Downloading"
@@ -624,6 +686,11 @@ class TaskQueueManager(QObject):
                 skipped_deserialize_error,
                 skipped_missing_track_id,
             )
+            logger.info(
+                "Spotify queued download preparation checkpoint | playlist_id=%s elapsed_ms=%.1f",
+                playlist_id,
+                (time.perf_counter() - pre_download_start) * 1000,
+            )
             
             if unlinked_tracks_for_worker:
                 logger.info(f"Found {len(unlinked_tracks_for_worker)} unlinked tracks in playlist. Linking them first...")
@@ -707,6 +774,8 @@ class TaskQueueManager(QObject):
                         final_download_list = self.main_view.table_handler.filter_non_completed_tracks(
                             final_download_list,
                             playlist_data,
+                            allow_slow_fallback=False,
+                            reason="queued_spotify_post_link_non_completed",
                         )
                         logger.info(
                             "Spotify non-completed filter applied | playlist_id=%s before=%d after=%d removed=%d",
@@ -760,6 +829,8 @@ class TaskQueueManager(QObject):
                     linked_tracks_for_download = self.main_view.table_handler.filter_non_completed_tracks(
                         linked_tracks_for_download,
                         playlist_data,
+                        allow_slow_fallback=False,
+                        reason="queued_spotify_pre_download_non_completed",
                     )
                     logger.info(
                         "Spotify non-completed filter applied | playlist_id=%s before=%d after=%d removed=%d",
@@ -818,6 +889,8 @@ class TaskQueueManager(QObject):
                 tracks = self.main_view.table_handler.filter_non_completed_tracks(
                     tracks,
                     cast(Optional[Playlist], playlist_obj),
+                    allow_slow_fallback=False,
+                    reason="queued_tidal_pre_download_non_completed",
                 )
 
             if non_completed_only and not tracks:

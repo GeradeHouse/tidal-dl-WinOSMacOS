@@ -16,6 +16,7 @@ import sys
 from functools import partial
 import threading
 import datetime
+import time
 from typing import TYPE_CHECKING, List, Dict, Optional, Any, Set, cast
 
 from PyQt6 import QtWidgets, QtCore, QtGui
@@ -366,6 +367,24 @@ class PlaylistTreeHandler(QObject):
 
         self._setup_tree_widget()
         self._connect_tree_signals()
+
+    def _playlist_tree_selected_count(self) -> int:
+        try:
+            return len(self.tree_widget.selectedItems()) if self.tree_widget else 0
+        except Exception:
+            return 0
+
+    def _is_multi_selection_playlist_click(self) -> bool:
+        selected_count = self._playlist_tree_selected_count()
+        modifiers = QApplication.keyboardModifiers()
+        modifier_multi_select = bool(
+            modifiers
+            & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.ShiftModifier
+            )
+        )
+        return selected_count > 1 or modifier_multi_select
 
     def set_task_queue_manager(self, manager: "TaskQueueManager"):
         self.task_queue_manager = manager
@@ -864,6 +883,16 @@ class PlaylistTreeHandler(QObject):
         if item_data is None:
             return
 
+        if self._is_multi_selection_playlist_click():
+            logger.info(
+                "Skipping playlist table load during multi-selection | selected_count=%s item=%s",
+                self._playlist_tree_selected_count(),
+                self._get_name_from_item(item),
+            )
+            return
+
+        click_load_start = time.perf_counter()
+
         if self.table_handler:
             self.table_handler.clear_table()
 
@@ -902,6 +931,15 @@ class PlaylistTreeHandler(QObject):
         except Exception as e:
             logger.error(f"Error handling playlist item click: {e}", exc_info=True)
             setattr(self.main_view, "s_playlist_obj", None)
+        finally:
+            elapsed_ms = (time.perf_counter() - click_load_start) * 1000
+            if elapsed_ms > 500:
+                logger.warning(
+                    "Playlist click load was slow | elapsed_ms=%.1f item=%s selected_count=%s",
+                    elapsed_ms,
+                    self._get_name_from_item(item),
+                    self._playlist_tree_selected_count(),
+                )
 
     def _displayTidalTracks(self, playlist_obj: Playlist) -> None:
         playlist_name = getattr(playlist_obj, "title", "Unknown Tidal Playlist")

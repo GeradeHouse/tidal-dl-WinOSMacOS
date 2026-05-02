@@ -22,7 +22,6 @@ from PyQt6.QtWidgets import (
     QStackedLayout,
     QApplication,
     QMenu,
-    QProgressDialog,
 )
 from PyQt6.QtCore import (
     Qt,
@@ -71,7 +70,7 @@ from .gui_navigation import NavigationHandler
 from .gui_search import SearchBarWidget, KeywordSearchResultsController
 from .gui_playlist_tree import PlaylistTreeWidget
 from .gui_utils import enableGui, EmittingStream, append_text_to_output
-from .gui_custom_dialog import CustomQMessageBox
+from .gui_custom_dialog import CustomQMessageBox, ModernDarkProgressDialog
 from .gui_resize_handler import ResizeHandler
 from .gui_event_handlers import MainViewEventHandlers
 from .gui_task_queue_manager import TaskQueueManager # Import the new manager
@@ -213,7 +212,7 @@ class MainView(QWidget):
         self.resize_handler = ResizeHandler(self, self.title_bar)
         self._download_migration_thread: Optional[QThread] = None
         self._download_migration_worker: Optional[DownloadStructureMigrationWorker] = None
-        self._download_migration_progress: Optional[QProgressDialog] = None
+        self._download_migration_progress: Optional[ModernDarkProgressDialog] = None
 
 
         # --- Redirect stdout to the log widget ---
@@ -1063,7 +1062,7 @@ class MainView(QWidget):
                     self,
                     "Download Folder Structure",
                     "No legacy downloads found.",
-                    "No audio files need to be moved into the audio-type folder structure.",
+                    "No audio or lyric files need to be moved into the current folder structure.",
                 )
             SETTINGS.downloadStructureMigrationDone = True
             self._save_settings_safely()
@@ -1075,8 +1074,9 @@ class MainView(QWidget):
             "The download folder structure has changed.",
             (
                 "Downloads are now grouped by audio type, for example flac, mp3, "
-                f"m4a, and mp4.\n\n{plan_count} legacy audio file(s) can be moved "
-                "into the new structure.\n\n"
+                f"m4a, and mp4. Matching .lrc lyric files will be moved with "
+                f"their audio files when possible.\n\n{plan_count} legacy audio/lyrics "
+                "file(s) can be moved into the new structure.\n\n"
                 f"Download root:\n{get_user_download_path(SETTINGS.downloadPath)}"
             ),
             checkbox_text="Do not remind again",
@@ -1095,22 +1095,18 @@ class MainView(QWidget):
         self._download_migration_worker = DownloadStructureMigrationWorker()
         self._download_migration_worker.moveToThread(self._download_migration_thread)
 
-        self._download_migration_progress = QProgressDialog(
-            "Restructuring downloaded audio files...",
+        self._download_migration_progress = ModernDarkProgressDialog(
+            "Restructuring Downloads",
+            "Preparing audio and lyric file reorganization...",
             "Cancel",
-            0,
-            0,
             self,
         )
-        self._download_migration_progress.setWindowTitle("Restructuring Downloads")
-        self._download_migration_progress.setMinimumDuration(0)
-        self._download_migration_progress.setAutoClose(False)
-        self._download_migration_progress.setAutoReset(False)
         self._download_migration_progress.canceled.connect(
             lambda: logger_gui.warning(
                 "Download-folder migration cancellation requested; current file operation will finish first."
             )
         )
+        self._download_migration_progress.show()
 
         self._download_migration_thread.started.connect(
             self._download_migration_worker.run
@@ -1134,6 +1130,9 @@ class MainView(QWidget):
             self._clear_download_migration_worker
         )
         self._download_migration_thread.start()
+        if self._download_migration_progress:
+            self._download_migration_progress.raise_()
+            self._download_migration_progress.activateWindow()
 
     def _on_download_migration_progress(
         self,
@@ -1145,8 +1144,11 @@ class MainView(QWidget):
             return
         self._download_migration_progress.setMaximum(max(total, 1))
         self._download_migration_progress.setValue(min(current, max(total, 1)))
+        display_path = str(source_path or "")
+        if len(display_path) > 105:
+            display_path = f"...{display_path[-102:]}"
         self._download_migration_progress.setLabelText(
-            f"Moving audio files... {current}/{total}\n{source_path}"
+            f"Moving audio/lyrics files... {current}/{total}\n{display_path}"
         )
 
     def _on_download_migration_finished(self, result: DownloadMigrationResult) -> None:
@@ -1165,7 +1167,7 @@ class MainView(QWidget):
             for folder, count in sorted(result.destination_counts.items())
         ]
         if not destination_lines:
-            destination_lines = ["No destination folders received moved files."]
+            destination_lines = ["No destination folders received moved audio/lyrics files."]
 
         detail_lines = [
             f"Download root: {result.root_path}",
