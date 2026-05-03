@@ -3,6 +3,7 @@
 import logging
 import sys
 import threading
+import time
 from typing import Optional, List, Any, Dict, Union, Callable, TYPE_CHECKING
 
 from PyQt6.QtWidgets import (
@@ -43,6 +44,7 @@ from PyQt6.QtGui import (
     QMouseEvent,
     QPaintEvent,
     QResizeEvent,
+    QCursor,
 )
 from PyQt6 import QtWidgets, QtGui
 
@@ -141,6 +143,11 @@ class MainView(QWidget):
             self.background_pixmap = QPixmap()
 
         self.link_persistence_manager = LinkPersistenceManager()
+        self._ui_freeze_last_tick = time.perf_counter()
+        self._ui_freeze_monitor_timer: Optional[QTimer] = None
+        self._deferred_linking_save_active = False
+        self._busy_operation_depth = 0
+        self._busy_cursor_active = False
         self.cover_cache = CoverCache()
         self.spotify_api = SpotifyAPI()
         self.player_logic = PlayerLogic(TIDAL_API, self)
@@ -277,7 +284,113 @@ class MainView(QWidget):
             )
 
         QTimer.singleShot(1500, lambda: self.start_download_structure_reorganization())
+        self._start_ui_responsiveness_monitor()
         logger_gui.debug("MainView initialization complete.")
+
+    @pyqtSlot(str)
+    def beginBusyOperation(self, reason: str = "Loading") -> None:
+        """
+        Shows the standard OS/Qt wait cursor while short preparation work is active.
+        This is intentionally reference-counted because several queue phases can overlap.
+        """
+        self._busy_operation_depth += 1
+
+        if self._busy_cursor_active:
+            return
+
+        app = QApplication.instance()
+        if not app:
+            return
+
+        try:
+            QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+            self._busy_cursor_active = True
+            QApplication.processEvents()
+            logger_gui.debug(
+                "Busy cursor enabled | reason=%s depth=%d",
+                reason,
+                self._busy_operation_depth,
+            )
+        except Exception:
+            logger_gui.debug("Failed to enable busy cursor.", exc_info=True)
+
+    @pyqtSlot(str)
+    def endBusyOperation(self, reason: str = "Loading") -> None:
+        """
+        Restores the normal cursor when all tracked short preparation work is done.
+        """
+        self._busy_operation_depth = max(0, self._busy_operation_depth - 1)
+
+        if self._busy_operation_depth > 0 or not self._busy_cursor_active:
+            return
+
+        try:
+            QApplication.restoreOverrideCursor()
+            self._busy_cursor_active = False
+            logger_gui.debug("Busy cursor disabled | reason=%s", reason)
+        except Exception:
+            logger_gui.debug("Failed to restore cursor.", exc_info=True)
+            self._busy_cursor_active = False
+
+    def _start_ui_responsiveness_monitor(self) -> None:
+        """
+        Logs event-loop stalls so short GUI freezes can be tied to queue/download state.
+        """
+        if self._ui_freeze_monitor_timer is not None:
+            return
+
+        self._ui_freeze_last_tick = time.perf_counter()
+        self._ui_freeze_monitor_timer = QTimer(self)
+        self._ui_freeze_monitor_timer.setInterval(250)
+        self._ui_freeze_monitor_timer.timeout.connect(self._check_ui_responsiveness)
+        self._ui_freeze_monitor_timer.start()
+
+    def _current_visible_playlist_label(self) -> str:
+        try:
+            context = getattr(self, "current_playlist_context", None)
+            if context is None:
+                context = getattr(self, "s_playlist_obj", None)
+            if isinstance(context, dict):
+                data = context.get("data") if isinstance(context.get("data"), dict) else context
+                return str(data.get("name") or data.get("title") or data.get("id") or "dict-context")
+
+            return str(
+                getattr(context, "title", None)
+                or getattr(context, "name", None)
+                or getattr(context, "uuid", None)
+                or getattr(context, "id", None)
+                or "none"
+            )
+        except Exception:
+            return "unknown"
+
+    def _check_ui_responsiveness(self) -> None:
+        now = time.perf_counter()
+        elapsed_ms = (now - self._ui_freeze_last_tick) * 1000.0
+        self._ui_freeze_last_tick = now
+
+        if elapsed_ms < 900.0:
+            return
+
+        queue_manager = getattr(self, "task_queue_manager", None)
+        current_job = getattr(queue_manager, "current_job", None) if queue_manager else None
+        current_job_description = (
+            current_job.get("description") if isinstance(current_job, dict) else None
+        )
+        queued_jobs = len(getattr(queue_manager, "task_queue", [])) if queue_manager else 0
+        task_running = bool(getattr(queue_manager, "is_running_task", False)) if queue_manager else False
+
+        logger_gui.warning(
+            "UI responsiveness gap detected | elapsed_ms=%.1f download_active=%s linking_active=%s "
+            "task_running=%s queued_jobs=%d current_job=%r visible_playlist=%s",
+            elapsed_ms,
+            getattr(self, "download_active", None),
+            getattr(self, "linking_active", None),
+            task_running,
+            queued_jobs,
+            current_job_description,
+            self._current_visible_playlist_label(),
+        )
 
     def initView(self):
         self.title_bar = CustomTitleBar(self)
@@ -1368,6 +1481,10 @@ class MainView(QWidget):
             self.linking_gui_handler._total_counts[playlist_id] = len(tracks_to_link_data)
             logger_gui.debug(f"🔴🔴🔴 SETTING: Stored processing playlist ID and TOTAL ({len(tracks_to_link_data)}) in startLinkingWorker: {playlist_id}")
         
+        if not self._deferred_linking_save_active:
+            self.link_persistence_manager.begin_deferred_save("linking_worker")
+            self._deferred_linking_save_active = True
+
         self.linking_active = True
         self.linking_stop_event.clear()
         self.c_btnLinkTracks.setText("Stop Linking")
@@ -1388,19 +1505,36 @@ class MainView(QWidget):
         self.linking_worker.finished.connect(self.s_linkingFinished)
         self.linking_worker.error.connect(self.s_linkingError)
         self.linking_thread.started.connect(self.linking_worker.run)
+        self.linking_worker.allTasksFinished.connect(self._flushDeferredLinkingPersistence)
         self.linking_worker.allTasksFinished.connect(self.linking_thread.quit)
         
         # MODIFIED: Connect the optional callback if it exists
         if on_finish_callback:
             self.linking_worker.allTasksFinished.connect(on_finish_callback)
 
+        self.linking_worker.error.connect(lambda *_args: self._flushDeferredLinkingPersistence())
         self.linking_worker.error.connect(self.linking_thread.quit)
         self.linking_thread.finished.connect(self.linking_worker.deleteLater)
         self.linking_thread.finished.connect(self.linking_thread.deleteLater)
         self.linking_thread.finished.connect(self._clearLinkingWorkerRefs)
         self.linking_thread.start()
 
+    @pyqtSlot()
+    def _flushDeferredLinkingPersistence(self) -> None:
+        if not getattr(self, "_deferred_linking_save_active", False):
+            return
+
+        self._deferred_linking_save_active = False
+        try:
+            self.link_persistence_manager.end_deferred_save("linking_worker")
+        except Exception:
+            logger_gui.warning(
+                "Failed to flush deferred linking persistence save.",
+                exc_info=True,
+            )
+
     def _clearLinkingWorkerRefs(self):
+        self._flushDeferredLinkingPersistence()
         self.linking_worker = None
         self.linking_thread = None
         self.linking_active = False

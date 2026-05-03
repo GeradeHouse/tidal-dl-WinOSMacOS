@@ -304,6 +304,7 @@ class PlaylistTreeHandler(QObject):
         self.linking_handler: Optional[LinkingGuiHandler] = None
         self.task_queue_manager: Optional["TaskQueueManager"] = None
         self.table_handler: Optional["TableHandler"] = None
+        self._active_context_menu: Optional[QMenu] = None
 
         self.id_to_item: Dict[str, QTreeWidgetItem] = {}
         self.item_widgets: Dict[str, PlaylistItemProgressWidget] = {}
@@ -1043,6 +1044,20 @@ class PlaylistTreeHandler(QObject):
         else:
             self._playlistItemContextMenu(selected_items, global_pos)
 
+    def _popup_context_menu(self, menu: QMenu, global_pos: QPoint) -> None:
+        """
+        Keeps popup QMenus alive while shown. This prevents PyQt garbage-collection
+        edge cases and gives us one place to clear the reference.
+        """
+        self._active_context_menu = menu
+
+        def _clear_active_menu() -> None:
+            if self._active_context_menu is menu:
+                self._active_context_menu = None
+
+        menu.aboutToHide.connect(_clear_active_menu)
+        menu.popup(global_pos)
+
     def showTidalPlaylistMenu(self, global_pos: QPoint) -> None:
         menu = QMenu(self.tree_widget)
         menu.setStyleSheet(MENU_STYLESHEET)
@@ -1071,7 +1086,7 @@ class PlaylistTreeHandler(QObject):
                     lambda: self._sortTidalPlaylists("alpha")
                 )
 
-        menu.popup(global_pos)
+        self._popup_context_menu(menu, global_pos)
 
     def showSpotifyPlaylistMenu(self, global_pos: QPoint) -> None:
         menu = QMenu(self.tree_widget)
@@ -1099,22 +1114,44 @@ class PlaylistTreeHandler(QObject):
                     lambda: self._sortSpotifyPlaylists("alpha")
                 )
 
-        menu.popup(global_pos)
+        self._popup_context_menu(menu, global_pos)
 
     def _playlistItemContextMenu(self, items: List[QTreeWidgetItem], global_pos: QPoint) -> None:
         if not items:
             return
 
+        menu_start = time.perf_counter()
+        playlist_items: List[QTreeWidgetItem] = []
+
+        def _finish_menu_build_timing() -> None:
+            try:
+                self.main_view.endBusyOperation("Building playlist context menu")
+            except Exception:
+                pass
+
+            elapsed_ms = (time.perf_counter() - menu_start) * 1000.0
+            if elapsed_ms > 250.0:
+                logger.warning(
+                    "Playlist context menu build was slow | elapsed_ms=%.1f selected_count=%d",
+                    elapsed_ms,
+                    len(playlist_items),
+                )
+
+        try:
+            self.main_view.beginBusyOperation("Building playlist context menu")
+        except Exception:
+            pass
+
         menu = QMenu(self.tree_widget)
         menu.setStyleSheet(MENU_STYLESHEET)
         
-        playlist_items = []
         for item in items:
             item_data = item.data(0, Qt.ItemDataRole.UserRole)
             if isinstance(item_data, dict) and not item_data.get("is_folder"):
                 playlist_items.append(item)
         
         if not playlist_items:
+            _finish_menu_build_timing()
             return
 
         num_selected = len(playlist_items)
@@ -1286,7 +1323,8 @@ class PlaylistTreeHandler(QObject):
                                     )
                                 )
         
-        menu.popup(global_pos)
+        self._popup_context_menu(menu, global_pos)
+        _finish_menu_build_timing()
 
     # --- Sorting ---
     def _sortTidalPlaylists(self, sort_key: str) -> None:

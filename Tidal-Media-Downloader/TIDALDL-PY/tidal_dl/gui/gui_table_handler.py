@@ -907,8 +907,18 @@ class TableHandler(QObject):
         self,
         tracks: List[Track],
         playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None,
+        *,
+        include_track_id_tags: bool = True,
     ) -> tuple[Set[str], Set[str]]:
-        """Builds a one-pass file index for playlist existence checks to avoid repeated O(n²) scans."""
+        """
+        Builds a one-pass file index for playlist existence checks.
+
+        Important performance rule:
+        - For queued "download missing only" flows, callers should pass
+          include_track_id_tags=False. Filename/stem matching is fast.
+        - Reading audio tags with mutagen can be very slow on OneDrive/network
+          folders and can hold the Python GIL long enough to make the UI feel frozen.
+        """
         if not playlist_context:
             return set(), set()
 
@@ -943,9 +953,11 @@ class TableHandler(QObject):
         for relative_dir in preferred_relative_dirs:
             if not relative_dir:
                 continue
+
             normalized_relative_dir = os.path.normpath(relative_dir)
             if normalized_relative_dir in searched_relative_dirs:
                 continue
+
             searched_relative_dirs.add(normalized_relative_dir)
             candidate_dir = os.path.join(download_root, normalized_relative_dir)
             if os.path.isdir(candidate_dir):
@@ -958,10 +970,15 @@ class TableHandler(QObject):
         indexed_track_ids: Set[str] = set()
         allowed_extensions = {".flac", ".mp3", ".m4a", ".mp4"}
 
+        index_start = time.perf_counter()
+        scanned_files = 0
+        tag_reads = 0
+
         expected_normalized_stems: Set[str] = set()
         for track in tracks:
             if not isinstance(track, Track):
                 continue
+
             for candidate_path in self._build_candidate_track_paths(track, playlist_context):
                 candidate_stem = os.path.splitext(os.path.basename(candidate_path))[0]
                 normalized_candidate_stem = self._normalize_stem_for_match(candidate_stem)
@@ -977,14 +994,21 @@ class TableHandler(QObject):
                     stem, extension = os.path.splitext(entry.name)
                     if extension.lower() not in allowed_extensions:
                         continue
+                    scanned_files += 1
 
                     normalized_stem = self._normalize_stem_for_match(stem)
                     if normalized_stem:
                         indexed_stems.add(normalized_stem)
 
-                    likely_candidate = (
-                        normalized_stem in expected_normalized_stems
-                        or any(
+                    if not include_track_id_tags:
+                        continue
+
+                    # Only read tags for plausible candidates.
+                    # Avoid the old broad substring scan for bulk queued checks.
+                    likely_candidate = normalized_stem in expected_normalized_stems
+
+                    if not likely_candidate and len(expected_normalized_stems) <= 200:
+                        likely_candidate = any(
                             normalized_stem
                             and (
                                 normalized_stem in expected_stem
@@ -992,11 +1016,27 @@ class TableHandler(QObject):
                             )
                             for expected_stem in expected_normalized_stems
                         )
-                    )
+
                     if likely_candidate:
+                        tag_reads += 1
                         tags_track_id = self._extract_track_id_from_audio_tags(entry.path)
                         if tags_track_id:
                             indexed_track_ids.add(tags_track_id)
+
+        elapsed_ms = (time.perf_counter() - index_start) * 1000.0
+        if elapsed_ms > 250.0 or len(tracks) >= 100:
+            logger.info(
+                "Existing playlist file index built | tracks=%d target_dirs=%d scanned_files=%d "
+                "indexed_stems=%d indexed_track_ids=%d tag_reads=%d include_track_id_tags=%s elapsed_ms=%.1f",
+                len(tracks),
+                len(target_dirs),
+                scanned_files,
+                len(indexed_stems),
+                len(indexed_track_ids),
+                tag_reads,
+                include_track_id_tags,
+                elapsed_ms,
+            )
 
         return indexed_stems, indexed_track_ids
 
@@ -1571,10 +1611,13 @@ class TableHandler(QObject):
         reason: str = "filter_non_completed_tracks",
     ) -> List[Track]:
         filter_start = time.perf_counter()
+        index_start = time.perf_counter()
         indexed_stems, indexed_track_ids = self._build_existing_playlist_file_index(
             tracks,
             playlist_context,
+            include_track_id_tags=allow_slow_fallback,
         )
+        index_elapsed_ms = (time.perf_counter() - index_start) * 1000.0
 
         non_completed_tracks: List[Track] = []
         skipped_by_stem = 0
@@ -1618,7 +1661,8 @@ class TableHandler(QObject):
             logger.info(
                 "Non-completed filter result | reason=%s tracks=%d remaining=%d "
                 "removed=%d skipped_by_stem=%d skipped_by_track_id=%d "
-                "slow_fallback_checks=%d allow_slow_fallback=%s elapsed_ms=%.1f",
+                "slow_fallback_checks=%d allow_slow_fallback=%s elapsed_ms=%.1f "
+                "index_elapsed_ms=%.1f",
                 reason,
                 len(tracks),
                 len(non_completed_tracks),
@@ -1628,6 +1672,7 @@ class TableHandler(QObject):
                 slow_fallback_checks,
                 allow_slow_fallback,
                 elapsed_ms,
+                index_elapsed_ms,
             )
 
         return non_completed_tracks

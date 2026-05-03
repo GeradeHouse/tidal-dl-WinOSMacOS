@@ -26,6 +26,8 @@ from tidal_dl.gui.gui_logging import setup_gui_logger
 setup_gui_logger(__name__, logging.INFO)
 
 BULK_NON_COMPLETED_PREVIEW_LIMIT = 3
+JOB_CHAIN_YIELD_MS = 25
+SLOW_QUEUE_PHASE_MS = 300.0
 
 class TaskQueueManager(QObject):
     """Manages a queue of linking and downloading jobs to run them sequentially."""
@@ -41,6 +43,22 @@ class TaskQueueManager(QObject):
         self.current_job: Optional[Dict[str, Any]] = None
         self._queued_preview_generation: Dict[str, int] = {}
         self._queued_preview_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="queued-preview")
+
+    def _begin_main_busy(self, reason: str) -> None:
+        QtCore.QMetaObject.invokeMethod(
+            self.main_view,
+            "beginBusyOperation",
+            Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(str, reason),
+        )
+
+    def _end_main_busy(self, reason: str) -> None:
+        QtCore.QMetaObject.invokeMethod(
+            self.main_view,
+            "endBusyOperation",
+            Qt.ConnectionType.QueuedConnection,
+            QtCore.Q_ARG(str, reason),
+        )
 
     def add_spotify_link_job(self, spotify_playlists_data: List[Dict[str, Any]]):
         """Adds a job to link all tracks in the selected Spotify playlists."""
@@ -88,7 +106,10 @@ class TaskQueueManager(QObject):
                 "description": f"Download Spotify playlist: {p_data.get('data', {}).get('name', 'Unknown')}"
             }
             self.task_queue.append(job)
-            logger.info(f"Queued job: {job['description']}")
+            if bulk_missing_queue:
+                logger.debug(f"Queued job: {job['description']}")
+            else:
+                logger.info(f"Queued job: {job['description']}")
             if non_completed_only:
                 playlist_id = str(p_data.get("data", {}).get("id") or "").strip()
                 first_job_starts_immediately = queue_was_idle and index == 0
@@ -142,7 +163,10 @@ class TaskQueueManager(QObject):
                 "description": f"Download Tidal playlist: {getattr(playlist, 'title', 'Unknown')}"
             }
             self.task_queue.append(job)
-            logger.info(f"Queued job: {job['description']}")
+            if bulk_missing_queue:
+                logger.debug(f"Queued job: {job['description']}")
+            else:
+                logger.info(f"Queued job: {job['description']}")
             if non_completed_only:
                 playlist_id = str(getattr(playlist, "uuid", "") or "").strip()
                 first_job_starts_immediately = queue_was_idle and index == 0
@@ -179,7 +203,11 @@ class TaskQueueManager(QObject):
             return
 
         job = self.current_job
-        logger.info(f"Starting job: {job['description']}")
+        logger.info(
+            "Starting job | description=%s remaining_queue=%d",
+            job.get("description"),
+            len(self.task_queue),
+        )
 
         job_type = job.get("type")
         if job_type == "link_spotify":
@@ -194,7 +222,7 @@ class TaskQueueManager(QObject):
 
     def job_finished(self):
         """Marks the current job as finished and processes the next one."""
-        logger.info("Job finished.")
+        logger.info("Job finished | remaining_queue=%d", len(self.task_queue))
         if self.current_job:
             job_type = self.current_job.get("type")
             playlist_id = None
@@ -210,7 +238,8 @@ class TaskQueueManager(QObject):
             self.current_job = None
 
         self.is_running_task = False
-        self.process_next_job()
+        if self.task_queue:
+            QtCore.QTimer.singleShot(JOB_CHAIN_YIELD_MS, self.process_next_job)
 
     def stop_all_tasks(self):
         """Clears the queue and stops any active worker."""
@@ -594,198 +623,290 @@ class TaskQueueManager(QObject):
             return
 
         def pre_download_thread():
+            busy_reason = f"Preparing missing downloads: {playlist_name}"
+            if non_completed_only:
+                self._begin_main_busy(busy_reason)
+
             pre_download_start = time.perf_counter()
-            logger.info(
-                "Spotify queued download preparation started | playlist_id=%s non_completed_only=%s",
-                playlist_id,
-                non_completed_only,
-            )
-            all_tracks_meta = self.main_view.spotify_api.get_playlist_tracks(playlist_id)
-            # Emit jobStarted for the download action
-            initial_action = "Checking missing tracks" if non_completed_only else "Downloading"
-            QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
-                                            QtCore.Q_ARG(str, playlist_id),
-                                            QtCore.Q_ARG(str, initial_action),
-                                            QtCore.Q_ARG(int, len(all_tracks_meta) if all_tracks_meta else 0))
-            
-            if not all_tracks_meta:
-                logger.warning(f"No tracks found for Spotify playlist {playlist_id}. Skipping download.")
-                QtCore.QMetaObject.invokeMethod(self, "job_finished", Qt.ConnectionType.QueuedConnection)
-                return
-
-            unlinked_tracks_for_worker = []
-            linked_tracks_for_download = []
-            persisted_links = self.main_view.link_persistence_manager.get_links_for_playlist(playlist_id)
-            persisted_tracks = persisted_links.get("tracks", {})
-            persisted_track_hits = 0
-            skipped_manual_review = 0
-            skipped_not_found_or_none_match = 0
-            skipped_deserialize_error = 0
-            skipped_missing_track_id = 0
-
-            for i, meta in enumerate(all_tracks_meta):
-                spotify_id = meta.get("id")
-                
-                if spotify_id in persisted_tracks:
-                    persisted_track_hits += 1
-                    # Track exists in persistence
-                    link_info = persisted_tracks[spotify_id]
-                    details = link_info.get("tidal_track_details")
-                    score = link_info.get("score")
-                    candidates = link_info.get("candidates") or []
-
-                    if details:
-                        # Uncertain matches with candidate alternatives require manual review first.
-                        # If no candidates are available, keep the existing linked match downloadable.
-                        if (
-                            score is not None
-                            and isinstance(score, (int, float))
-                            and score > 1
-                            and bool(candidates)
-                        ):
-                            skipped_manual_review += 1
-                            logger.info(
-                                f"Skipping track {spotify_id}: Manual review required (Score: {score}, Candidates: {len(candidates)})."
-                            )
-                            continue
-
-                        # It has valid link details and is confirmed/confident -> Add to download
-                        track_obj = self._deserialize_persisted_track(
-                            str(playlist_id),
-                            str(spotify_id),
-                            link_info,
-                        )
-                        if track_obj:
-                            linked_tracks_for_download.append(track_obj)
-                        else:
-                            if details:
-                                skipped_deserialize_error += 1
-                            skipped_missing_track_id += 1
-                            logger.warning(
-                                "Skipping track %s: persisted link did not contain a valid Tidal track ID/object.",
-                                spotify_id,
-                            )
-                    else:
-                        # It exists but has NO details (e.g. "Not Found" or "Manual Review" with no selection)
-                        # SKIP this track. Do NOT add to unlinked_tracks_for_worker.
-                        skipped_not_found_or_none_match += 1
-                        logger.debug(f"Skipping track {spotify_id} (Marked as Not Found/None Match in persistence).")
-                else:
-                    # Not in persistence at all -> Needs linking
-                    unlinked_tracks_for_worker.append((i, meta))
-
-            logger.info(
-                "Spotify pre-download summary | playlist_id=%s total=%d persisted=%d linked_ready=%d unlinked=%d skipped_manual_review=%d skipped_not_found=%d skipped_deserialize_error=%d skipped_missing_track_id=%d",
-                playlist_id,
-                len(all_tracks_meta),
-                persisted_track_hits,
-                len(linked_tracks_for_download),
-                len(unlinked_tracks_for_worker),
-                skipped_manual_review,
-                skipped_not_found_or_none_match,
-                skipped_deserialize_error,
-                skipped_missing_track_id,
-            )
-            logger.info(
-                "Spotify queued download preparation checkpoint | playlist_id=%s elapsed_ms=%.1f",
-                playlist_id,
-                (time.perf_counter() - pre_download_start) * 1000,
-            )
-            
-            if unlinked_tracks_for_worker:
-                logger.info(f"Found {len(unlinked_tracks_for_worker)} unlinked tracks in playlist. Linking them first...")
-                # Emit a separate jobStarted for the linking sub-task
+            try:
+                logger.info(
+                    "Spotify queued download preparation started | playlist_id=%s non_completed_only=%s",
+                    playlist_id,
+                    non_completed_only,
+                )
+                spotify_fetch_start = time.perf_counter()
+                all_tracks_meta = self.main_view.spotify_api.get_playlist_tracks(playlist_id)
+                spotify_fetch_elapsed_ms = (time.perf_counter() - spotify_fetch_start) * 1000.0
+                if spotify_fetch_elapsed_ms > SLOW_QUEUE_PHASE_MS:
+                    logger.warning(
+                        "Spotify playlist track fetch was slow | playlist_id=%s playlist_name=%s "
+                        "track_count=%d elapsed_ms=%.1f",
+                        playlist_id,
+                        playlist_name,
+                        len(all_tracks_meta or []),
+                        spotify_fetch_elapsed_ms,
+                    )
+                # Emit jobStarted for the download action
+                initial_action = "Checking missing tracks" if non_completed_only else "Downloading"
                 QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
                                                 QtCore.Q_ARG(str, playlist_id),
-                                                QtCore.Q_ARG(str, "Linking"),
-                                                QtCore.Q_ARG(int, len(unlinked_tracks_for_worker)))
+                                                QtCore.Q_ARG(str, initial_action),
+                                                QtCore.Q_ARG(int, len(all_tracks_meta) if all_tracks_meta else 0))
                 
-                @pyqtSlot()
-                def on_linking_done():
-                    if self.main_view.linking_worker:
-                        try:
-                            self.main_view.linking_worker.allTasksFinished.disconnect(on_linking_done)
-                        except TypeError:
-                            pass
-                    
-                    # Emit jobFinished for the linking sub-task
-                    self.jobFinished.emit(str(playlist_id))
-                    
-                    logger.info("Pre-download linking finished. Gathering all linked tracks for download.")
-                    final_download_list = list(linked_tracks_for_download)
-                    newly_linked_links = self.main_view.link_persistence_manager.get_links_for_playlist(playlist_id)
-                    newly_linked_tracks = newly_linked_links.get("tracks", {})
-                    newly_linked_added = 0
-                    newly_linked_skipped_manual_review = 0
-                    newly_linked_skipped_deserialize_error = 0
-                    newly_linked_skipped_missing_track_id = 0
+                if not all_tracks_meta:
+                    logger.warning(f"No tracks found for Spotify playlist {playlist_id}. Skipping download.")
+                    QtCore.QMetaObject.invokeMethod(self, "job_finished", Qt.ConnectionType.QueuedConnection)
+                    return
 
-                    for _, meta in unlinked_tracks_for_worker:
-                        spotify_id = meta.get("id")
-                        if spotify_id in newly_linked_tracks:
-                            link_info = newly_linked_tracks[spotify_id]
-                            details = link_info.get("tidal_track_details")
-                            score = link_info.get("score")
-                            candidates = link_info.get("candidates") or []
-                            
-                            # Apply same skipping logic for newly linked tracks
-                            if details:
-                                if (
-                                    score is not None
-                                    and isinstance(score, (int, float))
-                                    and score > 1
-                                    and bool(candidates)
-                                ):
-                                    newly_linked_skipped_manual_review += 1
-                                    logger.info(
-                                        f"Skipping newly linked track {spotify_id}: Manual review required (Score: {score}, Candidates: {len(candidates)})."
-                                    )
+                unlinked_tracks_for_worker = []
+                linked_tracks_for_download = []
+                persisted_links = self.main_view.link_persistence_manager.get_links_for_playlist(playlist_id)
+                persisted_tracks = persisted_links.get("tracks", {})
+                persisted_track_hits = 0
+                skipped_manual_review = 0
+                skipped_not_found_or_none_match = 0
+                skipped_deserialize_error = 0
+                skipped_missing_track_id = 0
+
+                for i, meta in enumerate(all_tracks_meta):
+                    spotify_id = meta.get("id")
+                    
+                    if spotify_id in persisted_tracks:
+                        persisted_track_hits += 1
+                        # Track exists in persistence
+                        link_info = persisted_tracks[spotify_id]
+                        details = link_info.get("tidal_track_details")
+                        score = link_info.get("score")
+                        candidates = link_info.get("candidates") or []
+
+                        if details:
+                            # Uncertain matches with candidate alternatives require manual review first.
+                            # If no candidates are available, keep the existing linked match downloadable.
+                            if (
+                                score is not None
+                                and isinstance(score, (int, float))
+                                and score > 1
+                                and bool(candidates)
+                            ):
+                                skipped_manual_review += 1
+                                logger.info(
+                                    f"Skipping track {spotify_id}: Manual review required (Score: {score}, Candidates: {len(candidates)})."
+                                )
+                                continue
+
+                            # It has valid link details and is confirmed/confident -> Add to download
+                            track_obj = self._deserialize_persisted_track(
+                                str(playlist_id),
+                                str(spotify_id),
+                                link_info,
+                            )
+                            if track_obj:
+                                linked_tracks_for_download.append(track_obj)
+                            else:
+                                if details:
+                                    skipped_deserialize_error += 1
+                                skipped_missing_track_id += 1
+                                logger.warning(
+                                    "Skipping track %s: persisted link did not contain a valid Tidal track ID/object.",
+                                    spotify_id,
+                                )
+                        else:
+                            # It exists but has NO details (e.g. "Not Found" or "Manual Review" with no selection)
+                            # SKIP this track. Do NOT add to unlinked_tracks_for_worker.
+                            skipped_not_found_or_none_match += 1
+                            logger.debug(f"Skipping track {spotify_id} (Marked as Not Found/None Match in persistence).")
+                    else:
+                        # Not in persistence at all -> Needs linking
+                        unlinked_tracks_for_worker.append((i, meta))
+
+                logger.info(
+                    "Spotify pre-download summary | playlist_id=%s total=%d persisted=%d linked_ready=%d unlinked=%d skipped_manual_review=%d skipped_not_found=%d skipped_deserialize_error=%d skipped_missing_track_id=%d",
+                    playlist_id,
+                    len(all_tracks_meta),
+                    persisted_track_hits,
+                    len(linked_tracks_for_download),
+                    len(unlinked_tracks_for_worker),
+                    skipped_manual_review,
+                    skipped_not_found_or_none_match,
+                    skipped_deserialize_error,
+                    skipped_missing_track_id,
+                )
+                logger.info(
+                    "Spotify queued download preparation checkpoint | playlist_id=%s elapsed_ms=%.1f",
+                    playlist_id,
+                    (time.perf_counter() - pre_download_start) * 1000,
+                )
+                
+                if unlinked_tracks_for_worker:
+                    logger.info(f"Found {len(unlinked_tracks_for_worker)} unlinked tracks in playlist. Linking them first...")
+                    # Emit a separate jobStarted for the linking sub-task
+                    QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
+                                                    QtCore.Q_ARG(str, playlist_id),
+                                                    QtCore.Q_ARG(str, "Linking"),
+                                                    QtCore.Q_ARG(int, len(unlinked_tracks_for_worker)))
+                    
+                    def post_link_download_thread():
+                        busy_reason = f"Preparing linked missing downloads: {playlist_name}"
+                        if non_completed_only:
+                            self._begin_main_busy(busy_reason)
+
+                        post_link_start = time.perf_counter()
+                        try:
+                            logger.info("Pre-download linking finished. Gathering all linked tracks for download.")
+                            all_linked_tracks: List[Track] = []
+                            newly_linked_links = self.main_view.link_persistence_manager.get_links_for_playlist(
+                                playlist_id
+                            )
+                            newly_linked_tracks = newly_linked_links.get("tracks", {})
+
+                            for _, meta in unlinked_tracks_for_worker:
+                                spotify_track_id = meta.get("id")
+                                if not spotify_track_id:
                                     continue
 
-                                track_obj = self._deserialize_persisted_track(
-                                    str(playlist_id),
-                                    str(spotify_id),
-                                    link_info,
-                                )
-                                if track_obj:
-                                    final_download_list.append(track_obj)
-                                    newly_linked_added += 1
-                                else:
-                                    if details:
-                                        newly_linked_skipped_deserialize_error += 1
-                                    newly_linked_skipped_missing_track_id += 1
+                                saved_link = newly_linked_tracks.get(spotify_track_id)
+                                if not saved_link:
+                                    continue
+
+                                tidal_details = saved_link.get("tidal_track_details")
+                                if not tidal_details:
+                                    continue
+
+                                try:
+                                    track_obj = self._deserialize_persisted_track(
+                                        str(playlist_id),
+                                        str(spotify_track_id),
+                                        saved_link,
+                                    )
+                                    if isinstance(track_obj, Track):
+                                        all_linked_tracks.append(cast(Track, track_obj))
+                                except Exception as exc:
                                     logger.warning(
-                                        "Skipping newly linked track %s: persisted link did not contain a valid Tidal track ID/object.",
-                                        spotify_id,
+                                        "Failed to deserialize newly linked track for download | "
+                                        "playlist_id=%s spotify_track_id=%s error=%s",
+                                        playlist_id,
+                                        spotify_track_id,
+                                        exc,
                                     )
 
-                    logger.info(
-                        "Spotify post-link summary | playlist_id=%s prelinked=%d newly_added=%d skipped_new_manual_review=%d skipped_new_deserialize_error=%d skipped_new_missing_track_id=%d",
-                        playlist_id,
-                        len(linked_tracks_for_download),
-                        newly_linked_added,
-                        newly_linked_skipped_manual_review,
-                        newly_linked_skipped_deserialize_error,
-                        newly_linked_skipped_missing_track_id,
+                            combined_download_list = linked_tracks_for_download + all_linked_tracks
+
+                            filter_start = time.perf_counter()
+                            final_download_list = combined_download_list
+                            if non_completed_only:
+                                final_download_list = self.main_view.table_handler.filter_non_completed_tracks(
+                                    combined_download_list,
+                                    playlist_data,
+                                    allow_slow_fallback=False,
+                                    reason="queued_spotify_post_link_non_completed",
+                                )
+                            filter_elapsed_ms = (time.perf_counter() - filter_start) * 1000.0
+
+                            logger.info(
+                                "Spotify post-link non-completed filter applied | playlist_id=%s before=%d after=%d "
+                                "removed=%d elapsed_ms=%.1f",
+                                playlist_id,
+                                len(combined_download_list),
+                                len(final_download_list),
+                                len(combined_download_list) - len(final_download_list),
+                                filter_elapsed_ms,
+                            )
+
+                            if not final_download_list:
+                                no_download_reason = (
+                                    "All linked tracks are already downloaded on disk."
+                                    if combined_download_list
+                                    else "No valid linked tracks were available to download."
+                                )
+                                QtCore.QMetaObject.invokeMethod(
+                                    self,
+                                    "_finish_job_no_download_needed",
+                                    Qt.ConnectionType.QueuedConnection,
+                                    QtCore.Q_ARG(str, str(playlist_id)),
+                                    QtCore.Q_ARG(str, playlist_name),
+                                    QtCore.Q_ARG(str, no_download_reason),
+                                )
+                                return
+
+                            if non_completed_only:
+                                QtCore.QMetaObject.invokeMethod(
+                                    self,
+                                    "_emit_download_queued_progress",
+                                    Qt.ConnectionType.QueuedConnection,
+                                    QtCore.Q_ARG(str, str(playlist_id)),
+                                    QtCore.Q_ARG(int, len(final_download_list)),
+                                )
+                            self._start_download(final_download_list, playlist_data, quality)
+
+                            elapsed_ms = (time.perf_counter() - post_link_start) * 1000.0
+                            if elapsed_ms > SLOW_QUEUE_PHASE_MS:
+                                logger.warning(
+                                    "Spotify post-link download preparation was slow | playlist_id=%s "
+                                    "tracks=%d elapsed_ms=%.1f",
+                                    playlist_id,
+                                    len(final_download_list),
+                                    elapsed_ms,
+                                )
+
+                        except Exception:
+                            logger.error(
+                                "Spotify post-link download preparation failed | playlist_id=%s",
+                                playlist_id,
+                                exc_info=True,
+                            )
+                            QtCore.QMetaObject.invokeMethod(
+                                self,
+                                "job_finished",
+                                Qt.ConnectionType.QueuedConnection,
+                            )
+                        finally:
+                            if non_completed_only:
+                                self._end_main_busy(busy_reason)
+
+                    @pyqtSlot()
+                    def on_linking_done():
+                        if self.main_view.linking_worker:
+                            try:
+                                self.main_view.linking_worker.allTasksFinished.disconnect(on_linking_done)
+                            except TypeError:
+                                pass
+
+                        self.jobFinished.emit(str(playlist_id))
+                        threading.Thread(target=post_link_download_thread, daemon=True).start()
+
+                    # Use invokeMethod to call startLinkingWorker on the main thread
+                    QtCore.QMetaObject.invokeMethod(
+                        self.main_view, 
+                        "startLinkingWorker", 
+                        Qt.ConnectionType.QueuedConnection,
+                        QtCore.Q_ARG(list, unlinked_tracks_for_worker),
+                        QtCore.Q_ARG(str, playlist_id),
+                        QtCore.Q_ARG(object, on_linking_done)
                     )
-                    
-                    before_non_completed_filter = len(final_download_list)
+
+                else:
+                    logger.info("All tracks are already linked (or skipped). Starting download.")
+                    before_non_completed_filter = len(linked_tracks_for_download)
                     if non_completed_only:
-                        final_download_list = self.main_view.table_handler.filter_non_completed_tracks(
-                            final_download_list,
+                        filter_start = time.perf_counter()
+                        linked_tracks_for_download = self.main_view.table_handler.filter_non_completed_tracks(
+                            linked_tracks_for_download,
                             playlist_data,
                             allow_slow_fallback=False,
-                            reason="queued_spotify_post_link_non_completed",
+                            reason="queued_spotify_pre_download_non_completed",
                         )
+                        filter_elapsed_ms = (time.perf_counter() - filter_start) * 1000.0
                         logger.info(
-                            "Spotify non-completed filter applied | playlist_id=%s before=%d after=%d removed=%d",
+                            "Spotify non-completed filter applied | playlist_id=%s before=%d after=%d "
+                            "removed=%d elapsed_ms=%.1f",
                             playlist_id,
                             before_non_completed_filter,
-                            len(final_download_list),
-                            before_non_completed_filter - len(final_download_list),
+                            len(linked_tracks_for_download),
+                            before_non_completed_filter - len(linked_tracks_for_download),
+                            filter_elapsed_ms,
                         )
 
-                    if not final_download_list:
+                    if not linked_tracks_for_download:
                         no_download_reason = (
                             "All linked tracks are already downloaded on disk."
                             if before_non_completed_filter > 0
@@ -807,65 +928,13 @@ class TaskQueueManager(QObject):
                             "_emit_download_queued_progress",
                             Qt.ConnectionType.QueuedConnection,
                             QtCore.Q_ARG(str, str(playlist_id)),
-                            QtCore.Q_ARG(int, len(final_download_list)),
+                            QtCore.Q_ARG(int, len(linked_tracks_for_download)),
                         )
 
-                    self._start_download(final_download_list, playlist_data, quality)
-
-                # Use invokeMethod to call startLinkingWorker on the main thread
-                QtCore.QMetaObject.invokeMethod(
-                    self.main_view, 
-                    "startLinkingWorker", 
-                    Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(list, unlinked_tracks_for_worker),
-                    QtCore.Q_ARG(str, playlist_id),
-                    QtCore.Q_ARG(object, on_linking_done)
-                )
-
-            else:
-                logger.info("All tracks are already linked (or skipped). Starting download.")
-                before_non_completed_filter = len(linked_tracks_for_download)
+                    self._start_download(linked_tracks_for_download, playlist_data, quality)
+            finally:
                 if non_completed_only:
-                    linked_tracks_for_download = self.main_view.table_handler.filter_non_completed_tracks(
-                        linked_tracks_for_download,
-                        playlist_data,
-                        allow_slow_fallback=False,
-                        reason="queued_spotify_pre_download_non_completed",
-                    )
-                    logger.info(
-                        "Spotify non-completed filter applied | playlist_id=%s before=%d after=%d removed=%d",
-                        playlist_id,
-                        before_non_completed_filter,
-                        len(linked_tracks_for_download),
-                        before_non_completed_filter - len(linked_tracks_for_download),
-                    )
-
-                if not linked_tracks_for_download:
-                    no_download_reason = (
-                        "All linked tracks are already downloaded on disk."
-                        if before_non_completed_filter > 0
-                        else "No valid linked tracks were available to download."
-                    )
-                    QtCore.QMetaObject.invokeMethod(
-                        self,
-                        "_finish_job_no_download_needed",
-                        Qt.ConnectionType.QueuedConnection,
-                        QtCore.Q_ARG(str, str(playlist_id)),
-                        QtCore.Q_ARG(str, playlist_name),
-                        QtCore.Q_ARG(str, no_download_reason),
-                    )
-                    return
-
-                if non_completed_only:
-                    QtCore.QMetaObject.invokeMethod(
-                        self,
-                        "_emit_download_queued_progress",
-                        Qt.ConnectionType.QueuedConnection,
-                        QtCore.Q_ARG(str, str(playlist_id)),
-                        QtCore.Q_ARG(int, len(linked_tracks_for_download)),
-                    )
-
-                self._start_download(linked_tracks_for_download, playlist_data, quality)
+                    self._end_main_busy(busy_reason)
 
         threading.Thread(target=pre_download_thread, daemon=True).start()
 
@@ -884,42 +953,71 @@ class TaskQueueManager(QObject):
             return
 
         def fetch_tracks_thread():
-            tracks, _ = TIDAL_API.getItems(str(playlist_id), Type.Playlist)
-            if non_completed_only and tracks:
-                tracks = self.main_view.table_handler.filter_non_completed_tracks(
-                    tracks,
-                    cast(Optional[Playlist], playlist_obj),
-                    allow_slow_fallback=False,
-                    reason="queued_tidal_pre_download_non_completed",
-                )
-
-            if non_completed_only and not tracks:
-                QtCore.QMetaObject.invokeMethod(
-                    self,
-                    "_finish_job_no_download_needed",
-                    Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(str, str(playlist_id)),
-                    QtCore.Q_ARG(str, playlist_name),
-                    QtCore.Q_ARG(str, "All tracks are already downloaded on disk."),
-                )
-                return
-
-            # Emit jobStarted signal
-            QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
-                                            QtCore.Q_ARG(str, str(playlist_id)),
-                                            QtCore.Q_ARG(str, "Downloading"),
-                                            QtCore.Q_ARG(int, len(tracks) if tracks else 0))
-
+            busy_reason = f"Preparing missing downloads: {playlist_name}"
             if non_completed_only:
-                QtCore.QMetaObject.invokeMethod(
-                    self,
-                    "_emit_download_queued_progress",
-                    Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(str, str(playlist_id)),
-                    QtCore.Q_ARG(int, len(tracks) if tracks else 0),
-                )
+                self._begin_main_busy(busy_reason)
 
-            self._start_download(tracks or [], playlist_obj, quality)
+            fetch_start = time.perf_counter()
+            try:
+                tracks, _ = TIDAL_API.getItems(str(playlist_id), Type.Playlist)
+                fetch_elapsed_ms = (time.perf_counter() - fetch_start) * 1000.0
+                if fetch_elapsed_ms > SLOW_QUEUE_PHASE_MS:
+                    logger.warning(
+                        "TIDAL playlist item fetch was slow | playlist_id=%s track_count=%d elapsed_ms=%.1f",
+                        playlist_id,
+                        len(tracks or []),
+                        fetch_elapsed_ms,
+                    )
+                if non_completed_only and tracks:
+                    before_count = len(tracks)
+                    filter_start = time.perf_counter()
+                    tracks = self.main_view.table_handler.filter_non_completed_tracks(
+                        tracks,
+                        cast(Optional[Playlist], playlist_obj),
+                        allow_slow_fallback=False,
+                        reason="queued_tidal_pre_download_non_completed",
+                    )
+                    filter_elapsed_ms = (time.perf_counter() - filter_start) * 1000.0
+                    logger.info(
+                        "TIDAL non-completed filter applied | playlist_id=%s before=%d after=%d "
+                        "removed=%d elapsed_ms=%.1f",
+                        playlist_id,
+                        before_count,
+                        len(tracks),
+                        before_count - len(tracks),
+                        filter_elapsed_ms,
+                    )
+
+                if non_completed_only and not tracks:
+                    QtCore.QMetaObject.invokeMethod(
+                        self,
+                        "_finish_job_no_download_needed",
+                        Qt.ConnectionType.QueuedConnection,
+                        QtCore.Q_ARG(str, str(playlist_id)),
+                        QtCore.Q_ARG(str, playlist_name),
+                        QtCore.Q_ARG(str, "All tracks are already downloaded on disk."),
+                    )
+                    return
+
+                # Emit jobStarted signal
+                QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
+                                                QtCore.Q_ARG(str, str(playlist_id)),
+                                                QtCore.Q_ARG(str, "Downloading"),
+                                                QtCore.Q_ARG(int, len(tracks) if tracks else 0))
+
+                if non_completed_only:
+                    QtCore.QMetaObject.invokeMethod(
+                        self,
+                        "_emit_download_queued_progress",
+                        Qt.ConnectionType.QueuedConnection,
+                        QtCore.Q_ARG(str, str(playlist_id)),
+                        QtCore.Q_ARG(int, len(tracks) if tracks else 0),
+                    )
+
+                self._start_download(tracks or [], playlist_obj, quality)
+            finally:
+                if non_completed_only:
+                    self._end_main_busy(busy_reason)
 
         threading.Thread(target=fetch_tracks_thread, daemon=True).start()
 

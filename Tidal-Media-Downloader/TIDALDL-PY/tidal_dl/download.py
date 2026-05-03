@@ -322,6 +322,7 @@ def _scan_single_playlist_folder_for_track(
     expected_extensions: set[str],
     track_id_str: str,
     allow_stem_match: bool,
+    read_audio_tags: bool = False,
 ) -> Optional[str]:
     normalized_expected_stems = {
         _normalize_stem_for_match(expected_stem)
@@ -329,7 +330,11 @@ def _scan_single_playlist_folder_for_track(
         if expected_stem
     }
 
-    with suppress(OSError):
+    scan_started_at = time.monotonic()
+    scanned_files = 0
+    tag_reads = 0
+
+    try:
         for entry in os.scandir(folder_path):
             if not entry.is_file():
                 continue
@@ -339,6 +344,7 @@ def _scan_single_playlist_folder_for_track(
             if extension_lower not in expected_extensions:
                 continue
 
+            scanned_files += 1
             file_size = aigpy.file.getSize(entry.path)
             if file_size <= 0:
                 continue
@@ -355,9 +361,33 @@ def _scan_single_playlist_folder_for_track(
                 ):
                     return entry.path
 
+            if not read_audio_tags:
+                continue
+
+            tag_reads += 1
             tags_track_id = _extract_track_id_from_audio_tags(entry.path)
             if tags_track_id and tags_track_id == track_id_str:
                 return entry.path
+    except OSError as ex:
+        logger.debug(
+            "DL_LOCAL_SCAN_ERROR folder=%r error=%s",
+            folder_path,
+            ex,
+        )
+        return None
+    finally:
+        elapsed = time.monotonic() - scan_started_at
+        if elapsed >= 1.0:
+            logger.warning(
+                "DL_LOCAL_SCAN_SLOW folder=%r elapsed=%.3fs scanned_files=%d "
+                "tag_reads=%d allow_stem_match=%s read_audio_tags=%s",
+                folder_path,
+                elapsed,
+                scanned_files,
+                tag_reads,
+                allow_stem_match,
+                read_audio_tags,
+            )
 
     return None
 
@@ -372,10 +402,13 @@ def _find_existing_playlist_track_path(
     main_view_instance: "MainView",
     audio_type_folder: Optional[str] = None,
     candidate_extensions: Optional[List[str]] = None,
+    allow_deep_playlist_scan: bool = False,
+    read_audio_tags: bool = False,
 ) -> Optional[str]:
     if not playlist_context:
         return None
 
+    scan_started_at = time.monotonic()
     extensions = candidate_extensions or [".flac", ".mp3", ".m4a", ".mp4"]
     candidate_paths = []
     for extension in extensions:
@@ -403,19 +436,35 @@ def _find_existing_playlist_track_path(
         os.path.splitext(candidate_path)[1].lower() for candidate_path in candidate_paths
     }
 
+    def _finish(result_path: Optional[str], reason: str) -> Optional[str]:
+        elapsed = time.monotonic() - scan_started_at
+        log_fn = logger.warning if elapsed >= 1.0 else logger.info
+        log_fn(
+            "DL_LOCAL_EXISTING_CHECK_DONE track_id=%s result=%s reason=%s "
+            "elapsed=%.3fs candidate_count=%d deep_scan=%s read_audio_tags=%s",
+            str(getattr(track, "id", "") or ""),
+            bool(result_path),
+            reason,
+            elapsed,
+            len(candidate_paths),
+            allow_deep_playlist_scan,
+            read_audio_tags,
+        )
+        return result_path
+
     for candidate_path in candidate_paths:
         if os.path.exists(candidate_path) and aigpy.file.getSize(candidate_path) > 0:
-            return candidate_path
+            return _finish(candidate_path, "exact_candidate_path")
 
     download_root, computed_relative_playlist_dir = _extract_download_root_and_relative_playlist_dir(
         candidate_paths[0]
     )
     if not download_root or not computed_relative_playlist_dir:
-        return None
+        return _finish(None, "no_playlist_directory_context")
 
     track_id_str = str(getattr(track, "id", "") or "").strip()
     if not track_id_str:
-        return None
+        return _finish(None, "missing_track_id")
 
     playlist_id, playlist_name = _extract_playlist_identity(playlist_context)
 
@@ -448,9 +497,13 @@ def _find_existing_playlist_track_path(
             expected_extensions,
             track_id_str,
             allow_stem_match=True,
+            read_audio_tags=read_audio_tags,
         )
         if matched:
-            return matched
+            return _finish(matched, "preferred_playlist_dir")
+
+    if not allow_deep_playlist_scan:
+        return _finish(None, "preferred_dirs_only_no_match")
 
     candidate_playlist_roots = [os.path.join(download_root, "Playlists")]
     for audio_folder in ("flac", "mp3", "m4a", "mp4", "aac", "unknown"):
@@ -467,7 +520,7 @@ def _find_existing_playlist_track_path(
             playlist_roots.append(playlists_root)
 
     if not playlist_roots:
-        return None
+        return _finish(None, "no_playlist_roots")
 
     prioritized_dirs: List[str] = []
     remaining_dirs: List[str] = []
@@ -499,6 +552,7 @@ def _find_existing_playlist_track_path(
             expected_extensions,
             track_id_str,
             allow_stem_match=True,
+            read_audio_tags=read_audio_tags,
         )
         if matched:
             if (
@@ -513,7 +567,7 @@ def _find_existing_playlist_track_path(
                         relative_dir,
                         playlist_name,
                     )
-            return matched
+            return _finish(matched, "deep_prioritized_playlist_dir")
 
     for folder_path in remaining_dirs:
         matched = _scan_single_playlist_folder_for_track(
@@ -522,6 +576,7 @@ def _find_existing_playlist_track_path(
             expected_extensions,
             track_id_str,
             allow_stem_match=False,
+            read_audio_tags=read_audio_tags,
         )
         if matched:
             if (
@@ -536,9 +591,9 @@ def _find_existing_playlist_track_path(
                         relative_dir,
                         playlist_name,
                     )
-            return matched
+            return _finish(matched, "deep_remaining_playlist_dir")
 
-    return None
+    return _finish(None, "not_found")
 
 
 def __encrypted__(stream: StreamUrl, srcPath: str, descPath: str):
@@ -1103,29 +1158,79 @@ def downloadTrack(
         if not url_list or url_list[0] is None:
             raise Exception("No valid URL or URL list available for download.")
         
-        # The aigpy DownloadTool natively supports a list of URLs for concatenation.
-        logger.info(f"[DL Track] name='{os.path.basename(path)}'. Preparing to download {len(url_list)} segment(s).")
+        logger.info(
+            "[DL Track] name='%s'. Stream resolved with %d segment(s); running local skip checks before network download.",
+            os.path.basename(path),
+            len(url_list),
+        )
         ### END DASH INTEGRATION ###
 
         if playlist_context:
-            existing_playlist_track_path = _find_existing_playlist_track_path(
+            phase_started = _log_phase_start(
+                "playlist_existing_check",
                 track,
-                stream,
-                artist,
-                artists,
-                album,
-                playlist_context,
-                main_view_instance,
-                audio_type_folder=audio_type_folder,
-                candidate_extensions=[os.path.splitext(path)[1].lower()],
+                f"path={path!r} audio_type_folder={audio_type_folder!r} deep_scan=false read_audio_tags=false",
             )
+            try:
+                existing_playlist_track_path = _find_existing_playlist_track_path(
+                    track,
+                    stream,
+                    artist,
+                    artists,
+                    album,
+                    playlist_context,
+                    main_view_instance,
+                    audio_type_folder=audio_type_folder,
+                    candidate_extensions=[os.path.splitext(path)[1].lower()],
+                    allow_deep_playlist_scan=False,
+                    read_audio_tags=False,
+                )
+                _log_phase_end(
+                    "playlist_existing_check",
+                    phase_started,
+                    track,
+                    f"found={bool(existing_playlist_track_path)} path={existing_playlist_track_path!r}",
+                )
+            except Exception as existing_check_error:
+                _log_phase_error(
+                    "playlist_existing_check",
+                    phase_started,
+                    track,
+                    f"path={path!r}",
+                    existing_check_error,
+                )
+                raise
+
             if existing_playlist_track_path:
                 logger.info(
                     f"{os.path.basename(existing_playlist_track_path)} (skip:already exists in playlist folder!)"
                 )
                 return True, ""
 
-        if __isSkip__(path, url_list[0]):
+        phase_started = _log_phase_start(
+            "final_file_skip_check",
+            track,
+            f"path={path!r} url_host={str(url_list[0]).split('/')[2] if '://' in str(url_list[0]) else '-'}",
+        )
+        try:
+            should_skip_existing_file = __isSkip__(path, url_list[0])
+            _log_phase_end(
+                "final_file_skip_check",
+                phase_started,
+                track,
+                f"skip={should_skip_existing_file}",
+            )
+        except Exception as skip_check_error:
+            _log_phase_error(
+                "final_file_skip_check",
+                phase_started,
+                track,
+                f"path={path!r}",
+                skip_check_error,
+            )
+            raise
+
+        if should_skip_existing_file:
             logger.info(f"{os.path.basename(path)} (skip:already exists!)")
             return True, ""
 
@@ -1133,6 +1238,11 @@ def downloadTrack(
         if main_view_instance.cancel_requested:
             return False, "Download cancelled by user before start."
 
+        logger.info(
+            "[DL Track] name='%s'. Starting network download with %d segment(s).",
+            os.path.basename(path),
+            len(url_list),
+        )
         tool = aigpy.download.DownloadTool(actual_download_part_path, url_list)
         tool.setUserProgress(userProgress)
         tool.setPartSize(partSize)

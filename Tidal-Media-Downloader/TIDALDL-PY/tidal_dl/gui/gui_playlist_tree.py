@@ -195,6 +195,30 @@ class PlaylistTreeWidget(LeftPanelWidget):
         """Initializes the widgets within this panel."""
         self.tree_widget = HoverAwareTreeWidget()
         self.tree_widget.setObjectName("playlistTreeWidget")
+        self.tree_widget.setStyleSheet("""
+            QTreeWidget {
+                background: transparent;
+                border: none;
+                outline: 0;
+            }
+
+            QTreeWidget::item {
+                border: 1px solid transparent;
+                padding: 2px 4px;
+                margin: 1px 2px;
+            }
+
+            QTreeWidget::item:selected {
+                border: none;
+                outline: 0;
+                background: rgba(255, 255, 255, 0.10);
+            }
+
+            QTreeWidget::item:focus {
+                outline: 0;
+                border: none;
+            }
+        """)
 
         # --- Filter Input ---
         self.filter_input_widget = QLineEdit()

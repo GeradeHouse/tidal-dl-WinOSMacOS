@@ -35,7 +35,7 @@ class PlaylistItemProgressWidget(QWidget):
         
         # --- Main Vertical Layout ---
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(0, 3, 5, 3)
+        self.main_layout.setContentsMargins(0, 5, 8, 5)
         self.main_layout.setSpacing(2)
         self.main_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize)
 
@@ -76,7 +76,7 @@ class PlaylistItemProgressWidget(QWidget):
             QtWidgets.QSizePolicy.Policy.Minimum
         )
         self.status_layout = QVBoxLayout(self.status_container)
-        self.status_layout.setContentsMargins(35, 2, 0, 0)
+        self.status_layout.setContentsMargins(35, 3, 6, 0)
         self.status_layout.setSpacing(2)
 
         # Status Label

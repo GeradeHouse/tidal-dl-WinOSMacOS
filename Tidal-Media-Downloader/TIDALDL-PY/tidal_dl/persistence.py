@@ -110,6 +110,9 @@ class LinkPersistenceManager:
         self._io_lock = RLock()
         self._load_failed_due_to_unresolved_corruption = False
         self._last_recovery_source: Optional[str] = None
+        self._deferred_save_depth = 0
+        self._deferred_save_pending = False
+        self._deferred_save_reason: Optional[str] = None
 
     # --- Private Helper Methods ---
 
@@ -647,6 +650,71 @@ class LinkPersistenceManager:
             "backup_count": len(self._backup_candidates()),
         }
 
+    def begin_deferred_save(self, reason: str = "bulk") -> None:
+        """
+        Defers disk writes while bulk link/cache mutations are in progress.
+        Mutations still update the in-memory structure immediately.
+        """
+        with self._io_lock:
+            self._deferred_save_depth += 1
+            self._deferred_save_reason = str(reason or "bulk")
+            logger.debug(
+                "Deferred persistence save started | reason=%s depth=%d",
+                self._deferred_save_reason,
+                self._deferred_save_depth,
+            )
+
+    def end_deferred_save(self, reason: str = "bulk") -> bool:
+        """
+        Ends one deferred-save scope and flushes one atomic save if pending.
+        """
+        should_flush = False
+        flush_reason = str(reason or self._deferred_save_reason or "bulk")
+
+        with self._io_lock:
+            if self._deferred_save_depth <= 0:
+                logger.debug(
+                    "Deferred persistence save end requested without active scope | reason=%s",
+                    flush_reason,
+                )
+                return True
+
+            self._deferred_save_depth -= 1
+            if self._deferred_save_depth == 0 and self._deferred_save_pending:
+                self._deferred_save_pending = False
+                self._deferred_save_reason = None
+                should_flush = True
+
+        if not should_flush:
+            return True
+
+        start = time.perf_counter()
+        result = self.save_links()
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        logger.info(
+            "Deferred persistence save flushed | reason=%s elapsed_ms=%.1f result=%s",
+            flush_reason,
+            elapsed_ms,
+            result,
+        )
+        return result
+
+    def _save_or_defer(self) -> bool:
+        """
+        Saves immediately unless a bulk/deferred-save scope is active.
+        """
+        with self._io_lock:
+            if self._deferred_save_depth > 0:
+                self._deferred_save_pending = True
+                logger.debug(
+                    "Persistence save deferred | reason=%s depth=%d",
+                    self._deferred_save_reason,
+                    self._deferred_save_depth,
+                )
+                return True
+
+        return self.save_links()
+
     # --- Public Data Access and Modification Methods ---
 
     def get_links_for_playlist(self, playlist_id: str) -> Dict[str, Any]:
@@ -741,7 +809,7 @@ class LinkPersistenceManager:
             "timestamp": self._get_current_timestamp(),
         }
 
-        if not self.save_links():
+        if not self._save_or_defer():
             logger.error(
                 f"Failed to save track quality cache for track {track_id}"
             )
@@ -839,7 +907,7 @@ class LinkPersistenceManager:
             "timestamp": self._get_current_timestamp(),
         }
 
-        if not self.save_links():
+        if not self._save_or_defer():
             logger.error(
                 f"Failed to save track metadata cache for track {track_id}"
             )
@@ -926,7 +994,7 @@ class LinkPersistenceManager:
             "last_seen": self._get_current_timestamp(),
         }
 
-        if not self.save_links():
+        if not self._save_or_defer():
             logger.error(
                 f"Failed to save playlist folder hint for playlist {normalized_playlist_id}"
             )
@@ -1082,7 +1150,7 @@ class LinkPersistenceManager:
             "last_modified"
         ] = self._get_current_timestamp()
 
-        if not self.save_links():
+        if not self._save_or_defer():
             logger.error(
                 f"Failed to save updated link for playlist {playlist_id}, track {spotify_track_id}"
             )
@@ -1127,7 +1195,7 @@ class LinkPersistenceManager:
                 ] = self._get_current_timestamp()
 
                 # Persist the changes to the file system.
-                if not self.save_links():
+                if not self._save_or_defer():
                     # Log an error if saving fails.
                     logger.error(
                         f"Failed to save removal of link for playlist {playlist_id}, track {spotify_track_id}"
@@ -1169,7 +1237,7 @@ class LinkPersistenceManager:
             logger.info(f"Removed all links for playlist {playlist_id}.")
 
             # Persist the changes to the file system.
-            if not self.save_links():
+            if not self._save_or_defer():
                 # Log an error if saving fails.
                 logger.error(f"Failed to save removal of playlist {playlist_id}")
         else:

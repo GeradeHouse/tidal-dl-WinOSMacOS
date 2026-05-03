@@ -667,8 +667,18 @@ class DownloadHandler(QObject):
         if state:
             state["status"] = "downloading"
             state["progress"] = 0
-        # Ensure the UI switches to a progress bar on the correct row
-        self.main_view.table_handler.setup_progress_bar_for_download(track_id)
+        is_visible_context = self._is_visible_table_context_for_playlist(
+            self._current_processing_playlist_id,
+            state.get("playlist_context") if state else None,
+        )
+        if is_visible_context:
+            self.main_view.table_handler.setup_progress_bar_for_download(track_id)
+        else:
+            logger.debug(
+                "Skipping non-visible table progress setup | track_id=%s playlist_id=%s",
+                track_id,
+                self._current_processing_playlist_id,
+            )
 
     @pyqtSlot(str, int)
     def onProgressUpdate(self, track_id: str, percent: int):
@@ -679,6 +689,10 @@ class DownloadHandler(QObject):
     @pyqtSlot(str, bool, str)
     def onTrackFinished(self, track_id: str, ok: bool, error_msg: str):
         state = self.active_downloads.get(track_id)
+        is_visible_context = self._is_visible_table_context_for_playlist(
+            self._current_processing_playlist_id,
+            state.get("playlist_context") if state else None,
+        )
         completed_quality: Optional[str] = None
         if state:
             state["status"] = "completed" if ok else "failed"
@@ -687,7 +701,7 @@ class DownloadHandler(QObject):
                 table_handler = getattr(self.main_view, "table_handler", None)
                 track_obj = state.get("track")
                 playlist_context = state.get("playlist_context")
-                if table_handler and isinstance(track_obj, Track):
+                if is_visible_context and table_handler and isinstance(track_obj, Track):
                     completed_quality = table_handler.get_completed_quality_for_track(
                         track_obj,
                         playlist_context,
@@ -698,12 +712,27 @@ class DownloadHandler(QObject):
                     state["completed_quality"] = completed_quality
             if not ok:
                 state["error"] = error_msg
-        self.main_view.table_handler.mark_track_completed(
-            track_id,
-            ok,
-            error_msg,
-            quality_text=completed_quality,
-        )
+        if is_visible_context:
+            self.main_view.table_handler.mark_track_completed(
+                track_id,
+                ok,
+                error_msg,
+                quality_text=completed_quality,
+            )
+        elif ok:
+            logger.debug(
+                "Skipping non-visible table completion update | track_id=%s playlist_id=%s completed_quality=%s",
+                track_id,
+                self._current_processing_playlist_id,
+                completed_quality,
+            )
+        else:
+            logger.debug(
+                "Skipping non-visible table failure update | track_id=%s playlist_id=%s error=%s",
+                track_id,
+                self._current_processing_playlist_id,
+                error_msg,
+            )
 
         # MODIFIED: Increment counter and emit progress  
         # CRITICAL FIX: Use stored processing ID, not current selection which may have changed
