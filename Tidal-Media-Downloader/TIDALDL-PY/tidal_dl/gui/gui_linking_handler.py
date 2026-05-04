@@ -119,6 +119,67 @@ class LinkingGuiHandler(QObject):
             enrich_track_album_metadata(prepared_track, self.api.getAlbum),
         )
 
+    def _get_row_title_payload(self, row_index: int) -> Dict[str, Any]:
+        table_widget = getattr(self.table_handler, "table_widget", None)
+        if not table_widget:
+            return {}
+        title_item = table_widget.item(row_index, 1)
+        payload = title_item.data(QtCore.Qt.ItemDataRole.UserRole) if title_item else None
+        return payload if isinstance(payload, dict) else {}
+
+    def _get_existing_candidates_for_row(self, row_index: int) -> Optional[List[Dict[str, Any]]]:
+        table_widget = getattr(self.table_handler, "table_widget", None)
+        if not table_widget:
+            return None
+        indicator_item = table_widget.item(row_index, 0)
+        indicator_data = (
+            indicator_item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if indicator_item
+            else None
+        )
+        if not isinstance(indicator_data, dict):
+            return None
+        candidates = indicator_data.get("candidates_list")
+        return candidates if isinstance(candidates, list) else None
+
+    def _get_existing_score_for_row(self, row_index: int) -> Optional[int]:
+        payload = self._get_row_title_payload(row_index)
+        score = payload.get("score")
+        return score if isinstance(score, int) else None
+
+    def _persist_row_link_state(
+        self,
+        row_index: int,
+        tidal_track: Optional[Track],
+        candidates: Optional[List[Dict[str, Any]]],
+        score: Optional[int],
+    ) -> None:
+        if not self.main_view:
+            return
+
+        payload = self._get_row_title_payload(row_index)
+        spotify_metadata = payload.get("data", {}) if isinstance(payload, dict) else {}
+        spotify_track_id = spotify_metadata.get("id") if isinstance(spotify_metadata, dict) else None
+        link_status = payload.get("link_status") if isinstance(payload, dict) else None
+
+        playlist_id = None
+        playlist_obj = self.main_view.s_playlist_obj
+        if isinstance(playlist_obj, dict):
+            playlist_id = playlist_obj.get("data", {}).get("id")
+        elif isinstance(playlist_obj, Playlist):
+            playlist_id = playlist_obj.uuid
+
+        if playlist_id and spotify_track_id:
+            self.persistence_manager.add_or_update_link(
+                playlist_id=playlist_id,
+                spotify_track_id=spotify_track_id,
+                spotify_track_details=spotify_metadata,
+                tidal_track_object=tidal_track,
+                candidates=candidates,
+                score=score,
+                link_status=str(link_status) if link_status else None,
+            )
+
     @pyqtSlot(str, str, int)
     def _on_linking_started_internal(self, playlist_id: str, action: str, total: int):
         """
@@ -489,7 +550,35 @@ class LinkingGuiHandler(QObject):
         link_status = "not_linked"
         tidal_track = self._prepare_tidal_track_metadata(tidal_track)
 
-        if tidal_track:
+        single_candidate_auto_selected = False
+        if (
+            isinstance(candidates, list)
+            and len(candidates) == 1
+            and isinstance(candidates[0], dict)
+        ):
+            only_candidate_track = candidates[0].get("tidal_track")
+            if isinstance(only_candidate_track, Track):
+                tidal_track = (
+                    self._prepare_tidal_track_metadata(
+                        only_candidate_track,
+                        fetch_full_track=True,
+                    )
+                    or only_candidate_track
+                )
+                candidates[0]["tidal_track"] = tidal_track
+                candidate_score = candidates[0].get("score")
+                if isinstance(candidate_score, int):
+                    score = candidate_score
+                single_candidate_auto_selected = True
+
+        if single_candidate_auto_selected and tidal_track:
+            score_text = score if score is not None else "N/A"
+            status_text = (
+                f"Linked (Review suggested match, Score: {score_text}): "
+                f"{tidal_track.id}"
+            )
+            link_status = "needs_review_confirm"
+        elif tidal_track:
             if score is not None and score <= 1:
                 status_text = f"Linked (Certainty score: {score}): {tidal_track.id}"
                 link_status = "auto_linked"
@@ -571,7 +660,8 @@ class LinkingGuiHandler(QObject):
                         spotify_track_details=spotify_metadata,
                         tidal_track_object=tidal_track,
                         candidates=candidates if candidates else None,
-                        score=score
+                        score=score,
+                        link_status=link_status,
                     )
         # --- End Persist Link ---
 
@@ -693,39 +783,28 @@ class LinkingGuiHandler(QObject):
         if not self.main_view or not self.table_handler or not self.table_handler.table_widget:
             return
 
-        # Update the status to "Not Found"
+        existing_candidates = self._get_existing_candidates_for_row(main_row_index)
+        existing_score = self._get_existing_score_for_row(main_row_index)
+
         self.table_handler.update_linking_status(
             row_index=main_row_index,
-            status="not_found",
-            status_text="Not Found (Manual)",
+            status="candidate_review_dismissed",
+            status_text="Candidate match dismissed",
             tidal_track=None,
-            candidates=None,
-            score=None
+            candidates=existing_candidates,
+            score=existing_score,
         )
 
-        # Persist this "Not Found" state
-        playlist_id = None
-        playlist_obj = self.main_view.s_playlist_obj
-        if isinstance(playlist_obj, dict):
-            playlist_id = playlist_obj.get("data", {}).get("id")
-
-        title_item = self.table_handler.table_widget.item(main_row_index, 1)
-        title_item_data = title_item.data(QtCore.Qt.ItemDataRole.UserRole) if title_item else None
-        spotify_track_id = None
-        spotify_metadata = {}
-        if isinstance(title_item_data, dict):
-            spotify_metadata = title_item_data.get("data", {})
-            spotify_track_id = spotify_metadata.get("id")
-
-        if playlist_id and spotify_track_id:
-            self.persistence_manager.add_or_update_link(
-                playlist_id=playlist_id,
-                spotify_track_id=spotify_track_id,
-                spotify_track_details=spotify_metadata,
-                tidal_track_object=None,
-            )
+        self._persist_row_link_state(
+            main_row_index,
+            None,
+            existing_candidates,
+            existing_score,
+        )
 
         self.manualLinkApplied.emit(main_row_index)
+        self.update_link_button_state()
+        return
 
     @pyqtSlot(int, object)
     def onManualLinkSelected(self, main_row_index: int, selected_track: Track) -> None:
@@ -739,51 +818,80 @@ class LinkingGuiHandler(QObject):
         ):
             return
 
-        table_widget = self.table_handler.table_widget
-
         selected_track = self._prepare_tidal_track_metadata(
             selected_track,
             fetch_full_track=True,
         ) or selected_track
 
-        # Update the main table row status
+        existing_candidates = self._get_existing_candidates_for_row(main_row_index)
+        existing_score = self._get_existing_score_for_row(main_row_index)
+
         status_text = f"Linked (Manual): {selected_track.id}"
         self.table_handler.update_linking_status(
             row_index=main_row_index,
             status="manual_linked",
             status_text=status_text,
             tidal_track=selected_track,
-            candidates=None
+            candidates=existing_candidates,
+            score=existing_score,
         )
 
-        title_item = table_widget.item(main_row_index, 1)
-        spotify_track_id = None
-        spotify_metadata = {}
+        self._persist_row_link_state(
+            main_row_index,
+            selected_track,
+            existing_candidates,
+            existing_score,
+        )
 
-        if title_item:
-            title_item_data = title_item.data(QtCore.Qt.ItemDataRole.UserRole)
-            if (
-                isinstance(title_item_data, dict)
-                and title_item_data.get("type") == "spotify_track"
-            ):
-                spotify_metadata = title_item_data.get("data", {})
-                spotify_track_id = spotify_metadata.get("id")
+        self.manualLinkApplied.emit(main_row_index)
+        self.update_link_button_state()
 
-        playlist_id = None
-        playlist_obj = self.main_view.s_playlist_obj
-        if isinstance(playlist_obj, dict):
-            playlist_id = playlist_obj.get("data", {}).get("id")
-        elif isinstance(playlist_obj, Playlist):
-            playlist_id = playlist_obj.uuid
+    @pyqtSlot(int)
+    def onAutoReviewAccepted(self, main_row_index: int) -> None:
+        payload = self._get_row_title_payload(main_row_index)
+        tidal_track = payload.get("tidal_track")
+        if not isinstance(tidal_track, Track):
+            return
 
-        if spotify_track_id and playlist_id and spotify_metadata and selected_track:
-            self.persistence_manager.add_or_update_link(
-                playlist_id=playlist_id,
-                spotify_track_id=spotify_track_id,
-                spotify_track_details=spotify_metadata,
-                tidal_track_object=selected_track,
-            )
+        existing_candidates = self._get_existing_candidates_for_row(main_row_index)
+        existing_score = self._get_existing_score_for_row(main_row_index)
 
+        self.table_handler.update_linking_status(
+            row_index=main_row_index,
+            status="candidate_confirmed",
+            status_text=f"Linked (Confirmed): {tidal_track.id}",
+            tidal_track=tidal_track,
+            candidates=existing_candidates,
+            score=existing_score,
+        )
+        self._persist_row_link_state(
+            main_row_index,
+            tidal_track,
+            existing_candidates,
+            existing_score,
+        )
+        self.manualLinkApplied.emit(main_row_index)
+        self.update_link_button_state()
+
+    @pyqtSlot(int)
+    def onCandidateUnlinkRequested(self, main_row_index: int) -> None:
+        existing_candidates = self._get_existing_candidates_for_row(main_row_index)
+        existing_score = self._get_existing_score_for_row(main_row_index)
+
+        self.table_handler.update_linking_status(
+            row_index=main_row_index,
+            status="candidate_review_dismissed",
+            status_text="Candidate match dismissed",
+            tidal_track=None,
+            candidates=existing_candidates,
+            score=existing_score,
+        )
+        self._persist_row_link_state(
+            main_row_index,
+            None,
+            existing_candidates,
+            existing_score,
+        )
         self.manualLinkApplied.emit(main_row_index)
         self.update_link_button_state()
 

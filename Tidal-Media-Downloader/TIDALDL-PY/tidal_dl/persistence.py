@@ -39,6 +39,7 @@ Example:
 
 # ########## IMPORTS ##########
 import json
+import copy
 import os
 import re
 import shutil
@@ -108,6 +109,7 @@ class LinkPersistenceManager:
         # Data will be loaded from the file only when first needed.
         self.links_data: Optional[Dict[str, Any]] = None  # Use more specific type hint
         self._io_lock = RLock()
+        self._disk_write_lock = RLock()
         self._load_failed_due_to_unresolved_corruption = False
         self._last_recovery_source: Optional[str] = None
         self._deferred_save_depth = 0
@@ -567,16 +569,12 @@ class LinkPersistenceManager:
 
     def save_links(self) -> bool:
         """
-        Saves the current in-memory links data (`self.links_data`) to the JSON file.
+        Saves a stable snapshot of the in-memory links data to the JSON file.
 
-        Ensures data is loaded before attempting to save. If `self.links_data` is
-        None (meaning it was never loaded or loading failed), it attempts to load
-        it first. If still None, saving fails.
-        
-        Includes a retry mechanism to handle transient file locks (e.g., OneDrive syncing).
-
-        Returns:
-            bool: True if saving was successful, False otherwise.
+        The in-memory structure is copied while the persistence lock is held.
+        Slow JSON serialization, validation, backup, replace, and fsync work then
+        run outside that lock so GUI-thread cache mutations are not blocked by
+        disk I/O.
         """
         with self._io_lock:
             if self.links_data is None:
@@ -603,11 +601,15 @@ class LinkPersistenceManager:
                 )
                 return False
 
-            max_retries = 3
+            snapshot_to_save = copy.deepcopy(normalized)
+
+        max_retries = 3
+        with self._disk_write_lock:
             for attempt in range(max_retries):
                 try:
-                    if self._write_links_data_atomic(normalized, create_backup=True):
-                        self._load_failed_due_to_unresolved_corruption = False
+                    if self._write_links_data_atomic(snapshot_to_save, create_backup=True):
+                        with self._io_lock:
+                            self._load_failed_due_to_unresolved_corruption = False
                         return True
                     raise IOError("atomic links write returned False")
 
@@ -1007,6 +1009,7 @@ class LinkPersistenceManager:
         tidal_track_object: Optional[Track],
         candidates: Optional[List[Dict[str, Any]]] = None,
         score: Optional[int] = None,
+        link_status: Optional[str] = None,
     ):
         """
         Adds a new track link or updates an existing one for a specific playlist.
@@ -1022,9 +1025,10 @@ class LinkPersistenceManager:
             spotify_track_details (Dict[str, Any]): Full dictionary of Spotify track details.
             tidal_track_object (Optional[Track]): The corresponding Tidal Track object, or None if no match.
             candidates (Optional[List[Dict[str, Any]]]): A list of candidate match dictionaries,
-                                               each containing 'tidal_track' (Track object),
+                                               each containing 'tidal_track' (Track object or serialized dict),
                                                'score', and 'mismatch_reasons'. Defaults to None.
             score (Optional[int]): The certainty score for the link. Defaults to None.
+            link_status (Optional[str]): UI/link workflow status to restore after reload.
         """
         # Ensure data is loaded before modification.
         if self.links_data is None:
@@ -1087,6 +1091,7 @@ class LinkPersistenceManager:
             "tidal_track_details": serialized_tidal_track,  # Store the serialized Tidal track
             "timestamp": self._get_current_timestamp(),
             "score": score,  # Store the certainty score
+            "link_status": str(link_status) if link_status else None,
         }
 
         # Store the Tidal track ID directly for easier access and fallback
@@ -1100,13 +1105,23 @@ class LinkPersistenceManager:
             serializable_candidates = []
             for cand_dict in candidates:
                 track_obj = cand_dict.get("tidal_track")
+
+                if isinstance(track_obj, dict):
+                    cand_track_dict = dict(track_obj)
+                    cand_track_dict["__CLASS__"] = cand_track_dict.get("__CLASS__") or "Track"
+                    serializable_candidates.append(
+                        {
+                            "tidal_track": cand_track_dict,
+                            "score": cand_dict.get("score"),
+                            "mismatch_reasons": cand_dict.get("mismatch_reasons"),
+                        }
+                    )
+                    continue
+
                 if isinstance(track_obj, Track):
                     try:
-                        # Attempt to serialize the candidate track object
                         cand_track_dict = aigpy.model.modelToDict(track_obj)
-                        # Ensure it's a dictionary before proceeding
                         if isinstance(cand_track_dict, dict):
-                            # Add the __CLASS__ key for proper deserialization
                             cand_track_dict["__CLASS__"] = "Track"
                             serializable_candidates.append(
                                 {
@@ -1129,7 +1144,7 @@ class LinkPersistenceManager:
                 else:
                     logger.warning(
                         f"[Persistence] Candidate data for Spotify track {spotify_track_id} in "
-                        f"playlist {playlist_id} contained non-Track object: {type(track_obj)}"
+                        f"playlist {playlist_id} contained unsupported candidate track type: {type(track_obj)}"
                     )
 
             if serializable_candidates:

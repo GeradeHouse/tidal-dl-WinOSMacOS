@@ -71,6 +71,64 @@ def fuzzy_normalize(text: Optional[str]) -> str:
     return text
 
 
+def _version_marker_categories(title: Optional[str]) -> set[str]:
+    """
+    Return broad mix/version categories present in a title.
+
+    Used for matching logic only. Search normalization stays intentionally broad,
+    but scoring must still distinguish an original track from a remix when the
+    Spotify title itself is version-neutral.
+    """
+    if not title:
+        return set()
+
+    normalized = title.lower()
+    categories: set[str] = set()
+
+    if re.search(r"\boriginal\s+(mix|version|edit)\b|\boriginal\b", normalized):
+        categories.add("original")
+    if re.search(r"\bremix\b|\brework\b|\brmx\b", normalized):
+        categories.add("remix")
+    if re.search(r"\bradio\s+edit\b|\bedit\b", normalized):
+        categories.add("edit")
+    if re.search(r"\bextended\s+mix\b|\bclub\s+mix\b", normalized):
+        categories.add("club_or_extended")
+    if re.search(r"\bdub\b|\binstrumental\b|\bbootleg\b|\bvip\b", normalized):
+        categories.add("alternate")
+    if re.search(r"\bremaster(?:ed)?\b", normalized):
+        categories.add("remaster")
+
+    return categories
+
+
+def _version_mismatch_penalty(
+    spotify_title: Optional[str],
+    tidal_title: Optional[str],
+) -> Tuple[int, Optional[str]]:
+    """
+    Penalize candidate versions that conflict with the Spotify title.
+
+    A Spotify title without a version marker should prefer plain/original mixes
+    over remixes. This prevents a lone remix result from looking equally plausible
+    when the original mix exists elsewhere in TIDAL search.
+    """
+    spotify_markers = _version_marker_categories(spotify_title)
+    tidal_markers = _version_marker_categories(tidal_title)
+
+    if not tidal_markers:
+        return 0, None
+
+    if not spotify_markers:
+        if tidal_markers == {"original"} or "original" in tidal_markers:
+            return 0, None
+        return 3, "Version Mismatch"
+
+    if spotify_markers.isdisjoint(tidal_markers):
+        return 3, "Version Mismatch"
+
+    return 0, None
+
+
 def searchLinkTrack(
     api: TidalAPI,
     title: str,
@@ -232,7 +290,8 @@ def searchLinkTrack(
             debug_buffer.append(
                 f"Constructed metadata query: '{query}'"
             )  # ADDED FOR DEBUGGING
-            search_tuple = api.search(query, Type.Track, limit=10, return_raw=True)
+            search_tuple = api.search(query, Type.Track, limit=25, return_raw=True)
+            search_queries_attempted: List[str] = [query]
             # When return_raw=True, search returns a tuple (SearchResult, str)
             # Correctly unpack the tuple returned when return_raw=True
             search_result: Optional[SearchResult] = None
@@ -258,6 +317,119 @@ def searchLinkTrack(
                 and isinstance(search_result.tracks.items, list)
             ):
                 items_for_len = search_result.tracks.items
+
+            # Broaden metadata candidate discovery even when the primary query returns results.
+            # TIDAL search ranking can return a remix/alternate version first while the correct
+            # original mix appears under a shorter or album-aware query.
+            seen_track_ids = {
+                str(getattr(track, "id", "") or "")
+                for track in items_for_len
+                if getattr(track, "id", None) is not None
+            }
+
+            def _append_unique_tracks_from_result(
+                result: Optional[SearchResult],
+                source_query: str,
+            ) -> None:
+                if (
+                    not result
+                    or not result.tracks
+                    or not isinstance(result.tracks.items, list)
+                ):
+                    return
+
+                added_count = 0
+                for extra_track in result.tracks.items:
+                    extra_id = str(getattr(extra_track, "id", "") or "")
+                    if not extra_id or extra_id in seen_track_ids:
+                        continue
+                    seen_track_ids.add(extra_id)
+                    items_for_len.append(extra_track)
+                    added_count += 1
+
+                if added_count:
+                    debug_buffer.append(
+                        f"Extra metadata query '{source_query}' added {added_count} unique candidates."
+                    )
+
+            base_title_query = normalize_title(title)
+            short_primary_artist = (
+                primary_artist.split()[0].strip() if primary_artist else ""
+            )
+            spotify_title_has_version_marker = bool(_version_marker_categories(title))
+
+            extra_queries: List[str] = []
+
+            def _append_extra_query(candidate_query: str) -> None:
+                cleaned_query = " ".join(str(candidate_query or "").strip().split())
+                if cleaned_query:
+                    extra_queries.append(cleaned_query)
+
+            _append_extra_query(f"{title} {primary_artist}")
+            _append_extra_query(f"{base_title_query} {primary_artist}")
+            _append_extra_query(f"{base_title_query} {short_primary_artist}")
+            _append_extra_query(base_title_query)
+            _append_extra_query(f"{base_title_query} {album}")
+
+            if base_title_query and primary_artist and album:
+                _append_extra_query(f"{base_title_query} {primary_artist} {album}")
+
+            if base_title_query and primary_artist and not spotify_title_has_version_marker:
+                # Many electronic releases expose the desired source track as
+                # "Original Mix" even when Spotify only names the base title.
+                _append_extra_query(f"{base_title_query} original mix {primary_artist}")
+                _append_extra_query(f"{base_title_query} original {primary_artist}")
+                if short_primary_artist and short_primary_artist.lower() != primary_artist.lower():
+                    _append_extra_query(f"{base_title_query} original mix {short_primary_artist}")
+
+            normalized_seen_queries = {query.lower().strip()}
+            for extra_query in extra_queries:
+                normalized_extra_query = extra_query.lower().strip()
+                if not normalized_extra_query or normalized_extra_query in normalized_seen_queries:
+                    continue
+                normalized_seen_queries.add(normalized_extra_query)
+
+                for page_offset in (0, 25, 50):
+                    paged_query_label = f"{extra_query} offset={page_offset}"
+                    search_queries_attempted.append(paged_query_label)
+
+                    try:
+                        debug_buffer.append(
+                            f"Attempting extra metadata candidate query: '{extra_query}' offset={page_offset}"
+                        )
+                        extra_search_tuple = api.search(
+                            extra_query,
+                            Type.Track,
+                            offset=page_offset,
+                            limit=25,
+                            return_raw=True,
+                        )
+                        extra_search_result: Optional[SearchResult] = None
+                        if (
+                            isinstance(extra_search_tuple, tuple)
+                            and len(extra_search_tuple) == 2
+                        ):
+                            extra_search_result = extra_search_tuple[0]
+                        elif extra_search_tuple:
+                            extra_search_result = extra_search_tuple
+                        before_count = len(items_for_len)
+                        _append_unique_tracks_from_result(extra_search_result, paged_query_label)
+                        if len(items_for_len) == before_count:
+                            debug_buffer.append(
+                                f"Extra metadata query '{paged_query_label}' added 0 unique candidates."
+                            )
+                    except Exception as extra_search_error:
+                        debug_buffer.append(
+                            f"Extra metadata query '{paged_query_label}' failed: {extra_search_error}"
+                        )
+
+            if (
+                search_result
+                and search_result.tracks
+                and isinstance(search_result.tracks.items, list)
+            ):
+                search_result.tracks.items = items_for_len
+
             num_items_found = len(items_for_len)
 
             # Add the initial finding message to the buffer *before* checking if 0
@@ -636,10 +808,28 @@ def searchLinkTrack(
                             f"    - Duration mismatch penalty: Cannot compare durations (Spotify: {spotify_duration_s}, Tidal: {tidal_duration})"
                         )
 
+                    # Score based on mix/version mismatch.
+                    version_score, version_reason = _version_mismatch_penalty(
+                        title,
+                        getattr(track, "title", None),
+                    )
+                    if version_score:
+                        score += version_score
+                        if version_reason:
+                            mismatch_reasons.append(version_reason)
+                        debug_buffer.append(
+                            f"    - Version mismatch penalty: Spotify='{title}', Tidal='{getattr(track, 'title', None)}', Penalty={version_score}"
+                        )
+
                     # --- Core Match Check ---
-                    # If Title, Artist, and Duration match perfectly, we consider this a strong match
+                    # If Title, Artist, Duration, and version category match, treat this as a strong match
                     # and ignore Album/ISRC penalties (likely same track on different release).
-                    core_match = (title_score == 0 and artist_score == 0 and duration_score == 0)
+                    core_match = (
+                        title_score == 0
+                        and artist_score == 0
+                        and duration_score == 0
+                        and version_score == 0
+                    )
 
                     # Score based on album match
                     tidal_album_title = getattr(
@@ -711,6 +901,32 @@ def searchLinkTrack(
                 :10
             ]  # Keep top N candidates
 
+            if best_match and min_score >= 2 and len(processed_candidates) <= 3:
+                diag_candidates: List[str] = []
+                for candidate in processed_candidates:
+                    diag_track = candidate.get("tidal_track")
+                    if not diag_track:
+                        continue
+                    diag_candidates.append(
+                        f"{getattr(diag_track, 'id', 'N/A')}|"
+                        f"{getattr(diag_track, 'title', 'N/A')}|"
+                        f"score={candidate.get('score')}|"
+                        f"reasons={candidate.get('mismatch_reasons')}"
+                    )
+
+                logger.warning(
+                    "LINKING_NARROW_UNCERTAIN_CANDIDATES title=%r artists=%r album=%r "
+                    "best_id=%r best_title=%r best_score=%r queries=%r candidates=%r",
+                    title,
+                    artists,
+                    album,
+                    getattr(best_match, "id", None),
+                    getattr(best_match, "title", None),
+                    min_score,
+                    search_queries_attempted,
+                    diag_candidates,
+                )
+
             # --- NEW LOGIC: Refine candidates list ---
             # The 'candidates' list to be returned should only contain alternatives
             # to the 'best_match'. If best_match is the only candidate, or if all
@@ -718,17 +934,20 @@ def searchLinkTrack(
 
             candidates_to_return: Optional[List[Dict[str, Any]]] = None
             if best_match and processed_candidates:
-                # Filter out the best_match from the candidates list if it's present
-                # and only return other candidates.
-                alternative_candidates = [
-                    cand
-                    for cand in processed_candidates
-                    if cand.get("tidal_track")
-                    and getattr(cand["tidal_track"], "id", None)
-                    != getattr(best_match, "id", None)
-                ]
-                if alternative_candidates:
-                    candidates_to_return = alternative_candidates
+                if min_score >= 2 and len(processed_candidates) == 1:
+                    # Preserve the single uncertain best match as the review candidate.
+                    candidates_to_return = processed_candidates
+                else:
+                    # Return alternative candidates only when alternatives exist.
+                    alternative_candidates = [
+                        cand
+                        for cand in processed_candidates
+                        if cand.get("tidal_track")
+                        and getattr(cand["tidal_track"], "id", None)
+                        != getattr(best_match, "id", None)
+                    ]
+                    if alternative_candidates:
+                        candidates_to_return = alternative_candidates
             # --- END NEW LOGIC ---
 
             # Log the best match found before confidence check

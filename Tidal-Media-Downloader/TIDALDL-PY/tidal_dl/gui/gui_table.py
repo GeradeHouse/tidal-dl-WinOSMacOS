@@ -115,6 +115,9 @@ class SplitterTable(QtWidgets.QTableWidget):
         int, object
     )  # Args: main_row_index, selected_track
     noMatchSelectedInSubRow = pyqtSignal(int) # Arg: main_row_index
+    candidatePreviewRequestedInSubRow = pyqtSignal(int, object)
+    candidateAutoReviewAcceptedInSubRow = pyqtSignal(int)
+    candidateUnlinkRequestedInSubRow = pyqtSignal(int)
 
     def __init__(self, column_names, parent=None):
         super().__init__(parent)
@@ -640,33 +643,41 @@ class SplitterTable(QtWidgets.QTableWidget):
             Qt.GlobalColor.white
         )  # From QSS QTableWidget::item
         manual_link_fg_color = QtGui.QColor("#ff7f7f")
-        fg_color_to_apply = default_fg_color  # Default
+        auto_review_fg_color = QtGui.QColor("#ffb347")
+        fg_color_to_apply = default_fg_color
 
-        # --- START OF THE FIX for Red Text ---
-        # Check the link_status from the data stored in the TITLE item (column 1)
         title_item = self.item(row, 1)
-        item_data_for_status = title_item.data(QtCore.Qt.ItemDataRole.UserRole) if title_item else None
-        # --- END OF THE FIX for Red Text ---
+        item_data_for_status = (
+            title_item.data(QtCore.Qt.ItemDataRole.UserRole) if title_item else None
+        )
 
+        link_status_from_data = None
         is_manual_review = False
-        link_status_from_data = None  # Initialize link_status_from_data
+        is_auto_review = False
         if isinstance(item_data_for_status, dict):
             link_status_from_data = item_data_for_status.get("link_status")
-            # Add 'candidates_only' to the list of statuses that require manual review
-            if link_status_from_data in ["manual_review_needed", "candidates_only"]:
-                is_manual_review = True
+            is_manual_review = link_status_from_data in {
+                "manual_review_needed",
+                "candidates_only",
+            }
+            is_auto_review = link_status_from_data == "needs_review_confirm"
 
         if is_manual_review:
             fg_color_to_apply = manual_link_fg_color
             logger.debug(
-                f"[SplitterTable Row {row} UpdateAppearance] Applying RED foreground. Link status: {link_status_from_data}. Selected: {row in self.selectedRows}"
+                "[SplitterTable Row %s UpdateAppearance] Applying RED foreground. Link status: %s. Selected: %s",
+                row,
+                link_status_from_data,
+                row in self.selectedRows,
             )
-        else:
-            # If selected and not manual review, QSS for item:selected (which has no color) applies.
-            # The item's default color (white from QTableWidget::item) should be used.
-            # If not selected, it's also default white.
-            # logger.debug(f"[SplitterTable Row {row} UpdateAppearance] Applying DEFAULT foreground. Link status: {link_status_from_data}. Selected: {row in self.selectedRows}")
-            pass
+        elif is_auto_review:
+            fg_color_to_apply = auto_review_fg_color
+            logger.debug(
+                "[SplitterTable Row %s UpdateAppearance] Applying ORANGE foreground. Link status: %s. Selected: %s",
+                row,
+                link_status_from_data,
+                row in self.selectedRows,
+            )
 
         # Update appearance for all items in the row
         for col in range(self.columnCount()):
@@ -686,10 +697,12 @@ class SplitterTable(QtWidgets.QTableWidget):
                     camelot_brush = QtGui.QBrush(camelot_color)
                     key_item.setForeground(camelot_brush)
                     key_item.setData(QtCore.Qt.ItemDataRole.ForegroundRole, camelot_brush)
-                elif is_manual_review:
-                    manual_link_brush = QtGui.QBrush(manual_link_fg_color)
-                    key_item.setForeground(manual_link_brush)
-                    key_item.setData(QtCore.Qt.ItemDataRole.ForegroundRole, manual_link_brush)
+                elif is_manual_review or is_auto_review:
+                    review_brush = QtGui.QBrush(
+                        manual_link_fg_color if is_manual_review else auto_review_fg_color
+                    )
+                    key_item.setForeground(review_brush)
+                    key_item.setData(QtCore.Qt.ItemDataRole.ForegroundRole, review_brush)
                 else:
                     default_brush = QtGui.QBrush(default_fg_color)
                     key_item.setForeground(default_brush)
@@ -1164,6 +1177,13 @@ class SplitterTable(QtWidgets.QTableWidget):
             candidates_list = original_indicator_data.get(
                 "candidates_list", []
             )  # Preserve the list of candidates
+            review_mode = original_indicator_data.get(
+                "candidate_review_mode",
+                "manual",
+            )
+            original_spotify_track = original_indicator_data.get("original_spotify_track")
+            if not isinstance(original_spotify_track, dict):
+                original_spotify_track = None
 
             new_indicator_data = {
                 "expanded": False,
@@ -1173,6 +1193,8 @@ class SplitterTable(QtWidgets.QTableWidget):
                 "candidate_count": candidate_count,
                 "candidates_list": candidates_list,
                 "linked_tidal_track_id": linked_id,
+                "candidate_review_mode": review_mode,
+                "original_spotify_track": original_spotify_track,
             }
             main_indicator_item.setData(
                 QtCore.Qt.ItemDataRole.UserRole, new_indicator_data
@@ -1261,6 +1283,9 @@ class SplitterTable(QtWidgets.QTableWidget):
             candidates_raw = indicator_data.get("candidates_list")
             # Get the currently linked track ID from the main row's indicator data to pass to CandidateWidget
             current_linked_id = indicator_data.get("linked_tidal_track_id", None)
+            original_spotify_track = indicator_data.get("original_spotify_track")
+            if not isinstance(original_spotify_track, dict):
+                original_spotify_track = None
 
             # --- ADD THIS LOG ---
             logger.debug(
@@ -1354,17 +1379,29 @@ class SplitterTable(QtWidgets.QTableWidget):
             table_widget.insertRow(sub_row)
 
             # Create the CandidateWidget and set it as a cell widget spanning all columns
+            review_mode = indicator_data.get("candidate_review_mode", "manual")
+
             candidate_widget = CandidateWidget(
-                row, candidates, initial_selected_track_id=current_linked_id
+                row,
+                candidates,
+                initial_selected_track_id=current_linked_id,
+                review_mode=review_mode,
+                original_spotify_track=original_spotify_track,
+                parent=table_widget,
             )
             candidate_widget.candidateSelected.connect(
                 self.candidateSelectedInSubRow
             )
-            # --- START: CONNECT "NONE MATCH" SIGNAL ---
-            # This is the robust way: the table catches the signal from its child widget
-            # and re-emits its own signal, which the handler will connect to.
             candidate_widget.noMatchSelected.connect(self.noMatchSelectedInSubRow)
-            # --- END: CONNECT "NONE MATCH" SIGNAL ---
+            candidate_widget.candidatePreviewRequested.connect(
+                self.candidatePreviewRequestedInSubRow
+            )
+            candidate_widget.candidateAutoReviewAccepted.connect(
+                self.candidateAutoReviewAcceptedInSubRow
+            )
+            candidate_widget.candidateUnlinkRequested.connect(
+                self.candidateUnlinkRequestedInSubRow
+            )
 
             self.setCellWidget(sub_row, 0, candidate_widget)
             self.setSpan(sub_row, 0, 1, self.columnCount())  # Span across all columns

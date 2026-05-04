@@ -464,6 +464,12 @@ class DownloadHandler(QObject):
             tidal_track = title_data
 
         if tidal_track and isinstance(tidal_track, Track):
+            logger.info(
+                "Download row resolved to linked TIDAL track | row=%s track_id=%s title=%r",
+                row_index,
+                getattr(tidal_track, "id", None),
+                getattr(tidal_track, "title", None),
+            )
             return tidal_track
         return None
 

@@ -100,6 +100,9 @@ class TidalAPI(object):
         self.apiKey = {}
         self._openapi_genre_cache: Dict[str, List[str]] = {}
         self._openapi_genre_id_name_cache: Dict[str, str] = {}
+        self._openapi_quality_shape_diag_seen: set[str] = set()
+        self._openapi_quality_shape_diag_count: int = 0
+        self._openapi_quality_success_shape_diag_count: int = 0
         self._openapi_provider_diag_seen_track_ids: set[str] = set()
 
         logger.debug(f"TIDAL_API.apiKey initialized empty.")
@@ -958,6 +961,456 @@ class TidalAPI(object):
                 return {}
 
         return {}
+
+    @staticmethod
+    def _dedupe_openapi_track_ids(track_ids: List[Any]) -> List[str]:
+        """Return stable, non-empty, unique TIDAL track IDs as strings."""
+        seen: set[str] = set()
+        cleaned: List[str] = []
+        for raw_track_id in track_ids or []:
+            track_id = str(raw_track_id or "").strip()
+            if not track_id or track_id in seen:
+                continue
+            seen.add(track_id)
+            cleaned.append(track_id)
+        return cleaned
+
+    @staticmethod
+    def _openapi_string_list(value: Any) -> List[str]:
+        """Normalize scalar/list OpenAPI values into clean strings."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return [cleaned] if cleaned else []
+        if isinstance(value, (list, tuple, set)):
+            values: List[str] = []
+            for item in value:
+                values.extend(TidalAPI._openapi_string_list(item))
+            return list(dict.fromkeys(values))
+        cleaned = str(value).strip()
+        return [cleaned] if cleaned else []
+
+    @staticmethod
+    def _openapi_track_quality_candidate_from_attributes(
+        attributes: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Extract the quality-related parts from an OpenAPI track/sourceFile attributes dict."""
+        if not isinstance(attributes, dict):
+            return {}
+
+        quality_keys = (
+            "audioQuality",
+            "audio_quality",
+            "maximumAudioQuality",
+            "maxAudioQuality",
+            "highestAudioQuality",
+            "quality",
+            "qualityLevel",
+            "sourceQuality",
+        )
+        audio_quality = ""
+        for key in quality_keys:
+            values = TidalAPI._openapi_string_list(attributes.get(key))
+            if values:
+                audio_quality = values[0]
+                break
+
+        media_metadata = attributes.get("mediaMetadata") or attributes.get("media_metadata") or {}
+        if not isinstance(media_metadata, dict):
+            media_metadata = {}
+
+        media_tags: List[str] = []
+        media_tags.extend(TidalAPI._openapi_string_list(media_metadata.get("tags")))
+        for key in ("mediaTags", "media_tags", "tags"):
+            media_tags.extend(TidalAPI._openapi_string_list(attributes.get(key)))
+        media_tags = list(dict.fromkeys(media_tags))
+
+        audio_modes = attributes.get("audioModes") or attributes.get("audio_modes") or []
+        if not isinstance(audio_modes, list):
+            audio_modes = []
+
+        sample_rate = attributes.get("sampleRate") or attributes.get("sample_rate")
+        bit_depth = attributes.get("bitDepth") or attributes.get("bit_depth")
+        codec = attributes.get("codec")
+
+        return {
+            "audioQuality": audio_quality,
+            "mediaMetadata": media_metadata,
+            "mediaTags": media_tags,
+            "audioModes": audio_modes,
+            "sampleRate": sample_rate,
+            "bitDepth": bit_depth,
+            "codec": codec,
+            "attribute_keys": sorted(str(key) for key in attributes.keys()),
+        }
+
+    @staticmethod
+    def _openapi_quality_candidate_has_value(candidate: Dict[str, Any]) -> bool:
+        """Return True when a parsed OpenAPI quality candidate has usable quality data."""
+        if not isinstance(candidate, dict):
+            return False
+
+        if TidalAPI._openapi_string_list(candidate.get("audioQuality")):
+            return True
+        if TidalAPI._openapi_string_list(candidate.get("mediaTags")):
+            return True
+        if TidalAPI._openapi_string_list(candidate.get("codec")):
+            return True
+
+        media_metadata = candidate.get("mediaMetadata")
+        if isinstance(media_metadata, dict) and TidalAPI._openapi_string_list(
+            media_metadata.get("tags")
+        ):
+            return True
+
+        for numeric_key in ("sampleRate", "bitDepth"):
+            value = candidate.get(numeric_key)
+            if value not in (None, "", [], {}):
+                return True
+
+        return False
+
+    @staticmethod
+    def _merge_openapi_quality_candidates(
+        base_candidate: Dict[str, Any],
+        next_candidate: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Merge quality candidates while preserving useful fields from later sources."""
+        merged = dict(base_candidate or {})
+        if not isinstance(next_candidate, dict):
+            return merged
+
+        existing_source = str(merged.get("source") or "").strip()
+        next_source = str(next_candidate.get("source") or "").strip()
+
+        for key, value in next_candidate.items():
+            if key == "source" or value in (None, "", [], {}):
+                continue
+
+            if key in {"mediaTags", "audioModes", "attribute_keys"}:
+                existing_values = TidalAPI._openapi_string_list(merged.get(key))
+                next_values = TidalAPI._openapi_string_list(value)
+                merged[key] = list(dict.fromkeys(existing_values + next_values))
+                continue
+
+            if key == "mediaMetadata" and isinstance(value, dict):
+                existing_metadata = merged.get("mediaMetadata")
+                metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+                metadata.update(value)
+                existing_tags = TidalAPI._openapi_string_list(
+                    existing_metadata.get("tags") if isinstance(existing_metadata, dict) else []
+                )
+                next_tags = TidalAPI._openapi_string_list(value.get("tags"))
+                if existing_tags or next_tags:
+                    metadata["tags"] = list(dict.fromkeys(existing_tags + next_tags))
+                merged[key] = metadata
+                continue
+
+            merged[key] = value
+
+        if next_source:
+            sources = [source for source in [existing_source, next_source] if source]
+            merged["source"] = ", ".join(dict.fromkeys(sources))
+        elif existing_source:
+            merged["source"] = existing_source
+
+        return merged
+
+    @staticmethod
+    def _openapi_resource_shape_summary(resource: Any) -> Dict[str, Any]:
+        """Return a compact resource shape summary for defensive OpenAPI diagnostics."""
+        if not isinstance(resource, dict):
+            return {"python_type": type(resource).__name__}
+
+        attributes = resource.get("attributes")
+        relationships = resource.get("relationships")
+        meta = resource.get("meta")
+        return {
+            "type": str(resource.get("type") or ""),
+            "id": str(resource.get("id") or ""),
+            "keys": sorted(str(key) for key in resource.keys())[:16],
+            "attribute_keys": (
+                sorted(str(key) for key in attributes.keys())[:40]
+                if isinstance(attributes, dict)
+                else []
+            ),
+            "relationship_keys": (
+                sorted(str(key) for key in relationships.keys())[:30]
+                if isinstance(relationships, dict)
+                else []
+            ),
+            "meta_keys": (
+                sorted(str(key) for key in meta.keys())[:30]
+                if isinstance(meta, dict)
+                else []
+            ),
+        }
+
+    def _log_openapi_quality_shape_diag(
+        self,
+        track_id: str,
+        resource: Dict[str, Any],
+        included_resources: List[Any],
+    ) -> None:
+        """Log capped diagnostics for unresolved OpenAPI quality shapes."""
+        cleaned_track_id = str(track_id or "").strip()
+        if not cleaned_track_id:
+            return
+        if cleaned_track_id in self._openapi_quality_shape_diag_seen:
+            return
+        if self._openapi_quality_shape_diag_count >= 5:
+            return
+
+        self._openapi_quality_shape_diag_seen.add(cleaned_track_id)
+        self._openapi_quality_shape_diag_count += 1
+        included_summary = [
+            self._openapi_resource_shape_summary(included_resource)
+            for included_resource in included_resources[:5]
+        ]
+        logger.warning(
+            "OpenAPI quality unresolved shape | track_id=%s resource=%s included=%s",
+            cleaned_track_id,
+            self._openapi_resource_shape_summary(resource),
+            included_summary,
+        )
+
+    def _log_openapi_quality_success_shape_diag(
+        self,
+        track_id: str,
+        resource: Dict[str, Any],
+        included_resources: List[Any],
+        quality_data: Dict[str, Any],
+    ) -> None:
+        """Log capped diagnostics for first-seen resolved OpenAPI quality shapes."""
+        cleaned_track_id = str(track_id or "").strip()
+        if not cleaned_track_id:
+            return
+        if self._openapi_quality_success_shape_diag_count >= 3:
+            return
+
+        self._openapi_quality_success_shape_diag_count += 1
+        included_summary = [
+            self._openapi_resource_shape_summary(included_resource)
+            for included_resource in included_resources[:5]
+        ]
+        logger.warning(
+            "OpenAPI quality resolved shape | track_id=%s source=%s candidate_keys=%s resource=%s included=%s",
+            cleaned_track_id,
+            str(quality_data.get("source") or ""),
+            sorted(str(key) for key in quality_data.keys())[:30],
+            self._openapi_resource_shape_summary(resource),
+            included_summary,
+        )
+
+    def getTrackQualityBatchOpenApi(
+        self,
+        track_ids: List[Any],
+        locale: str = "en-US",
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Best-effort OpenAPI v2 batch lookup for display quality data.
+
+        Returns a mapping of TIDAL track ID -> quality metadata. This is intentionally
+        lightweight and side-effect free; table code decides how to format/cache it.
+        """
+        cleaned_ids = self._dedupe_openapi_track_ids(track_ids)
+        if not cleaned_ids:
+            return {}
+
+        country_code = str(getattr(self.key, "countryCode", "") or "").strip()
+        batch_size = 20
+        result: Dict[str, Dict[str, Any]] = {}
+        started_at = time.perf_counter()
+
+        for start_index in range(0, len(cleaned_ids), batch_size):
+            chunk = cleaned_ids[start_index : start_index + batch_size]
+            params: Dict[str, Any] = {
+                "filter[id]": ",".join(chunk),
+                "include": "sourceFile",
+            }
+            if country_code:
+                params["countryCode"] = country_code
+
+            payload = self.__get_openapi__("tracks", params=params)
+            data = payload.get("data")
+            resources: List[Any]
+            if isinstance(data, list):
+                resources = data
+            elif isinstance(data, dict):
+                resources = [data]
+            else:
+                resources = []
+
+            included = payload.get("included")
+            included_resources = included if isinstance(included, list) else []
+            included_by_key: Dict[tuple[str, str], Dict[str, Any]] = {}
+            included_by_id: Dict[str, List[Dict[str, Any]]] = {}
+            source_file_included_resources: List[Dict[str, Any]] = []
+            for included_resource in included_resources:
+                if not isinstance(included_resource, dict):
+                    continue
+                included_type = str(included_resource.get("type") or "")
+                included_id = str(included_resource.get("id") or "")
+                if included_type and included_id:
+                    included_by_key[(included_type, included_id)] = included_resource
+                    included_by_id.setdefault(included_id, []).append(included_resource)
+                normalized_included_type = included_type.replace("_", "").replace("-", "").lower()
+                if "sourcefile" in normalized_included_type:
+                    source_file_included_resources.append(included_resource)
+
+            for resource in resources:
+                if not isinstance(resource, dict):
+                    continue
+                track_id = str(resource.get("id") or "").strip()
+                if not track_id:
+                    continue
+
+                attributes = resource.get("attributes")
+                if not isinstance(attributes, dict):
+                    attributes = {}
+
+                quality_data = self._openapi_track_quality_candidate_from_attributes(attributes)
+                quality_data["source"] = "tracks.attributes"
+                referenced_included_resources: List[Dict[str, Any]] = []
+
+                def _source_file_relationship(relationships_value: Any) -> Optional[Dict[str, Any]]:
+                    if not isinstance(relationships_value, dict):
+                        return None
+                    for relationship_key, relationship_value in relationships_value.items():
+                        normalized_key = str(relationship_key).replace("_", "").replace("-", "").lower()
+                        if normalized_key in {"sourcefile", "sourcefiles"} and isinstance(
+                            relationship_value,
+                            dict,
+                        ):
+                            return relationship_value
+                    return None
+
+                relationships = resource.get("relationships")
+                source_file_rel = _source_file_relationship(relationships)
+                if isinstance(source_file_rel, dict):
+                    relationship_meta = source_file_rel.get("meta")
+                    if isinstance(relationship_meta, dict):
+                        relationship_candidate = self._openapi_track_quality_candidate_from_attributes(
+                            relationship_meta
+                        )
+                        relationship_candidate["source"] = "relationships.sourceFile.meta"
+                        quality_data = self._merge_openapi_quality_candidates(
+                            quality_data,
+                            relationship_candidate,
+                        )
+
+                    rel_data = source_file_rel.get("data")
+                    rel_items = rel_data if isinstance(rel_data, list) else [rel_data]
+                    for rel_item in rel_items:
+                        if not isinstance(rel_item, dict):
+                            continue
+
+                        rel_meta = rel_item.get("meta")
+                        if isinstance(rel_meta, dict):
+                            rel_meta_candidate = self._openapi_track_quality_candidate_from_attributes(
+                                rel_meta
+                            )
+                            rel_meta_candidate["source"] = "relationships.sourceFile.data.meta"
+                            quality_data = self._merge_openapi_quality_candidates(
+                                quality_data,
+                                rel_meta_candidate,
+                            )
+
+                        rel_type = str(rel_item.get("type") or "")
+                        rel_id = str(rel_item.get("id") or "")
+                        included_resource = included_by_key.get((rel_type, rel_id))
+                        if not included_resource and rel_id:
+                            included_resource = next(
+                                iter(included_by_id.get(rel_id, [])),
+                                None,
+                            )
+                        if isinstance(included_resource, dict):
+                            referenced_included_resources.append(included_resource)
+
+                        included_attributes = (
+                            included_resource.get("attributes")
+                            if isinstance(included_resource, dict)
+                            else None
+                        )
+                        if not isinstance(included_attributes, dict):
+                            continue
+                        included_quality_data = self._openapi_track_quality_candidate_from_attributes(
+                            included_attributes
+                        )
+                        included_type_for_source = (
+                            str(included_resource.get("type") or "")
+                            if isinstance(included_resource, dict)
+                            else rel_type
+                        )
+                        included_quality_data["source"] = f"included.{rel_type or included_type_for_source}"
+                        quality_data = self._merge_openapi_quality_candidates(
+                            quality_data,
+                            included_quality_data,
+                        )
+
+                if (
+                    len(resources) == 1
+                    and not self._openapi_quality_candidate_has_value(quality_data)
+                    and source_file_included_resources
+                ):
+                    for included_resource in source_file_included_resources:
+                        included_attributes = included_resource.get("attributes")
+                        if not isinstance(included_attributes, dict):
+                            continue
+                        fallback_quality_data = self._openapi_track_quality_candidate_from_attributes(
+                            included_attributes
+                        )
+                        fallback_quality_data["source"] = f"included.{included_resource.get('type') or 'sourceFile'}"
+                        quality_data = self._merge_openapi_quality_candidates(
+                            quality_data,
+                            fallback_quality_data,
+                        )
+                        referenced_included_resources.append(included_resource)
+                        if self._openapi_quality_candidate_has_value(quality_data):
+                            break
+
+                diagnostic_included = referenced_included_resources or source_file_included_resources or [
+                    included_resource
+                    for included_resource in included_resources
+                    if isinstance(included_resource, dict)
+                ]
+                if not self._openapi_quality_candidate_has_value(quality_data):
+                    self._log_openapi_quality_shape_diag(
+                        track_id,
+                        resource,
+                        diagnostic_included,
+                    )
+                else:
+                    self._log_openapi_quality_success_shape_diag(
+                        track_id,
+                        resource,
+                        diagnostic_included,
+                        quality_data,
+                    )
+
+                result[track_id] = quality_data
+
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        resolved_count = sum(
+            1
+            for quality_data in result.values()
+            if self._openapi_quality_candidate_has_value(quality_data)
+        )
+        logger.info(
+            "OpenAPI batch track quality lookup completed | requested=%d returned=%d resolved=%d elapsed_ms=%.1f",
+            len(cleaned_ids),
+            len(result),
+            resolved_count,
+            elapsed_ms,
+        )
+        missing = [track_id for track_id in cleaned_ids if track_id not in result]
+        if missing:
+            logger.debug(
+                "OpenAPI batch track quality lookup missing ids=%s",
+                missing[:20],
+            )
+        return result
 
     @staticmethod
     def _first_openapi_text(value: Any, locale: str = "en-US") -> Optional[str]:

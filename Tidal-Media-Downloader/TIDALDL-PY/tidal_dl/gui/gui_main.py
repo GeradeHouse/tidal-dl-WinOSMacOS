@@ -254,7 +254,10 @@ class MainView(QWidget):
         self.stackedLayout.addWidget(self.settingsPage)
 
         self.setMinimumSize(1000, 600)
-        self.resize(1500, 800)
+        current_screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        display_width = current_screen.availableGeometry().width() if current_screen else 1700
+        initial_width = display_width - 100 if display_width < 1800 else 1700
+        self.resize(max(self.minimumWidth(), initial_width), 800)
         self.setWindowTitle("TIDAL-DL")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
@@ -791,9 +794,6 @@ class MainView(QWidget):
         )
         self.c_btnStop.clicked.connect(self.download_handler.onStopClicked)
         self.linking_gui_handler.requestLinkingStart.connect(self.startLinkingWorker)
-        self.tableWidget.candidateSelectedInSubRow.connect(
-            self.linking_gui_handler.onManualLinkSelected
-        )
         self.s_linkingStarted.connect(self.linking_gui_handler.onLinkingStarted)
         self.s_linkingFinished.connect(self.linking_gui_handler.onLinkingFinished)
         self.s_linkingError.connect(self.linking_gui_handler.onLinkingError)

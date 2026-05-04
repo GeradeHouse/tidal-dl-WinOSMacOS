@@ -368,16 +368,19 @@ class TaskQueueManager(QObject):
                         details = link_info.get("tidal_track_details")
                         score = link_info.get("score")
                         candidates = link_info.get("candidates") or []
+                        link_status = link_info.get("link_status")
 
                         if not details:
                             continue
 
-                        if (
+                        requires_manual_review = (
                             score is not None
                             and isinstance(score, (int, float))
                             and score > 1
-                            and bool(candidates)
-                        ):
+                            and len(candidates) > 1
+                            and link_status not in {"manual_linked", "candidate_confirmed"}
+                        )
+                        if requires_manual_review:
                             continue
 
                         track_obj = self._deserialize_persisted_track(
@@ -678,16 +681,19 @@ class TaskQueueManager(QObject):
                         details = link_info.get("tidal_track_details")
                         score = link_info.get("score")
                         candidates = link_info.get("candidates") or []
+                        link_status = link_info.get("link_status")
 
                         if details:
-                            # Uncertain matches with candidate alternatives require manual review first.
-                            # If no candidates are available, keep the existing linked match downloadable.
-                            if (
+                            # Only unresolved multi-candidate rows block queued download.
+                            # Single-candidate rows are already auto-selected for review and remain downloadable.
+                            requires_manual_review = (
                                 score is not None
                                 and isinstance(score, (int, float))
                                 and score > 1
-                                and bool(candidates)
-                            ):
+                                and len(candidates) > 1
+                                and link_status not in {"manual_linked", "candidate_confirmed"}
+                            )
+                            if requires_manual_review:
                                 skipped_manual_review += 1
                                 logger.info(
                                     f"Skipping track {spotify_id}: Manual review required (Score: {score}, Candidates: {len(candidates)})."

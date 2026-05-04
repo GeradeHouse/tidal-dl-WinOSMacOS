@@ -44,6 +44,8 @@ class Settings(aigpy.model.ModelBase):
     useCamelotKeyNotation = True
     tableColumnVisibility = {}
     debugOpenApiProviderLabel = False
+    enableOpenApiBatchQualityFetching = True
+    openApiQualityBatchSize = 20
     downloadStructureMigrationDone = False
     downloadStructureMigrationDoNotRemind = False
     downloadStructureMigrationVersion = 1
@@ -134,6 +136,15 @@ class Settings(aigpy.model.ModelBase):
             self.tableColumnVisibility = {}
         if not hasattr(self, "debugOpenApiProviderLabel"):
             self.debugOpenApiProviderLabel = False
+        if not hasattr(self, "enableOpenApiBatchQualityFetching"):
+            self.enableOpenApiBatchQualityFetching = True
+        if (
+            not hasattr(self, "openApiQualityBatchSize")
+            or not isinstance(self.openApiQualityBatchSize, int)
+            or self.openApiQualityBatchSize < 1
+            or self.openApiQualityBatchSize > 20
+        ):
+            self.openApiQualityBatchSize = 20
         if not hasattr(self, "downloadStructureMigrationDone"):
             self.downloadStructureMigrationDone = False
         if not hasattr(self, "downloadStructureMigrationDoNotRemind"):
@@ -210,6 +221,8 @@ class Settings(aigpy.model.ModelBase):
         data["useCamelotKeyNotation"] = self.useCamelotKeyNotation
         data["tableColumnVisibility"] = self.tableColumnVisibility
         data["debugOpenApiProviderLabel"] = self.debugOpenApiProviderLabel
+        data["enableOpenApiBatchQualityFetching"] = self.enableOpenApiBatchQualityFetching
+        data["openApiQualityBatchSize"] = self.openApiQualityBatchSize
         data["downloadStructureMigrationDone"] = self.downloadStructureMigrationDone
         data["downloadStructureMigrationDoNotRemind"] = self.downloadStructureMigrationDoNotRemind
         data["downloadStructureMigrationVersion"] = self.downloadStructureMigrationVersion
