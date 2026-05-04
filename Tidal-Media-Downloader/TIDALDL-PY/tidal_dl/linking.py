@@ -15,11 +15,12 @@ from .model import Artist, SearchResult, Track
 from .tidal import TidalAPI
 from tidal_dl.gui.gui_logging import setup_gui_logger
 
-# Set up GUI logging with ERROR level for this module
-setup_gui_logger(__name__, logging.ERROR)
+# Set up GUI logging with WARNING level for this module.
+# Detailed per-candidate traces remain debug-only, but compact diagnostics must be visible.
+setup_gui_logger(__name__, logging.WARNING)
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.ERROR)  # Set specific level for this module
+logger.setLevel(logging.WARNING)
 
 # Assuming aigpy is available
 try:
@@ -127,6 +128,51 @@ def _version_mismatch_penalty(
         return 3, "Version Mismatch"
 
     return 0, None
+
+
+def _track_diag_summary(track: Optional[Track]) -> Dict[str, Any]:
+    """Return a compact, log-safe summary of a TIDAL track candidate."""
+    if not track:
+        return {}
+
+    artist_names: List[str] = []
+    raw_artists = getattr(track, "artists", None)
+    if isinstance(raw_artists, list):
+        for artist in raw_artists:
+            artist_name = getattr(artist, "name", None)
+            if artist_name:
+                artist_names.append(str(artist_name))
+
+    album_obj = getattr(track, "album", None)
+    return {
+        "id": getattr(track, "id", None),
+        "title": getattr(track, "title", None),
+        "artists": artist_names,
+        "album": getattr(album_obj, "title", None),
+        "duration": getattr(track, "duration", None),
+        "isrc": getattr(track, "isrc", None),
+    }
+
+
+def _search_result_diag_summary(
+    result: Optional[SearchResult],
+    source_query: str,
+    limit: int = 8,
+) -> Dict[str, Any]:
+    """Return a compact summary of a TIDAL search result for matching diagnostics."""
+    items: List[Track] = []
+    if (
+        result
+        and result.tracks
+        and isinstance(result.tracks.items, list)
+    ):
+        items = result.tracks.items
+
+    return {
+        "query": source_query,
+        "count": len(items),
+        "top": [_track_diag_summary(track) for track in items[:limit]],
+    }
 
 
 def searchLinkTrack(
@@ -318,6 +364,10 @@ def searchLinkTrack(
             ):
                 items_for_len = search_result.tracks.items
 
+            metadata_search_diagnostics: List[Dict[str, Any]] = [
+                _search_result_diag_summary(search_result, f"{query} offset=0")
+            ]
+
             # Broaden metadata candidate discovery even when the primary query returns results.
             # TIDAL search ranking can return a remix/alternate version first while the correct
             # original mix appears under a shorter or album-aware query.
@@ -331,25 +381,45 @@ def searchLinkTrack(
                 result: Optional[SearchResult],
                 source_query: str,
             ) -> None:
+                raw_items: List[Track] = []
                 if (
-                    not result
-                    or not result.tracks
-                    or not isinstance(result.tracks.items, list)
+                    result
+                    and result.tracks
+                    and isinstance(result.tracks.items, list)
                 ):
-                    return
+                    raw_items = result.tracks.items
 
-                added_count = 0
-                for extra_track in result.tracks.items:
+                added_summaries: List[Dict[str, Any]] = []
+                duplicate_summaries: List[Dict[str, Any]] = []
+
+                for extra_track in raw_items:
                     extra_id = str(getattr(extra_track, "id", "") or "")
-                    if not extra_id or extra_id in seen_track_ids:
+                    if not extra_id:
                         continue
+                    if extra_id in seen_track_ids:
+                        if len(duplicate_summaries) < 5:
+                            duplicate_summaries.append(_track_diag_summary(extra_track))
+                        continue
+
                     seen_track_ids.add(extra_id)
                     items_for_len.append(extra_track)
-                    added_count += 1
+                    if len(added_summaries) < 8:
+                        added_summaries.append(_track_diag_summary(extra_track))
 
-                if added_count:
+                metadata_search_diagnostics.append(
+                    {
+                        "query": source_query,
+                        "count": len(raw_items),
+                        "added_count": len(added_summaries),
+                        "added": added_summaries,
+                        "duplicates_sample": duplicate_summaries,
+                        "top": [_track_diag_summary(track) for track in raw_items[:8]],
+                    }
+                )
+
+                if added_summaries:
                     debug_buffer.append(
-                        f"Extra metadata query '{source_query}' added {added_count} unique candidates."
+                        f"Extra metadata query '{source_query}' added {len(added_summaries)} unique candidate sample(s)."
                     )
 
             base_title_query = normalize_title(title)
@@ -680,6 +750,7 @@ def searchLinkTrack(
             candidates: List[Dict[str, Any]] = (
                 []
             )  # Initialize list to store candidate details
+            rejected_candidates: List[Dict[str, Any]] = []
 
             # Add checks for search_result and its attributes before iterating
             # Correct indentation and ensure iteration over a list
@@ -722,7 +793,15 @@ def searchLinkTrack(
                                 break
                     
                     if not artist_match_found:
-                        # Skip this candidate if artists are completely different
+                        if len(rejected_candidates) < 30:
+                            rejected_candidates.append(
+                                {
+                                    "reason": "artist_filter",
+                                    "track": _track_diag_summary(track),
+                                    "spotify_artists_fuzzy": spotify_artists_fuzzy,
+                                    "tidal_artists_fuzzy": tidal_artists_fuzzy,
+                                }
+                            )
                         continue
 
                     # 2. Title Similarity Check
@@ -731,6 +810,7 @@ def searchLinkTrack(
                     t_title_norm = normalize_title(track.title)
                     
                     title_match_found = False
+                    title_similarity_ratio: Optional[float] = None
                     if not s_title_norm or not t_title_norm:
                          title_match_found = True # Fallback
                     else:
@@ -739,11 +819,21 @@ def searchLinkTrack(
                             title_match_found = True
                         else:
                             # Check similarity ratio
-                            ratio = difflib.SequenceMatcher(None, s_title_norm, t_title_norm).ratio()
-                            if ratio > 0.5: # Allow some variation
+                            title_similarity_ratio = difflib.SequenceMatcher(None, s_title_norm, t_title_norm).ratio()
+                            if title_similarity_ratio > 0.5: # Allow some variation
                                 title_match_found = True
-                    
+                     
                     if not title_match_found:
+                        if len(rejected_candidates) < 30:
+                            rejected_candidates.append(
+                                {
+                                    "reason": "title_filter",
+                                    "track": _track_diag_summary(track),
+                                    "spotify_title_norm": s_title_norm,
+                                    "tidal_title_norm": t_title_norm,
+                                    "similarity_ratio": title_similarity_ratio,
+                                }
+                            )
                         continue
                     # ---------------------------------
 
@@ -901,44 +991,20 @@ def searchLinkTrack(
                 :10
             ]  # Keep top N candidates
 
-            if best_match and min_score >= 2 and len(processed_candidates) <= 3:
-                diag_candidates: List[str] = []
-                for candidate in processed_candidates:
-                    diag_track = candidate.get("tidal_track")
-                    if not diag_track:
-                        continue
-                    diag_candidates.append(
-                        f"{getattr(diag_track, 'id', 'N/A')}|"
-                        f"{getattr(diag_track, 'title', 'N/A')}|"
-                        f"score={candidate.get('score')}|"
-                        f"reasons={candidate.get('mismatch_reasons')}"
-                    )
-
-                logger.warning(
-                    "LINKING_NARROW_UNCERTAIN_CANDIDATES title=%r artists=%r album=%r "
-                    "best_id=%r best_title=%r best_score=%r queries=%r candidates=%r",
-                    title,
-                    artists,
-                    album,
-                    getattr(best_match, "id", None),
-                    getattr(best_match, "title", None),
-                    min_score,
-                    search_queries_attempted,
-                    diag_candidates,
-                )
-
-            # --- NEW LOGIC: Refine candidates list ---
-            # The 'candidates' list to be returned should only contain alternatives
-            # to the 'best_match'. If best_match is the only candidate, or if all
-            # candidates are essentially the same as best_match, then candidates_to_return should be None.
-
+            # --- Candidate return logic ---
+            # For confident matches, the caller does not need candidate rows.
+            # For uncertain matches, the review drawer must include the best match itself.
+            # Otherwise the UI can look as if the best match was never found.
             candidates_to_return: Optional[List[Dict[str, Any]]] = None
+
             if best_match and processed_candidates:
-                if min_score >= 2 and len(processed_candidates) == 1:
-                    # Preserve the single uncertain best match as the review candidate.
+                if min_score >= 2:
+                    # Uncertain best match: return the full ranked candidate list,
+                    # including the best match as the first/top review option.
                     candidates_to_return = processed_candidates
                 else:
-                    # Return alternative candidates only when alternatives exist.
+                    # Confident best match: keep only true alternatives for diagnostics.
+                    # The confident return path below still returns Candidates=None.
                     alternative_candidates = [
                         cand
                         for cand in processed_candidates
@@ -948,8 +1014,66 @@ def searchLinkTrack(
                     ]
                     if alternative_candidates:
                         candidates_to_return = alternative_candidates
-            # --- END NEW LOGIC ---
+            elif processed_candidates:
+                # No best match selected, but scored candidates exist.
+                # Let the UI show all available review candidates.
+                candidates_to_return = processed_candidates
+            # --- End candidate return logic ---
 
+            best_score_for_diag: Optional[Union[int, float]] = None
+            if min_score != float("inf"):
+                best_score_for_diag = min_score
+
+            should_emit_matching_diag = (
+                best_score_for_diag is None
+                or best_score_for_diag >= 2
+                or len(processed_candidates) <= 3
+                or len(rejected_candidates) > 0
+            )
+
+            if should_emit_matching_diag:
+                top_scored_candidates = [
+                    {
+                        "track": _track_diag_summary(candidate.get("tidal_track")),
+                        "score": candidate.get("score"),
+                        "mismatch_reasons": candidate.get("mismatch_reasons"),
+                    }
+                    for candidate in processed_candidates[:10]
+                ]
+
+                returned_candidates = [
+                    {
+                        "track": _track_diag_summary(candidate.get("tidal_track")),
+                        "score": candidate.get("score"),
+                        "mismatch_reasons": candidate.get("mismatch_reasons"),
+                    }
+                    for candidate in (candidates_to_return or [])[:10]
+                ]
+
+                logger.warning(
+                    "LINKING_METADATA_DIAG title=%r artists=%r album=%r isrc=%r duration_ms=%r "
+                    "best_id=%r best_title=%r best_score=%r raw_candidate_count=%r "
+                    "scored_candidate_count=%r returned_candidate_count=%r "
+                    "queries=%r search_results=%r rejected_candidates_sample=%r "
+                    "top_scored_candidates=%r returned_candidates=%r",
+                    title,
+                    artists,
+                    album,
+                    isrc,
+                    duration_ms,
+                    getattr(best_match, "id", None),
+                    getattr(best_match, "title", None),
+                    best_score_for_diag,
+                    num_items_found,
+                    len(candidates),
+                    len(candidates_to_return) if candidates_to_return else 0,
+                    search_queries_attempted,
+                    metadata_search_diagnostics,
+                    rejected_candidates[:30],
+                    top_scored_candidates,
+                    returned_candidates,
+                )
+ 
             # Log the best match found before confidence check
             if best_match:
                 best_match_id = getattr(best_match, "id", "N/A")
