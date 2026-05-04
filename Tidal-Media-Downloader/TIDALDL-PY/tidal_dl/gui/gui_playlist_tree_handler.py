@@ -1091,7 +1091,21 @@ class PlaylistTreeHandler(QObject):
     def showSpotifyPlaylistMenu(self, global_pos: QPoint) -> None:
         menu = QMenu(self.tree_widget)
         menu.setStyleSheet(MENU_STYLESHEET)
-        
+
+        create_action = menu.addAction("Create New Spotify Playlist")
+        if create_action:
+            if hasattr(self.main_view, "spotify_gui_handler"):
+                create_action.triggered.connect(
+                    self.main_view.spotify_gui_handler.createSpotifyPlaylistFromPrompt
+                )
+                create_action.setEnabled(
+                    self.main_view.spotify_gui_handler.spotify_api.sp is not None
+                )
+            else:
+                create_action.setEnabled(False)
+
+        menu.addSeparator()
+         
         refresh_action = menu.addAction("Refresh Spotify Playlists")
         if refresh_action:
             if hasattr(self.main_view, "spotify_gui_handler"):
@@ -1248,7 +1262,58 @@ class PlaylistTreeHandler(QObject):
 
             elif item_type == "spotify":
                 spotify_playlists_data = [item.data(0, Qt.ItemDataRole.UserRole) for item in playlist_items]
-                
+                spotify_handler = getattr(self.main_view, "spotify_gui_handler", None)
+                if spotify_handler and len(spotify_playlists_data) == 1:
+                    first_playlist_payload = spotify_playlists_data[0]
+                    first_playlist_data = (
+                        first_playlist_payload.get("data", {})
+                        if isinstance(first_playlist_payload, dict)
+                        else {}
+                    )
+                    can_edit_details = bool(first_playlist_data.get("can_edit_details"))
+                    can_modify_items = bool(first_playlist_data.get("can_modify_items"))
+
+                    rename_action = menu.addAction("Rename Spotify Playlist")
+                    if rename_action:
+                        rename_action.setEnabled(can_edit_details)
+                        rename_action.triggered.connect(partial(spotify_handler.renameSpotifyPlaylist, first_playlist_data))
+
+                    edit_details_action = menu.addAction("Edit Spotify Playlist Details")
+                    if edit_details_action:
+                        edit_details_action.setEnabled(can_edit_details)
+                        edit_details_action.triggered.connect(partial(spotify_handler.editSpotifyPlaylistDetails, first_playlist_data))
+
+                    duplicate_action = menu.addAction("Duplicate Spotify Playlist")
+                    if duplicate_action:
+                        duplicate_action.triggered.connect(partial(spotify_handler.duplicateSpotifyPlaylist, first_playlist_data))
+
+                    backup_action = menu.addAction("Create Backup Playlist")
+                    if backup_action:
+                        backup_action.triggered.connect(partial(spotify_handler.backupSpotifyPlaylist, first_playlist_data))
+
+                    cleanup_duplicates_action = menu.addAction("Remove Duplicate Tracks")
+                    if cleanup_duplicates_action:
+                        cleanup_duplicates_action.setEnabled(can_modify_items)
+                        cleanup_duplicates_action.triggered.connect(partial(spotify_handler.removeDuplicateTracksFromSpotifyPlaylist, first_playlist_data))
+
+                    add_selected_action = menu.addAction("Add Selected Table Tracks to This Playlist")
+                    if add_selected_action:
+                        add_selected_action.setEnabled(can_modify_items)
+                        add_selected_action.triggered.connect(partial(spotify_handler.addSelectedRowsToSpotifyPlaylist, first_playlist_data))
+
+                    clear_action = menu.addAction("Clear Spotify Playlist Tracks")
+                    if clear_action:
+                        clear_action.setEnabled(can_modify_items)
+                        clear_action.triggered.connect(partial(spotify_handler.clearSpotifyPlaylist, first_playlist_data))
+
+                    menu.addSeparator()
+
+                    remove_action = menu.addAction("Remove from Spotify Library")
+                    if remove_action:
+                        remove_action.triggered.connect(partial(spotify_handler.unfollowSpotifyPlaylist, first_playlist_data))
+
+                    menu.addSeparator()
+                 
                 link_action = menu.addAction(f"Link All Tracks in Playlist{plural_s}")
                 if link_action:
                     # Wrapper to update UI to "Queued" immediately before submitting job

@@ -154,6 +154,75 @@ def _track_diag_summary(track: Optional[Track]) -> Dict[str, Any]:
     }
 
 
+TITLE_SIMILARITY_REVIEW_THRESHOLD = 0.72
+MIN_TITLE_TOKEN_OVERLAP = 0.60
+MAX_REVIEW_CANDIDATE_SCORE = 4
+EMIT_LINKING_METADATA_DIAG = False
+
+_TITLE_TOKEN_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "the",
+    "or",
+    "feat",
+    "ft",
+    "featuring",
+    "with",
+}
+
+
+def _title_tokens_for_matching(text: Optional[str]) -> set[str]:
+    normalized = normalize_title(text)
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized.lower())
+    return {
+        token
+        for token in normalized.split()
+        if token and token not in _TITLE_TOKEN_STOPWORDS
+    }
+
+
+def _title_token_overlap_ratio(
+    spotify_title: Optional[str],
+    tidal_title: Optional[str],
+) -> float:
+    spotify_tokens = _title_tokens_for_matching(spotify_title)
+    tidal_tokens = _title_tokens_for_matching(tidal_title)
+
+    if not spotify_tokens or not tidal_tokens:
+        return 0.0
+
+    return len(spotify_tokens & tidal_tokens) / len(spotify_tokens)
+
+
+def _titles_are_review_compatible(
+    spotify_title: Optional[str],
+    tidal_title: Optional[str],
+) -> Tuple[bool, Optional[float], float]:
+    spotify_norm = normalize_title(spotify_title)
+    tidal_norm = normalize_title(tidal_title)
+
+    if not spotify_norm or not tidal_norm:
+        return True, None, 1.0
+
+    if spotify_norm in tidal_norm or tidal_norm in spotify_norm:
+        return True, 1.0, 1.0
+
+    similarity_ratio = difflib.SequenceMatcher(
+        None,
+        spotify_norm,
+        tidal_norm,
+    ).ratio()
+    token_overlap = _title_token_overlap_ratio(spotify_title, tidal_title)
+
+    is_compatible = (
+        similarity_ratio >= TITLE_SIMILARITY_REVIEW_THRESHOLD
+        and token_overlap >= MIN_TITLE_TOKEN_OVERLAP
+    )
+
+    return is_compatible, similarity_ratio, token_overlap
+
+
 def _search_result_diag_summary(
     result: Optional[SearchResult],
     source_query: str,
@@ -804,25 +873,19 @@ def searchLinkTrack(
                             )
                         continue
 
-                    # 2. Title Similarity Check
-                    # We require the title to be somewhat similar.
+                    # 2. Title Compatibility Check
+                    # Require both character similarity and real title-token overlap.
+                    # This prevents unrelated titles like "Release the Freak" and
+                    # "Feed The Streets" from surviving only because they share
+                    # a few common letters.
                     s_title_norm = normalize_title(title)
                     t_title_norm = normalize_title(track.title)
-                    
-                    title_match_found = False
-                    title_similarity_ratio: Optional[float] = None
-                    if not s_title_norm or not t_title_norm:
-                         title_match_found = True # Fallback
-                    else:
-                        # Check substring
-                        if s_title_norm in t_title_norm or t_title_norm in s_title_norm:
-                            title_match_found = True
-                        else:
-                            # Check similarity ratio
-                            title_similarity_ratio = difflib.SequenceMatcher(None, s_title_norm, t_title_norm).ratio()
-                            if title_similarity_ratio > 0.5: # Allow some variation
-                                title_match_found = True
-                     
+                    (
+                        title_match_found,
+                        title_similarity_ratio,
+                        title_token_overlap,
+                    ) = _titles_are_review_compatible(title, track.title)
+
                     if not title_match_found:
                         if len(rejected_candidates) < 30:
                             rejected_candidates.append(
@@ -832,6 +895,7 @@ def searchLinkTrack(
                                     "spotify_title_norm": s_title_norm,
                                     "tidal_title_norm": t_title_norm,
                                     "similarity_ratio": title_similarity_ratio,
+                                    "token_overlap": title_token_overlap,
                                 }
                             )
                         continue
@@ -961,6 +1025,26 @@ def searchLinkTrack(
                     # 'score' here holds the score from title, artist, album, duration checks
                     final_score_for_this_track = score + isrc_penalty
 
+                    if final_score_for_this_track > MAX_REVIEW_CANDIDATE_SCORE:
+                        if len(rejected_candidates) < 30:
+                            rejected_candidates.append(
+                                {
+                                    "reason": "score_ceiling",
+                                    "track": _track_diag_summary(track),
+                                    "score": final_score_for_this_track,
+                                    "mismatch_reasons": mismatch_reasons,
+                                    "duration_diff": (
+                                        duration_diff
+                                        if duration_diff != float("inf")
+                                        else None
+                                    ),
+                                }
+                            )
+                        debug_buffer.append(
+                            f"  - Rejecting Tidal ID {track.id} ('{track.title}') because FinalScore={final_score_for_this_track} exceeds MAX_REVIEW_CANDIDATE_SCORE={MAX_REVIEW_CANDIDATE_SCORE}"
+                        )
+                        continue
+
                     # Store candidate details
                     candidate_data: Dict[str, Any] = {
                         "tidal_track": track,
@@ -1024,7 +1108,7 @@ def searchLinkTrack(
             if min_score != float("inf"):
                 best_score_for_diag = min_score
 
-            should_emit_matching_diag = (
+            should_emit_matching_diag = EMIT_LINKING_METADATA_DIAG and (
                 best_score_for_diag is None
                 or best_score_for_diag >= 2
                 or len(processed_candidates) <= 3

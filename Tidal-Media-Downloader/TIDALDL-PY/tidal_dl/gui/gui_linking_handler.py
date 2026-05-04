@@ -783,23 +783,20 @@ class LinkingGuiHandler(QObject):
         if not self.main_view or not self.table_handler or not self.table_handler.table_widget:
             return
 
-        existing_candidates = self._get_existing_candidates_for_row(main_row_index)
-        existing_score = self._get_existing_score_for_row(main_row_index)
-
         self.table_handler.update_linking_status(
             row_index=main_row_index,
             status="candidate_review_dismissed",
             status_text="Candidate match dismissed",
             tidal_track=None,
-            candidates=existing_candidates,
-            score=existing_score,
+            candidates=None,
+            score=None,
         )
 
         self._persist_row_link_state(
             main_row_index,
             None,
-            existing_candidates,
-            existing_score,
+            None,
+            None,
         )
 
         self.manualLinkApplied.emit(main_row_index)
@@ -875,22 +872,19 @@ class LinkingGuiHandler(QObject):
 
     @pyqtSlot(int)
     def onCandidateUnlinkRequested(self, main_row_index: int) -> None:
-        existing_candidates = self._get_existing_candidates_for_row(main_row_index)
-        existing_score = self._get_existing_score_for_row(main_row_index)
-
         self.table_handler.update_linking_status(
             row_index=main_row_index,
             status="candidate_review_dismissed",
             status_text="Candidate match dismissed",
             tidal_track=None,
-            candidates=existing_candidates,
-            score=existing_score,
+            candidates=None,
+            score=None,
         )
         self._persist_row_link_state(
             main_row_index,
             None,
-            existing_candidates,
-            existing_score,
+            None,
+            None,
         )
         self.manualLinkApplied.emit(main_row_index)
         self.update_link_button_state()

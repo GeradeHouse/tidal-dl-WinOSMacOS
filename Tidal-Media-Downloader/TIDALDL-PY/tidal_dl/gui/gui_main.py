@@ -4,6 +4,7 @@ import logging
 import sys
 import threading
 import time
+from contextlib import suppress
 from typing import Optional, List, Any, Dict, Union, Callable, TYPE_CHECKING
 
 from PyQt6.QtWidgets import (
@@ -46,7 +47,7 @@ from PyQt6.QtGui import (
     QResizeEvent,
     QCursor,
 )
-from PyQt6 import QtWidgets, QtGui
+from PyQt6 import QtWidgets, QtGui, sip
 
 from tidal_dl.gui.gui_player_bar import PlayBarWidget
 from tidal_dl.gui.gui_player_logic import PlayerLogic
@@ -104,6 +105,9 @@ class MainView(QWidget):
     s_spotifyLoginFinished = pyqtSignal(object)
     s_spotifyPlaylistsFetched = pyqtSignal(list)
     s_spotifyTracksFetched = pyqtSignal(str, list)
+    s_spotifyMutationStarted = pyqtSignal(str)
+    s_spotifyMutationFinished = pyqtSignal(dict)
+    s_spotifyMutationError = pyqtSignal(str)
     signal_actually_paused = pyqtSignal()
     
 
@@ -122,6 +126,7 @@ class MainView(QWidget):
     linking_stop_event: threading.Event = threading.Event()
     linking_worker: Optional[LinkingWorker] = None
     linking_thread: Optional[QThread] = None
+    spotify_mutation_active: bool = False
 
     s_array: List[Any] = []
     s_type: Optional[Type] = None
@@ -148,6 +153,9 @@ class MainView(QWidget):
         self._deferred_linking_save_active = False
         self._busy_operation_depth = 0
         self._busy_cursor_active = False
+        self._gui_closing = False
+        self._original_stdout = sys.stdout
+        self._gui_log_handler: Optional[logging.Handler] = None
         self.cover_cache = CoverCache()
         self.spotify_api = SpotifyAPI()
         self.player_logic = PlayerLogic(TIDAL_API, self)
@@ -224,9 +232,7 @@ class MainView(QWidget):
 
         # --- Redirect stdout to the log widget ---
         self.stdout_stream = EmittingStream()
-        self.stdout_stream.textWritten.connect(
-            lambda text: append_text_to_output(self.c_printTextEdit, text)
-        )
+        self.stdout_stream.textWritten.connect(self._append_log_text_safely)
         sys.stdout = self.stdout_stream
         # --- End stdout redirection ---
 
@@ -244,6 +250,7 @@ class MainView(QWidget):
         
         # Add this new handler to the root logger
         logging.getLogger().addHandler(gui_log_handler)
+        self._gui_log_handler = gui_log_handler
         logger_gui.info("GUI log handler configured with module-specific filtering.")
         # --- END NEW SECTION ---
 
@@ -385,10 +392,11 @@ class MainView(QWidget):
 
         logger_gui.warning(
             "UI responsiveness gap detected | elapsed_ms=%.1f download_active=%s linking_active=%s "
-            "task_running=%s queued_jobs=%d current_job=%r visible_playlist=%s",
+            "spotify_mutation_active=%s task_running=%s queued_jobs=%d current_job=%r visible_playlist=%s",
             elapsed_ms,
             getattr(self, "download_active", None),
             getattr(self, "linking_active", None),
+            getattr(self, "spotify_mutation_active", None),
             task_running,
             queued_jobs,
             current_job_description,
@@ -417,8 +425,26 @@ class MainView(QWidget):
             "Quality",
         ]
         self.tableWidget = SplitterTable(initialColumnNames, self)
+        self.tableWidget.setProperty("spotifyReorderActive", False)
         self.tableWidget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.c_tableArea.setWidget(self.tableWidget)
+
+        self.spotifyActionStatusLabel = QLabel("")
+        self.spotifyActionStatusLabel.setVisible(False)
+        self.spotifyActionStatusLabel.setFixedHeight(34)
+        self.spotifyActionStatusLabel.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.spotifyActionStatusLabel.setStyleSheet(
+            """
+            QLabel {
+                background-color: rgba(0, 200, 200, 0.12);
+                color: #dffefe;
+                border: 1px solid rgba(0, 200, 200, 0.28);
+                border-radius: 10px;
+                padding: 6px 12px;
+                font-weight: 600;
+            }
+            """
+        )
 
         self.c_combTQuality = QComboBox()
         for item_enum_val in AudioQuality:
@@ -488,6 +514,7 @@ class MainView(QWidget):
         topAreaLayout = QVBoxLayout(topAreaWidget)
         topAreaLayout.setContentsMargins(0, 0, 0, 0)
         topAreaLayout.setSpacing(0)
+        topAreaLayout.addWidget(self.spotifyActionStatusLabel, 0)
         topAreaLayout.addWidget(self.c_tableArea, 1)
         topAreaLayout.addLayout(self.line2Grid, 0)
 
@@ -716,6 +743,10 @@ class MainView(QWidget):
                 border-bottom-right-radius: 10px;
                 background-color: transparent;
             }
+            SplitterTable[spotifyReorderActive="true"] {
+                border: 1px solid rgba(0, 200, 200, 0.32);
+                border-radius: 8px;
+            }
         """
         )
 
@@ -784,6 +815,15 @@ class MainView(QWidget):
         )
         self.s_spotifyTracksFetched.connect(
             self.table_handler.populate_spotify_tracks
+        )
+        self.s_spotifyMutationStarted.connect(
+            self.spotify_gui_handler.onSpotifyMutationStarted
+        )
+        self.s_spotifyMutationFinished.connect(
+            self.spotify_gui_handler.onSpotifyMutationFinished
+        )
+        self.s_spotifyMutationError.connect(
+            self.spotify_gui_handler.onSpotifyMutationError
         )
         self.settingsPage.spotifyCredentialsUpdated.connect(
             lambda: self.auth_handler.trigger_spotify_login(check_cache_only=False)
@@ -1415,6 +1455,36 @@ class MainView(QWidget):
         if not self.event_handler.handle_mouseReleaseEvent(a0):
             super(MainView, self).mouseReleaseEvent(a0)
 
+    @pyqtSlot(str)
+    def _append_log_text_safely(self, text: str) -> None:
+        if getattr(self, "_gui_closing", False):
+            return
+
+        log_widget = getattr(self, "c_printTextEdit", None)
+        try:
+            if log_widget is None or sip.isdeleted(log_widget):
+                return
+            append_text_to_output(log_widget, text)
+        except RuntimeError:
+            return
+
+    def _disconnect_gui_logging(self) -> None:
+        stream = getattr(self, "stdout_stream", None)
+        if stream is not None:
+            with suppress(TypeError, RuntimeError):
+                stream.textWritten.disconnect(self._append_log_text_safely)
+
+        handler = getattr(self, "_gui_log_handler", None)
+        if handler is not None:
+            with suppress(ValueError, RuntimeError):
+                logging.getLogger().removeHandler(handler)
+            with suppress(Exception):
+                handler.close()
+            self._gui_log_handler = None
+
+        if getattr(sys, "stdout", None) is stream:
+            sys.stdout = getattr(self, "_original_stdout", sys.__stdout__)
+
     def toggle_log_console(self):
         is_currently_visible = self.c_printTextEdit.isVisible()
         if is_currently_visible:
@@ -1551,8 +1621,15 @@ class MainView(QWidget):
         """
         Handles the window close event to ensure graceful shutdown of background threads.
         """
-        logger_gui.info("Close event triggered. Shutting down background threads...")
+        self._gui_closing = True
+        self._disconnect_gui_logging()
 
+        if self.table_handler:
+            with suppress(Exception):
+                self.table_handler.prepare_for_shutdown()
+
+        logger_gui.info("Close event triggered. Shutting down background threads...")
+ 
         # 1. Signal all workers to stop using their existing stop mechanisms.
         # It's safe to call these even if no download/linking is active.
         self.download_handler.onStopClicked()

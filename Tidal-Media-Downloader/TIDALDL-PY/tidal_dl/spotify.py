@@ -81,10 +81,16 @@ from tidal_dl.paths import getProfilePath
 import aigpy
 
 from tidal_dl.tidal import TIDAL_API, Track
-from typing import Optional
+from typing import Any, Dict, List, Optional, Sequence, Union
 
-# TODO: Define necessary scopes for reading playlists
-SPOTIFY_SCOPES = "playlist-read-private playlist-read-collaborative"
+SPOTIFY_REQUIRED_SCOPES = (
+    "playlist-read-private",
+    "playlist-read-collaborative",
+    "playlist-modify-public",
+    "playlist-modify-private",
+)
+SPOTIFY_SCOPES = " ".join(SPOTIFY_REQUIRED_SCOPES)
+SPOTIFY_MUTATION_BATCH_SIZE = 100
 
 
 class SpotifyAPI:
@@ -98,6 +104,9 @@ class SpotifyAPI:
         self.auth_manager = None
         self.cache_path = os.path.join(getProfilePath(), ".spotify_token_cache.json")
         logger.debug(f"Spotify token cache path set to: {self.cache_path}")
+        self.current_user_id: Optional[str] = None
+        self.current_user_display_name: Optional[str] = None
+        self.current_user_profile: Dict[str, Any] = {}
         try:
             # Ensure the directory for the cache file exists
             aigpy.path.mkdirs(getProfilePath())
@@ -108,6 +117,123 @@ class SpotifyAPI:
                 exc_info=True,
             )
             logger.error(f"Error setting up Spotify cache directory: {e}")
+
+    def _required_scope_set(self) -> set[str]:
+        return set(SPOTIFY_REQUIRED_SCOPES)
+
+    def _token_scope_set(self, token_info: Optional[Dict[str, Any]]) -> set[str]:
+        if not isinstance(token_info, dict):
+            return set()
+        raw_scope = token_info.get("scope") or ""
+        if isinstance(raw_scope, str):
+            return {scope.strip() for scope in raw_scope.split() if scope.strip()}
+        if isinstance(raw_scope, (list, tuple, set)):
+            return {str(scope).strip() for scope in raw_scope if str(scope).strip()}
+        return set()
+
+    def _token_has_required_scopes(self, token_info: Optional[Dict[str, Any]]) -> bool:
+        token_scopes = self._token_scope_set(token_info)
+        missing_scopes = self._required_scope_set() - token_scopes
+        if missing_scopes:
+            logger.warning(
+                "Spotify token is missing required scope(s): %s",
+                ", ".join(sorted(missing_scopes)),
+            )
+            return False
+        return True
+
+    def _clear_cached_token(self) -> None:
+        try:
+            if os.path.exists(self.cache_path):
+                os.remove(self.cache_path)
+                logger.info("Removed Spotify token cache because reauthorization is required.")
+        except Exception as exc:
+            logger.warning("Failed to remove Spotify token cache: %s", exc, exc_info=True)
+
+    def _refresh_current_user_profile(self) -> None:
+        if not self.sp:
+            return
+        try:
+            profile = self.sp.current_user() or {}
+            self.current_user_profile = profile if isinstance(profile, dict) else {}
+            self.current_user_id = self.current_user_profile.get("id")
+            self.current_user_display_name = (
+                self.current_user_profile.get("display_name")
+                or self.current_user_profile.get("id")
+            )
+            logger.info("Spotify account profile loaded: %s", self.current_user_display_name)
+        except Exception as exc:
+            logger.warning("Failed to fetch Spotify account profile: %s", exc, exc_info=True)
+            self.current_user_profile = {}
+            self.current_user_id = None
+            self.current_user_display_name = None
+
+    def _ensure_client(self) -> bool:
+        if self.sp:
+            return True
+        auth_result = self.authenticate(check_cache_only=True)
+        if auth_result is True and self.sp:
+            return True
+        auth_result = self.authenticate(check_cache_only=False)
+        return bool(auth_result is True and self.sp)
+
+    def _chunked(self, values: Sequence[Any], size: int = SPOTIFY_MUTATION_BATCH_SIZE) -> List[List[Any]]:
+        return [list(values[index:index + size]) for index in range(0, len(values), size)]
+
+    def _spotify_success_result(
+        self,
+        message: str,
+        playlist_id: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
+        playlist: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "message": message,
+            "playlist_id": playlist_id,
+            "snapshot_id": snapshot_id,
+            "playlist": playlist,
+        }
+
+    def _spotify_error_result(
+        self,
+        operation: str,
+        exc: Exception,
+        playlist_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        http_status = getattr(exc, "http_status", None)
+        retry_after = None
+        headers = getattr(exc, "headers", None)
+        if isinstance(headers, dict):
+            retry_after = headers.get("Retry-After")
+
+        if http_status == 401:
+            message = (
+                f"{operation} failed because Spotify authentication expired or is invalid. "
+                "Reconnect Spotify and retry the action."
+            )
+            self.sp = None
+        elif http_status == 403:
+            message = (
+                f"{operation} failed because Spotify denied access. "
+                "The playlist may require ownership, collaborator access, or additional granted scopes."
+            )
+        elif http_status == 429:
+            retry_suffix = f" Retry after {retry_after} second(s)." if retry_after else ""
+            message = f"{operation} failed because Spotify rate-limited the request.{retry_suffix}"
+        else:
+            message = f"{operation} failed: {getattr(exc, 'msg', str(exc))}"
+
+        logger.error("%s", message, exc_info=True)
+        return {
+            "success": False,
+            "message": message,
+            "playlist_id": playlist_id,
+            "snapshot_id": None,
+            "playlist": None,
+            "http_status": http_status,
+            "retry_after": retry_after,
+        }
 
     def _initialize_auth_manager(self):
         """Initializes the SpotifyOAuth manager."""
@@ -258,22 +384,38 @@ class SpotifyAPI:
                         return False
                 # --- End Core Authentication Logic ---
 
-                # --- Token Handling (if successful) ---
                 if token_info:
                     logger.info(
                         f"Successfully obtained/validated Spotify access token ({flow_type} flow)."
                     )
-                    # Log token details (optional)
-                    # logger.debug(f"Token Info: expires_at={token_info.get('expires_at')}, scope='{token_info.get('scope')}', has_refresh_token={token_info.get('refresh_token') is not None}")
 
-                    # Explicitly save token to ensure persistence, especially after refresh
+                    if not self._token_has_required_scopes(token_info):
+                        if check_cache_only:
+                            logger.warning(
+                                "Silent Spotify authentication found an outdated token cache. Interactive reauthorization is required."
+                            )
+                            return "SPOTIFY_SCOPE_UPGRADE_REQUIRED"
+
+                        self._clear_cached_token()
+                        self.auth_manager = None
+                        init_result = self._initialize_auth_manager()
+                        if init_result == "CREDENTIALS_MISSING":
+                            return "CREDENTIALS_MISSING"
+                        if not init_result:
+                            return False
+
+                        token_info = self.auth_manager.get_access_token(check_cache=False)
+                        if not token_info or not self._token_has_required_scopes(token_info):
+                            logger.error("Spotify reauthorization did not grant the required playlist scopes.")
+                            return "SPOTIFY_SCOPE_UPGRADE_REQUIRED"
+
                     try:
                         import json
 
                         logger.debug(
                             f"Attempting to explicitly write token_info to cache file: {self.cache_path}"
                         )
-                        with open(self.cache_path, "w") as f:
+                        with open(self.cache_path, "w", encoding="utf-8") as f:
                             json.dump(token_info, f)
                         logger.info(f"Explicitly wrote token_info to {self.cache_path}")
                     except Exception as explicit_write_err:
@@ -285,12 +427,12 @@ class SpotifyAPI:
                             f"Warning: Failed to update Spotify token cache file: {explicit_write_err}"
                         )
 
-                    # Configure spotipy client
                     self.sp = spotipy.Spotify(
                         auth_manager=self.auth_manager, requests_timeout=60
                     )
                     logger.debug("spotipy.Spotify client created.")
-                    return True  # SUCCESS! Exit method.
+                    self._refresh_current_user_profile()
+                    return True
 
                 # If token_info is None after the attempt (should only happen in check_cache_only=True path now)
                 logger.warning(
@@ -381,40 +523,25 @@ class SpotifyAPI:
     # --- END NEW AUTHENTICATE METHOD ---
 
     def get_user_playlists(self):
-        """Fetches the current user's playlists."""
+        """Fetches the current Spotify account playlists."""
         logger.debug("get_user_playlists called")
-        if not self.sp:
-            logger.warning(
-                "Not authenticated with Spotify in get_user_playlists. Attempting auth."
-            )
-            logger.warning("Not authenticated with Spotify. Please authenticate first.")
-            if not self.authenticate():
-                logger.error("Authentication failed within get_user_playlists.")
-                return None  # Return None or empty list on auth failure
-            # Check again if self.sp was set after successful authenticate()
-            if not self.sp:
-                logger.error(
-                    "self.sp is still None after successful authentication call."
-                )
-                logger.error(
-                    "Internal error: Spotify client not available after authentication."
-                )
-                return None
+        if not self._ensure_client():
+            logger.error("Authentication failed within get_user_playlists.")
+            return None
+
+        if not self.current_user_id:
+            self._refresh_current_user_profile()
 
         playlists_data = []
         try:
-            results = self.sp.current_user_playlists(
-                limit=50
-            )  # Max limit is 50 per page
-            # +++ Add logger to inspect the raw API response +++
+            results = self.sp.current_user_playlists(limit=50)
             logger.debug(f"Raw results from self.sp.current_user_playlists: {results}")
             if not results:
                 logger.warning("current_user_playlists returned None or empty.")
                 logger.warning("Could not retrieve playlists from Spotify.")
-                return []  # Return empty list
+                return []
 
             playlists = results.get("items", [])
-            # +++ Add logger to inspect the extracted 'items' list +++
             logger.debug(
                 f"Extracted 'items' (playlists) list (first 5): {playlists[:5]}"
             )
@@ -425,7 +552,6 @@ class SpotifyAPI:
                     if results and results.get("items"):
                         playlists.extend(results["items"])
                     else:
-                        # Break if next page is empty or results are None
                         logger.warning(
                             "No more items found on next page or error fetching next page."
                         )
@@ -436,32 +562,48 @@ class SpotifyAPI:
                         exc_info=True,
                     )
                     logger.error(f"Error fetching subsequent playlist page: {page_e}")
-                    # Decide whether to return partial list or None
-                    break  # Stop pagination on error
+                    break
 
             logger.debug(f"Total playlists fetched: {len(playlists)}")
             for item in playlists:
-                # Add basic type checking for safety
                 if isinstance(item, dict) and item.get("id") and item.get("name"):
                     owner_info = item.get("owner", {})
                     tracks_info = item.get("tracks", {})
-                    playlists_data.append(
-                        {
-                            "id": item["id"],
-                            "name": item["name"],
-                            "owner": (
-                                owner_info.get("display_name", "Unknown")
-                                if isinstance(owner_info, dict)
-                                else "Unknown"
-                            ),
-                            "tracks_total": (
-                                tracks_info.get("total", 0)
-                                if isinstance(tracks_info, dict)
-                                else 0
-                            ),
-                            "images": item.get("images", []),  # +++ Add images list +++
-                        }
+                    owner_id = (
+                        owner_info.get("id")
+                        if isinstance(owner_info, dict)
+                        else None
                     )
+                    owner_name = (
+                        owner_info.get("display_name")
+                        or owner_info.get("id")
+                        or "Unknown"
+                        if isinstance(owner_info, dict)
+                        else "Unknown"
+                    )
+                    is_owner = bool(owner_id and owner_id == self.current_user_id)
+                    is_collaborative = bool(item.get("collaborative", False))
+                    playlist_data = {
+                        "id": item["id"],
+                        "name": item["name"],
+                        "owner": owner_name,
+                        "owner_id": owner_id,
+                        "owner_name": owner_name,
+                        "public": item.get("public"),
+                        "collaborative": is_collaborative,
+                        "description": item.get("description") or "",
+                        "uri": item.get("uri") or f"spotify:playlist:{item['id']}",
+                        "snapshot_id": item.get("snapshot_id"),
+                        "tracks_total": (
+                            tracks_info.get("total", 0)
+                            if isinstance(tracks_info, dict)
+                            else 0
+                        ),
+                        "images": item.get("images", []),
+                        "can_edit_details": is_owner,
+                        "can_modify_items": bool(is_owner or is_collaborative),
+                    }
+                    playlists_data.append(playlist_data)
                 else:
                     logger.warning(f"Skipping invalid playlist item: {item}")
 
@@ -484,40 +626,28 @@ class SpotifyAPI:
             return None
 
     def get_playlist_tracks(self, playlist_id):
-        """Fetches all tracks for a given playlist ID."""
+        """Fetches all tracks for a given Spotify playlist ID."""
         logger.debug(f"get_playlist_tracks called for playlist_id: {playlist_id}")
-        if not self.sp:
-            logger.warning(
-                "Not authenticated with Spotify in get_playlist_tracks. Attempting auth."
-            )
-            logger.warning("Not authenticated with Spotify. Please authenticate first.")
-            if not self.authenticate():
-                logger.error("Authentication failed within get_playlist_tracks.")
-                return None
-            if not self.sp:
-                logger.error(
-                    "self.sp is still None after successful authentication call."
-                )
-                logger.error(
-                    "Internal error: Spotify client not available after authentication."
-                )
-                return None
+        if not self._ensure_client():
+            logger.error("Authentication failed within get_playlist_tracks.")
+            return None
 
         tracks_data = []
         try:
             logger.info(f"Fetching tracks for Spotify playlist ID: {playlist_id}...")
-            logger.info(f"Fetching tracks for Spotify playlist ID: {playlist_id}...")
             offset = 0
-            limit = 100  # Max limit per page
+            limit = 100
 
             while True:
                 logger.debug(
                     f"Fetching playlist items for {playlist_id}, limit={limit}, offset={offset}"
                 )
-                # Request additional fields: duration_ms and external_ids (for ISRC)
                 results = self.sp.playlist_items(
                     playlist_id,
-                    fields="items(track(id, name, artists(name), album(name), duration_ms, external_ids)),next",
+                    fields=(
+                        "items(added_at,added_by(id,display_name),is_local,"
+                        "track(id,uri,name,artists(name),album(name),duration_ms,external_ids)),next"
+                    ),
                     limit=limit,
                     offset=offset,
                     additional_types=["track"],
@@ -539,19 +669,21 @@ class SpotifyAPI:
                 logger.debug(f"Fetched {len(items)} items for offset {offset}.")
                 for item in items:
                     track_info = item.get("track")
-                    # Ensure track_info is a dict and has an ID before processing
-                    if isinstance(track_info, dict) and track_info.get("id"):
+                    is_local = bool(item.get("is_local", False))
+                    if isinstance(track_info, dict) and (track_info.get("id") or is_local):
                         artists = track_info.get("artists", [])
                         album_info = track_info.get("album", {})
-                        external_ids = track_info.get(
-                            "external_ids", {}
-                        )  # Get external IDs dict
-                        isrc = external_ids.get("isrc")  # Extract ISRC if available
-                        duration_ms = track_info.get("duration_ms")  # Extract duration
+                        external_ids = track_info.get("external_ids", {})
+                        added_by = item.get("added_by", {})
+                        track_id = track_info.get("id")
+                        uri = track_info.get("uri")
+                        if not uri and track_id:
+                            uri = f"spotify:track:{track_id}"
 
                         tracks_data.append(
                             {
-                                "id": track_info["id"],
+                                "id": track_id,
+                                "uri": uri,
                                 "name": track_info.get("name", "Unknown Track"),
                                 "artists": [
                                     artist.get("name", "Unknown Artist")
@@ -563,11 +695,21 @@ class SpotifyAPI:
                                     if isinstance(album_info, dict)
                                     else "Unknown Album"
                                 ),
-                                "duration_ms": duration_ms,  # Add duration
-                                "isrc": isrc,  # Add ISRC
+                                "duration_ms": track_info.get("duration_ms"),
+                                "isrc": external_ids.get("isrc"),
+                                "playlist_position": len(tracks_data),
+                                "added_at": item.get("added_at"),
+                                "added_by": (
+                                    {
+                                        "id": added_by.get("id"),
+                                        "display_name": added_by.get("display_name") or added_by.get("id"),
+                                    }
+                                    if isinstance(added_by, dict)
+                                    else None
+                                ),
+                                "is_local": is_local,
                             }
                         )
-                    # Removed misplaced font setting code from here
                     else:
                         logger.warning(
                             f"Skipping invalid track item in playlist {playlist_id}: {item}"
@@ -601,6 +743,141 @@ class SpotifyAPI:
             logger.error(f"Error fetching tracks for playlist {playlist_id}: {e}")
             logger.error("Check log file for detailed traceback.")
             return None
+
+    def create_playlist(
+        self,
+        name: str,
+        public: bool = False,
+        collaborative: bool = False,
+        description: str = "",
+    ) -> Dict[str, Any]:
+        operation = "Create Spotify playlist"
+        if not self._ensure_client():
+            return {"success": False, "message": "Spotify authentication is required before creating playlists.", "playlist_id": None, "snapshot_id": None, "playlist": None}
+        if not self.current_user_id:
+            self._refresh_current_user_profile()
+        if not self.current_user_id:
+            return {"success": False, "message": "Spotify account ID could not be resolved.", "playlist_id": None, "snapshot_id": None, "playlist": None}
+        try:
+            playlist = self.sp.user_playlist_create(user=self.current_user_id, name=name, public=bool(public), collaborative=bool(collaborative), description=description or "")
+            playlist_id = playlist.get("id") if isinstance(playlist, dict) else None
+            return self._spotify_success_result(f"Created Spotify playlist: {name}", playlist_id=playlist_id, snapshot_id=playlist.get("snapshot_id") if isinstance(playlist, dict) else None, playlist=playlist if isinstance(playlist, dict) else None)
+        except spotipy.SpotifyException as exc:
+            return self._spotify_error_result(operation, exc)
+        except Exception as exc:
+            return self._spotify_error_result(operation, exc)
+
+    def update_playlist_details(self, playlist_id: str, name: Optional[str] = None, public: Optional[bool] = None, collaborative: Optional[bool] = None, description: Optional[str] = None) -> Dict[str, Any]:
+        operation = "Update Spotify playlist details"
+        if not self._ensure_client():
+            return {"success": False, "message": "Spotify authentication is required before updating playlist details.", "playlist_id": playlist_id, "snapshot_id": None, "playlist": None}
+        payload: Dict[str, Any] = {}
+        if name is not None:
+            payload["name"] = name
+        if public is not None:
+            payload["public"] = bool(public)
+        if collaborative is not None:
+            payload["collaborative"] = bool(collaborative)
+        if description is not None:
+            payload["description"] = description
+        if not payload:
+            return self._spotify_success_result("No Spotify playlist detail changes were submitted.", playlist_id=playlist_id)
+        try:
+            self.sp.playlist_change_details(playlist_id, **payload)
+            refreshed = self.sp.playlist(playlist_id) if self.sp else None
+            return self._spotify_success_result("Updated Spotify playlist details.", playlist_id=playlist_id, snapshot_id=refreshed.get("snapshot_id") if isinstance(refreshed, dict) else None, playlist=refreshed if isinstance(refreshed, dict) else None)
+        except spotipy.SpotifyException as exc:
+            return self._spotify_error_result(operation, exc, playlist_id)
+        except Exception as exc:
+            return self._spotify_error_result(operation, exc, playlist_id)
+
+    def add_items_to_playlist(self, playlist_id: str, uris: Sequence[str], position: Optional[int] = None) -> Dict[str, Any]:
+        operation = "Add Spotify playlist items"
+        if not self._ensure_client():
+            return {"success": False, "message": "Spotify authentication is required before adding playlist items.", "playlist_id": playlist_id, "snapshot_id": None, "playlist": None}
+        clean_uris = [str(uri).strip() for uri in uris if str(uri).strip()]
+        if not clean_uris:
+            return {"success": False, "message": "No Spotify item URIs were available for adding.", "playlist_id": playlist_id, "snapshot_id": None, "playlist": None}
+        latest_snapshot_id: Optional[str] = None
+        try:
+            for index, batch in enumerate(self._chunked(clean_uris)):
+                result = self.sp.playlist_add_items(playlist_id, batch, position=position if index == 0 else None)
+                if isinstance(result, dict):
+                    latest_snapshot_id = result.get("snapshot_id") or latest_snapshot_id
+            return self._spotify_success_result(f"Added {len(clean_uris)} Spotify item(s) to playlist.", playlist_id=playlist_id, snapshot_id=latest_snapshot_id)
+        except spotipy.SpotifyException as exc:
+            return self._spotify_error_result(operation, exc, playlist_id)
+        except Exception as exc:
+            return self._spotify_error_result(operation, exc, playlist_id)
+
+    def remove_items_from_playlist(self, playlist_id: str, items: Sequence[Union[str, Dict[str, Any]]], snapshot_id: Optional[str] = None) -> Dict[str, Any]:
+        operation = "Remove Spotify playlist items"
+        if not self._ensure_client():
+            return {"success": False, "message": "Spotify authentication is required before removing playlist items.", "playlist_id": playlist_id, "snapshot_id": None, "playlist": None}
+        clean_items = [item for item in items if item]
+        if not clean_items:
+            return {"success": False, "message": "No Spotify item URIs were available for removal.", "playlist_id": playlist_id, "snapshot_id": None, "playlist": None}
+        latest_snapshot_id = snapshot_id
+        try:
+            for batch in self._chunked(clean_items):
+                if any(isinstance(item, dict) and item.get("positions") for item in batch):
+                    result = self.sp.playlist_remove_specific_occurrences_of_items(playlist_id, batch, snapshot_id=latest_snapshot_id)
+                else:
+                    uris = [item.get("uri") if isinstance(item, dict) else str(item) for item in batch]
+                    result = self.sp.playlist_remove_all_occurrences_of_items(playlist_id, [str(uri).strip() for uri in uris if str(uri).strip()], snapshot_id=latest_snapshot_id)
+                if isinstance(result, dict):
+                    latest_snapshot_id = result.get("snapshot_id") or latest_snapshot_id
+            return self._spotify_success_result(f"Removed {len(clean_items)} Spotify item(s) from playlist.", playlist_id=playlist_id, snapshot_id=latest_snapshot_id)
+        except spotipy.SpotifyException as exc:
+            return self._spotify_error_result(operation, exc, playlist_id)
+        except Exception as exc:
+            return self._spotify_error_result(operation, exc, playlist_id)
+
+    def reorder_playlist_items(self, playlist_id: str, range_start: int, insert_before: int, range_length: int = 1, snapshot_id: Optional[str] = None) -> Dict[str, Any]:
+        operation = "Reorder Spotify playlist items"
+        if not self._ensure_client():
+            return {"success": False, "message": "Spotify authentication is required before reordering playlist items.", "playlist_id": playlist_id, "snapshot_id": None, "playlist": None}
+        try:
+            result = self.sp.playlist_reorder_items(playlist_id, range_start=range_start, insert_before=insert_before, range_length=range_length, snapshot_id=snapshot_id)
+            return self._spotify_success_result("Reordered Spotify playlist item(s).", playlist_id=playlist_id, snapshot_id=result.get("snapshot_id") if isinstance(result, dict) else None)
+        except spotipy.SpotifyException as exc:
+            return self._spotify_error_result(operation, exc, playlist_id)
+        except Exception as exc:
+            return self._spotify_error_result(operation, exc, playlist_id)
+
+    def replace_playlist_items(self, playlist_id: str, uris: Sequence[str]) -> Dict[str, Any]:
+        operation = "Replace Spotify playlist items"
+        if not self._ensure_client():
+            return {"success": False, "message": "Spotify authentication is required before replacing playlist items.", "playlist_id": playlist_id, "snapshot_id": None, "playlist": None}
+        clean_uris = [str(uri).strip() for uri in uris if str(uri).strip()]
+        latest_snapshot_id: Optional[str] = None
+        try:
+            result = self.sp.playlist_replace_items(playlist_id, clean_uris[:SPOTIFY_MUTATION_BATCH_SIZE])
+            if isinstance(result, dict):
+                latest_snapshot_id = result.get("snapshot_id") or latest_snapshot_id
+            remaining = clean_uris[SPOTIFY_MUTATION_BATCH_SIZE:]
+            if remaining:
+                append_result = self.add_items_to_playlist(playlist_id, remaining)
+                latest_snapshot_id = append_result.get("snapshot_id") or latest_snapshot_id
+                if not append_result.get("success"):
+                    return append_result
+            return self._spotify_success_result(f"Replaced Spotify playlist contents with {len(clean_uris)} item(s).", playlist_id=playlist_id, snapshot_id=latest_snapshot_id)
+        except spotipy.SpotifyException as exc:
+            return self._spotify_error_result(operation, exc, playlist_id)
+        except Exception as exc:
+            return self._spotify_error_result(operation, exc, playlist_id)
+
+    def unfollow_playlist(self, playlist_id: str) -> Dict[str, Any]:
+        operation = "Remove Spotify playlist from library"
+        if not self._ensure_client():
+            return {"success": False, "message": "Spotify authentication is required before removing a playlist from the library.", "playlist_id": playlist_id, "snapshot_id": None, "playlist": None}
+        try:
+            self.sp.current_user_unfollow_playlist(playlist_id)
+            return self._spotify_success_result("Removed Spotify playlist from library.", playlist_id=playlist_id)
+        except spotipy.SpotifyException as exc:
+            return self._spotify_error_result(operation, exc, playlist_id)
+        except Exception as exc:
+            return self._spotify_error_result(operation, exc, playlist_id)
 
 
 # --- Spotify GUI Interaction Handler ---

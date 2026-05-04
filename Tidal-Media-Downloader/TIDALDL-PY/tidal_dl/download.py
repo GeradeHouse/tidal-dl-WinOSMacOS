@@ -1072,29 +1072,63 @@ def downloadTrack(
         intended_quality = SETTINGS.audioQuality
 
         if downloadQuality:
-            quality_map = {
-                "aac_low": AudioQuality.LOW,
-                "low": AudioQuality.LOW,
-                "high_flac": AudioQuality.HIGH,
-                "flac_high": AudioQuality.HIGH,
-                "high": AudioQuality.HIGH,
-                "mp3": AudioQuality.MP3,
-                "cd_flac": AudioQuality.LOSSLESS,
-                "flac_cd": AudioQuality.LOSSLESS,
-                "lossless": AudioQuality.LOSSLESS,
-                "max_flac": AudioQuality.HI_RES_LOSSLESS,
-                "flac_max": AudioQuality.HI_RES_LOSSLESS,
-                "hi_res_lossless": AudioQuality.HI_RES_LOSSLESS,
-                "hires": AudioQuality.HI_RES_LOSSLESS,
-                "max": AudioQuality.HI_RES_LOSSLESS,
-                "highest": AudioQuality.HIGHEST
-            }
-            # Normalize the input string for broader matching
-            normalized_quality = downloadQuality.lower().replace(" ", "_").replace("-", "_")
-            for key, value in quality_map.items():
-                if key in normalized_quality:
-                    intended_quality = value
-                    break
+            normalized_quality = str(downloadQuality).lower()
+            normalized_quality = (
+                normalized_quality
+                .replace("–", "-")
+                .replace("—", "-")
+                .replace(" ", "_")
+                .replace("-", "_")
+            )
+            normalized_quality = re.sub(r"[^a-z0-9_]+", "_", normalized_quality)
+            normalized_quality = re.sub(r"_+", "_", normalized_quality).strip("_")
+
+            # Order matters: check the most specific FLAC/HiRes labels before generic "high".
+            if (
+                "highest_available" in normalized_quality
+                or normalized_quality == "highest"
+            ):
+                intended_quality = AudioQuality.HIGHEST
+            elif "mp3" in normalized_quality:
+                intended_quality = AudioQuality.MP3
+            elif (
+                "hi_res_lossless" in normalized_quality
+                or "hires" in normalized_quality
+                or "high_resolution" in normalized_quality
+                or "max_flac" in normalized_quality
+                or "flac_max" in normalized_quality
+                or normalized_quality == "max"
+            ):
+                intended_quality = AudioQuality.HI_RES_LOSSLESS
+            elif (
+                "cd_standard" in normalized_quality
+                or "cd_flac" in normalized_quality
+                or "flac_cd" in normalized_quality
+                or "lossless" in normalized_quality
+            ):
+                intended_quality = AudioQuality.LOSSLESS
+            elif (
+                "flac_high" in normalized_quality
+                or "high_flac" in normalized_quality
+            ):
+                intended_quality = AudioQuality.HIGH
+            elif (
+                "aac" in normalized_quality
+                or "m4a" in normalized_quality
+                or normalized_quality == "low"
+                or normalized_quality.startswith("low_")
+                or normalized_quality.endswith("_low")
+            ):
+                intended_quality = AudioQuality.LOW
+            elif normalized_quality == "high":
+                intended_quality = AudioQuality.HIGH
+            else:
+                logger.warning(
+                    "Unknown download quality label %r normalized=%r; falling back to SETTINGS.audioQuality=%s",
+                    downloadQuality,
+                    normalized_quality,
+                    SETTINGS.audioQuality,
+                )
         
         if intended_quality == AudioQuality.MP3:
             requested_mp3 = True
@@ -1125,6 +1159,20 @@ def downloadTrack(
             track,
             f"retrieved_quality={getattr(stream, 'soundQuality', None)} codec={getattr(stream, 'codec', None)} segment_count={len(getattr(stream, 'urls', []) or [])}",
         )
+
+        requested_lossless_stream = q in {
+            AudioQuality.LOSSLESS,
+            AudioQuality.HI_RES_LOSSLESS,
+        }
+        resolved_codec = str(getattr(stream, "codec", "") or "").lower()
+        resolved_sound_quality = str(getattr(stream, "soundQuality", "") or "").upper()
+
+        if requested_lossless_stream and "mp4a" in resolved_codec:
+            raise ValueError(
+                "Requested FLAC/lossless quality, but TIDAL returned an AAC stream "
+                f"(requested={q.value}, retrieved={resolved_sound_quality}, codec={resolved_codec}). "
+                "Aborting instead of silently saving an .m4a file."
+            )
 
         artists = TIDAL_API.getArtistsName(cast(List[Artist], getattr(track, "artists", [])))
         artist = getattr(getattr(track, "artist", None), "name", "") or artists

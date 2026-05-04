@@ -11,6 +11,7 @@
 """
 
 import logging
+import json
 import os
 import re
 import threading
@@ -20,8 +21,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from typing import List, Dict, Optional, Any, Union, cast, TYPE_CHECKING, Set
 
-from PyQt6 import QtCore, QtWidgets, QtGui
-from PyQt6.QtCore import QTimer, QObject, pyqtSlot, Qt, QPoint, pyqtSignal
+from PyQt6 import QtCore, QtWidgets, QtGui, sip
+from PyQt6.QtCore import QTimer, QObject, pyqtSlot, Qt, QPoint, pyqtSignal, QEvent
 from PyQt6.QtWidgets import QTableWidgetItem, QProgressBar, QMenu
 
 from tidal_dl.gui.gui_table import SplitterTable
@@ -74,6 +75,7 @@ METADATA_MAX_INFLIGHT_REQUESTS = 1
 METADATA_OPENAPI_BATCH_SIZE_FALLBACK = 20
 METADATA_CACHE_FLUSH_IDLE_MS = 12000
 METADATA_CACHE_FLUSH_SLOW_WARNING_MS = 3000.0
+SPOTIFY_ROW_DRAG_MIME = "application/x-tidal-dl-spotify-playlist-rows"
 
 
 class TableHandler(QObject):
@@ -98,6 +100,11 @@ class TableHandler(QObject):
         self.persistence_manager = persistence_manager
         self.linking_handler = linking_handler
         self.download_handler: Optional["DownloadHandler"] = None
+        self._spotify_drag_start_pos: Optional[QPoint] = None
+        self._spotify_drag_start_row: Optional[int] = None
+        self._spotify_drop_indicator_row: Optional[int] = None
+        self._is_shutting_down = False
+        self._table_viewport_ref: Optional[QtWidgets.QWidget] = None
         
         # Initialize column_indices to prevent AttributeError if accessed before population
         self.column_indices: Dict[str, int] = {}
@@ -220,7 +227,17 @@ class TableHandler(QObject):
         self.table_widget.customContextMenuRequested.connect(
             self.handle_table_context_menu
         )
-
+        self.table_widget.setAcceptDrops(True)
+        self.table_widget.setDropIndicatorShown(True)
+        self.table_widget.setDragDropOverwriteMode(False)
+        self.table_widget.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.NoDragDrop)
+        self.table_widget.setDefaultDropAction(Qt.DropAction.MoveAction)
+        viewport = self.table_widget.viewport()
+        if viewport:
+            self._table_viewport_ref = viewport
+            viewport.setAcceptDrops(True)
+            viewport.installEventFilter(self)
+ 
         # The connection for noMatchSelectedInSubRow is now moved to set_linking_handler
         # for better robustness, ensuring the handler exists when the connection is made.
 
@@ -233,6 +250,161 @@ class TableHandler(QObject):
             vertical_scrollbar.valueChanged.connect(
                 self._schedule_visible_metadata_resolution
             )
+
+    def _is_qobject_alive(self, obj: Optional[QObject]) -> bool:
+        if obj is None:
+            return False
+        try:
+            return not sip.isdeleted(obj)
+        except RuntimeError:
+            return False
+
+    def _table_widget_alive(self) -> bool:
+        return self._is_qobject_alive(self.table_widget)
+
+    def _table_viewport_alive(self) -> bool:
+        return self._is_qobject_alive(self._table_viewport_ref)
+
+    def _detach_spotify_drag_event_filter(self) -> None:
+        viewport = self._table_viewport_ref
+        if self._is_qobject_alive(viewport):
+            with suppress(RuntimeError, TypeError):
+                viewport.removeEventFilter(self)
+        self._table_viewport_ref = None
+        self._spotify_drag_start_pos = None
+        self._spotify_drag_start_row = None
+        self._spotify_drop_indicator_row = None
+
+    def prepare_for_shutdown(self) -> None:
+        self._is_shutting_down = True
+        self._detach_spotify_drag_event_filter()
+
+    def _active_spotify_playlist_can_reorder(self) -> bool:
+        if self._is_shutting_down or not self._table_widget_alive():
+            return False
+
+        playlist_obj = getattr(self.main_view, "s_playlist_obj", None)
+        if not (isinstance(playlist_obj, dict) and playlist_obj.get("type") == "spotify" and isinstance(playlist_obj.get("data"), dict)):
+            return False
+        return bool(playlist_obj["data"].get("can_modify_items"))
+
+    def _set_spotify_reorder_visual_state(self, active: bool) -> None:
+        if not self._table_widget_alive():
+            return
+
+        self.table_widget.setProperty("spotifyReorderActive", bool(active))
+        self.table_widget.style().unpolish(self.table_widget)
+        self.table_widget.style().polish(self.table_widget)
+        self.table_widget.update()
+
+    def _get_row_from_event_position(self, event: QtCore.QEvent) -> Optional[int]:
+        if self._is_shutting_down or not self._table_widget_alive():
+            return None
+
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos() if hasattr(event, "pos") else None
+        if pos is None:
+            return None
+
+        index = self.table_widget.indexAt(pos)
+        return index.row() if index.isValid() else self.table_widget.rowCount()
+
+    def _selected_spotify_rows_for_drag(self, fallback_row: int) -> List[int]:
+        if self._is_shutting_down or not self._table_widget_alive():
+            return []
+
+        selected_rows = list(self.table_widget.getSelectedRows())
+        if fallback_row not in selected_rows:
+            selected_rows = [fallback_row]
+
+        payloads = self.get_spotify_track_payloads_for_rows(selected_rows)
+        payload_row_set = {int(payload.get("row_index")) for payload in payloads if isinstance(payload.get("row_index"), int)}
+        return [row for row in selected_rows if row in payload_row_set]
+
+    def get_spotify_drop_insert_position(self, drop_row: int) -> int:
+        if self._is_shutting_down or not self._table_widget_alive():
+            return 0
+
+        if drop_row >= self.table_widget.rowCount():
+            active_playlist = getattr(self.main_view, "s_playlist_obj", {})
+            if isinstance(active_playlist, dict):
+                data = active_playlist.get("data", {})
+                if isinstance(data, dict):
+                    return int(data.get("tracks_total") or self.table_widget.rowCount())
+            return self.table_widget.rowCount()
+        payloads = self.get_spotify_track_payloads_for_rows([drop_row])
+        if payloads and isinstance(payloads[0].get("playlist_position"), int):
+            return int(payloads[0]["playlist_position"])
+        return max(0, int(drop_row))
+
+    def _start_spotify_row_drag(self, rows: List[int]) -> bool:
+        if self._is_shutting_down or not self._table_widget_alive() or not rows:
+            return False
+
+        mime = QtCore.QMimeData()
+        mime.setData(SPOTIFY_ROW_DRAG_MIME, QtCore.QByteArray(",".join(str(row) for row in rows).encode("utf-8")))
+
+        drag = QtGui.QDrag(self.table_widget)
+        drag.setMimeData(mime)
+        drag.setPixmap(self.table_widget.grab())
+        drag.setHotSpot(QPoint(18, 18))
+        return drag.exec(Qt.DropAction.MoveAction) == Qt.DropAction.MoveAction
+
+    def eventFilter(self, watched: QObject, event: Optional[QEvent]) -> bool:
+        if self._is_shutting_down or event is None or not self._table_widget_alive():
+            return False
+
+        viewport = self._table_viewport_ref
+        if not self._is_qobject_alive(viewport) or watched is not viewport:
+            return super().eventFilter(watched, event)
+
+        event_type = event.type()
+
+        if event_type == QEvent.Type.MouseButtonPress and isinstance(event, QtGui.QMouseEvent):
+            if event.button() == Qt.MouseButton.LeftButton and self._active_spotify_playlist_can_reorder():
+                row = self._get_row_from_event_position(event)
+                if row is not None and row < self.table_widget.rowCount():
+                    self._spotify_drag_start_pos = event.pos()
+                    self._spotify_drag_start_row = row
+            return super().eventFilter(watched, event)
+        if event_type == QEvent.Type.MouseMove and isinstance(event, QtGui.QMouseEvent):
+            if self._spotify_drag_start_pos is not None and self._spotify_drag_start_row is not None and event.buttons() & Qt.MouseButton.LeftButton and self._active_spotify_playlist_can_reorder():
+                if (event.pos() - self._spotify_drag_start_pos).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
+                    rows = self._selected_spotify_rows_for_drag(self._spotify_drag_start_row)
+                    self._spotify_drag_start_pos = None
+                    self._spotify_drag_start_row = None
+                    if rows:
+                        self._start_spotify_row_drag(rows)
+                        return True
+            return super().eventFilter(watched, event)
+
+        if event_type in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+            if isinstance(event, (QtGui.QDragEnterEvent, QtGui.QDragMoveEvent)) and event.mimeData().hasFormat(SPOTIFY_ROW_DRAG_MIME):
+                if self._active_spotify_playlist_can_reorder():
+                    self._spotify_drop_indicator_row = self._get_row_from_event_position(event)
+                    event.setDropAction(Qt.DropAction.MoveAction)
+                    event.accept()
+                    return True
+                event.ignore()
+                return True
+
+        if event_type == QEvent.Type.DragLeave:
+            self._spotify_drop_indicator_row = None
+            return super().eventFilter(watched, event)
+
+        if event_type == QEvent.Type.Drop and isinstance(event, QtGui.QDropEvent):
+            if event.mimeData().hasFormat(SPOTIFY_ROW_DRAG_MIME) and self._active_spotify_playlist_can_reorder():
+                raw_rows = bytes(event.mimeData().data(SPOTIFY_ROW_DRAG_MIME)).decode("utf-8")
+                rows = [int(part) for part in raw_rows.split(",") if part.strip().isdigit()]
+                drop_row = self._get_row_from_event_position(event)
+                insert_before = self.get_spotify_drop_insert_position(drop_row if drop_row is not None else self.table_widget.rowCount())
+                spotify_handler = getattr(self.main_view, "spotify_gui_handler", None)
+                if spotify_handler:
+                    spotify_handler.moveSelectedRowsToPlaylistPosition(rows, insert_before)
+                self._spotify_drop_indicator_row = None
+                event.setDropAction(Qt.DropAction.MoveAction)
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
 
     def clear_table(self):
         if not self.table_widget:
@@ -980,6 +1152,38 @@ class TableHandler(QObject):
         if self.download_handler:
             self.download_handler._update_download_button_text()
 
+    def get_spotify_track_payloads_for_rows(self, rows: List[int]) -> List[Dict[str, Any]]:
+        if not self.table_widget:
+            return []
+
+        payloads: List[Dict[str, Any]] = []
+        for row in rows:
+            title_item = self.table_widget.item(row, 1)
+            if not title_item:
+                continue
+            item_metadata = title_item.data(Qt.ItemDataRole.UserRole)
+            if not (
+                isinstance(item_metadata, dict)
+                and item_metadata.get("type") == "spotify_track"
+            ):
+                continue
+            track_data = item_metadata.get("data", {})
+            if not isinstance(track_data, dict):
+                continue
+            track_id = track_data.get("id")
+            uri = track_data.get("uri")
+            if not uri and track_id:
+                uri = f"spotify:track:{track_id}"
+            if not uri:
+                continue
+            payload = dict(track_data)
+            payload["uri"] = uri
+            payload["row_index"] = row
+            if not isinstance(payload.get("playlist_position"), int):
+                payload["playlist_position"] = row
+            payloads.append(payload)
+        return payloads
+
     @pyqtSlot(str, list)
     def populate_spotify_tracks(
         self, playlist_id: str, tracks: Optional[List[Dict[str, Any]]]
@@ -1019,10 +1223,15 @@ class TableHandler(QObject):
             tracks = []
 
         spotify_track_array_for_mainview: List[Dict[str, Any]] = [
-            {"type": "spotify_track", "data": t} for t in tracks
+            {"type": "spotify_track", "data": t}
+            for t in tracks
+            if isinstance(t, dict)
         ]
         self.main_view.s_array = spotify_track_array_for_mainview
         self.main_view.s_type = Type.Track
+        self._set_spotify_reorder_visual_state(
+            self._active_spotify_playlist_can_reorder()
+        )
         self._populate_table_generic(
             spotify_track_array_for_mainview, Type.Track, playlist_id=playlist_id
         )
@@ -1824,6 +2033,7 @@ class TableHandler(QObject):
                 self._completed_status_inflight_keys.discard(cache_key)
 
     def shutdown_background_workers(self, wait: bool = False) -> None:
+        self.prepare_for_shutdown()
         self._visible_metadata_refresh_timer.stop()
         self._metadata_cache_flush_timer.stop()
         self._flush_deferred_metadata_cache_save(blocking=True)
@@ -2558,6 +2768,61 @@ class TableHandler(QObject):
                 self.download_handler.downloadTableContextMenu(
                     context_menu, selected_rows_indices
                 )
+            spotify_handler = getattr(self.main_view, "spotify_gui_handler", None)
+            if spotify_handler:
+                if not context_menu.isEmpty():
+                    context_menu.addSeparator()
+
+                remove_spotify_action = context_menu.addAction(
+                    f"Remove {len(selected_rows_indices)} Selected from Spotify Playlist"
+                )
+                if remove_spotify_action:
+                    remove_spotify_action.triggered.connect(
+                        lambda _checked=False, rows=list(selected_rows_indices): spotify_handler.removeSelectedRowsFromCurrentSpotifyPlaylist(rows)
+                    )
+
+                add_to_playlist_action = context_menu.addAction(
+                    "Add Selected to Another Spotify Playlist"
+                )
+                if add_to_playlist_action:
+                    add_to_playlist_action.triggered.connect(
+                        lambda _checked=False, rows=list(selected_rows_indices): spotify_handler.addSelectedRowsToChosenSpotifyPlaylist(rows)
+                    )
+
+                create_playlist_action = context_menu.addAction(
+                    "Create New Spotify Playlist from Selected"
+                )
+                if create_playlist_action:
+                    create_playlist_action.triggered.connect(
+                        lambda _checked=False, rows=list(selected_rows_indices): spotify_handler.createSpotifyPlaylistFromSelectedRows(rows)
+                    )
+
+                move_top_action = context_menu.addAction("Move Selected to Top")
+                if move_top_action:
+                    move_top_action.triggered.connect(
+                        lambda _checked=False, rows=list(selected_rows_indices): spotify_handler.moveSelectedRowsToTop(rows)
+                    )
+
+                move_bottom_action = context_menu.addAction("Move Selected to Bottom")
+                if move_bottom_action:
+                    move_bottom_action.triggered.connect(
+                        lambda _checked=False, rows=list(selected_rows_indices): spotify_handler.moveSelectedRowsToBottom(rows)
+                    )
+                review_playlist_action = context_menu.addAction(
+                    "Create Review Playlist from Selected"
+                )
+                if review_playlist_action:
+                    review_playlist_action.triggered.connect(
+                        lambda _checked=False, rows=list(selected_rows_indices): spotify_handler.createReviewPlaylistFromSelectedRows(rows)
+                    )
+
+                sync_selected_action = context_menu.addAction(
+                    "Sync Selected to Spotify Playlist..."
+                )
+                if sync_selected_action:
+                    sync_selected_action.triggered.connect(
+                        lambda _checked=False, rows=list(selected_rows_indices): spotify_handler.syncSelectedRowsToSpotifyPlaylist(rows)
+                    )
         elif self.download_handler:
             self.download_handler.downloadTableContextMenu(
                 context_menu, selected_rows_indices

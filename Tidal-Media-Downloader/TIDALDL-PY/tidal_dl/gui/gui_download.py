@@ -411,7 +411,6 @@ class DownloadHandler(QObject):
 
         dlQualities = [
             ("AAC (Low)", AudioQuality.LOW),
-            ("FLAC (High / CD Standard)", AudioQuality.HIGH),
             ("MP3 (Constant Bitrate)", AudioQuality.MP3),
             ("FLAC (CD Standard)", AudioQuality.LOSSLESS),
             ("FLAC (Max / HiRes)", AudioQuality.HI_RES_LOSSLESS),
