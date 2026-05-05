@@ -309,6 +309,8 @@ class PlaylistTreeHandler(QObject):
         self.id_to_item: Dict[str, QTreeWidgetItem] = {}
         self.item_widgets: Dict[str, PlaylistItemProgressWidget] = {}
         self.original_item_data: Dict[str, Dict[str, Any]] = {}
+        self._spotify_playlist_cache: List[Dict[str, Any]] = []
+        self._spotify_sort_mode = "default"
         self.active_job_actions: Dict[str, str] = {}  # Track active job actions per playlist ID
         self.active_job_totals: Dict[str, int] = {}   # Track total items per playlist ID
         self._pending_geometry_playlist_ids: Set[str] = set()
@@ -679,21 +681,63 @@ class PlaylistTreeHandler(QObject):
         logger.info("TIDAL playlists refreshed.")
         self._apply_playlist_filter()
 
+    def _get_spotify_playlist_sort_key(self, playlist_data: Dict[str, Any]) -> tuple[str, str, str]:
+        name = str(playlist_data.get("name") or "").casefold()
+        owner_name = str(playlist_data.get("owner_name") or playlist_data.get("owner") or "").casefold()
+        playlist_id = str(playlist_data.get("id") or "")
+        return (name, owner_name, playlist_id)
+
+    def _get_ordered_spotify_playlists(self) -> List[Dict[str, Any]]:
+        playlists = [playlist for playlist in self._spotify_playlist_cache if isinstance(playlist, dict)]
+        if self._spotify_sort_mode == "alpha":
+            return sorted(playlists, key=self._get_spotify_playlist_sort_key)
+        return list(playlists)
+
+    def _spotify_sort_label(self) -> str:
+        if self._spotify_sort_mode == "alpha":
+            return "Alphabetical"
+        return "Default Spotify order"
+
+    def _iter_spotify_folder_items(self):
+        if not self.spotify_root_item:
+            return
+
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.spotify_root_item)
+        while iterator.value():
+            item = iterator.value()
+            data = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+            if isinstance(data, dict) and data.get("is_folder"):
+                yield item
+            iterator += 1
+
+    def _set_spotify_folders_expanded(self, expanded: bool) -> None:
+        for folder_item in self._iter_spotify_folder_items():
+            folder_item.setExpanded(expanded)
+
     # --- Spotify Playlist Handling ---
     @pyqtSlot(list)
-    def populate_spotify_playlists(self, playlists: List[Dict[str, Any]]) -> None:
+    def populate_spotify_playlists(self, playlists: List[Dict[str, Any]], refresh_cache: bool = True) -> None:
         try:
+            if refresh_cache:
+                self._spotify_playlist_cache = [
+                    dict(playlist)
+                    for playlist in playlists
+                    if isinstance(playlist, dict)
+                ]
+
+            playlists_to_render = self._get_ordered_spotify_playlists()
+
             while self.spotify_root_item.childCount() > 0:
                 self.spotify_root_item.removeChild(self.spotify_root_item.child(0))
 
-            playlist_count = len(playlists)
+            playlist_count = len(self._spotify_playlist_cache)
             self.spotify_root_item.setText(0, f"Spotify Playlists ({playlist_count})")
             self.spotify_root_item.setHidden(False)
 
             folder_items: Dict[str, QTreeWidgetItem] = {}
             widget_count = 0
 
-            for p_data in playlists:
+            for p_data in playlists_to_render:
                 if not (isinstance(p_data, dict) and "name" in p_data and "id" in p_data):
                     continue
 
@@ -717,7 +761,15 @@ class PlaylistTreeHandler(QObject):
                             if SETTINGS.showPlaylistIcons and not self.folder_icon.isNull():
                                 new_folder_item.setIcon(0, self.folder_icon)
 
-                            new_folder_item.setData(0, Qt.ItemDataRole.UserRole, {"is_folder": True})
+                            new_folder_item.setData(
+                                0,
+                                Qt.ItemDataRole.UserRole,
+                                {
+                                    "type": "spotify_folder",
+                                    "is_folder": True,
+                                    "folder_name": folder_name,
+                                },
+                            )
                             folder_items[folder_name] = new_folder_item
                         
                         parent_item = folder_items[folder_name]
@@ -807,7 +859,7 @@ class PlaylistTreeHandler(QObject):
                         widget.set_icon(self.default_music_icon)
             
             self._loadVisibleSpotifyIcons()
-            if playlists:
+            if playlists_to_render:
                 def _expand_spotify_root():
                     if self.spotify_root_item:
                         self.spotify_root_item.setExpanded(True)
@@ -1118,14 +1170,49 @@ class PlaylistTreeHandler(QObject):
             else:
                 refresh_action.setEnabled(False)
 
+        active_filter = self.filter_input_widget.text().strip()
+        if active_filter:
+            menu.addSeparator()
+            clear_filter_action = menu.addAction("Clear playlist filter")
+            if clear_filter_action:
+                clear_filter_action.triggered.connect(self.filter_input_widget.clear)
+
         menu.addSeparator()
-        sort_menu = menu.addMenu("Sort by")
+        sort_menu = menu.addMenu(f"Sort by: {self._spotify_sort_label()}")
         if sort_menu:
             sort_menu.setStyleSheet(MENU_STYLESHEET)
+            sort_action_group = QtGui.QActionGroup(sort_menu)
+            sort_action_group.setExclusive(True)
+
+            action_sort_default = sort_menu.addAction("Default Spotify order")
             action_sort_alpha = sort_menu.addAction("Alphabetical")
-            if action_sort_alpha:
-                action_sort_alpha.triggered.connect(
-                    lambda: self._sortSpotifyPlaylists("alpha")
+
+            for action, mode in (
+                (action_sort_default, "default"),
+                (action_sort_alpha, "alpha"),
+            ):
+                if action:
+                    action.setCheckable(True)
+                    action.setChecked(self._spotify_sort_mode == mode)
+                    sort_action_group.addAction(action)
+                    action.triggered.connect(
+                        lambda _checked=False, selected_mode=mode: self._sortSpotifyPlaylists(selected_mode)
+                    )
+
+        folder_items = list(self._iter_spotify_folder_items())
+        if folder_items:
+            menu.addSeparator()
+
+            expand_folders_action = menu.addAction("Expand all Spotify folders")
+            if expand_folders_action:
+                expand_folders_action.triggered.connect(
+                    lambda: self._set_spotify_folders_expanded(True)
+                )
+
+            collapse_folders_action = menu.addAction("Collapse all Spotify folders")
+            if collapse_folders_action:
+                collapse_folders_action.triggered.connect(
+                    lambda: self._set_spotify_folders_expanded(False)
                 )
 
         self._popup_context_menu(menu, global_pos)
@@ -1436,26 +1523,20 @@ class PlaylistTreeHandler(QObject):
         if not self.spotify_root_item:
             return
 
-        was_expanded = self.spotify_root_item.isExpanded()
-        child_items = []
-        for i in range(self.spotify_root_item.childCount()):
-            child_items.append(self.spotify_root_item.child(i))
-
-        if not child_items:
-            return
-
-        if sort_key == "alpha":
-            child_items.sort(key=lambda item: self._get_name_from_item(item).lower())
-        else:
+        if sort_key not in {"default", "alpha"}:
             Printf.warning(
-                f"Cannot sort Spotify playlists by '{sort_key}'. Only alphabetical sorting is currently supported for Spotify playlists."
+                f"Cannot sort Spotify playlists by '{sort_key}'. Supported modes are default and alphabetical."
             )
             return
 
-        self.spotify_root_item.takeChildren()
-        for item in child_items:
-            self.spotify_root_item.addChild(item)
-        self.spotify_root_item.setExpanded(was_expanded)
+        self._spotify_sort_mode = sort_key
+
+        if not self._spotify_playlist_cache:
+            logger.info("Spotify playlist sort mode changed to %s, but no cached playlists are loaded.", self._spotify_sort_label())
+            return
+
+        self.populate_spotify_playlists(self._spotify_playlist_cache, refresh_cache=False)
+        logger.info("Spotify playlists sorted by %s.", self._spotify_sort_label())
 
     # --- Icon Loading ---
     def _start_icon_fetch(
