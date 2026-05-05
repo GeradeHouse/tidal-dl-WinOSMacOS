@@ -76,6 +76,7 @@ METADATA_OPENAPI_BATCH_SIZE_FALLBACK = 20
 METADATA_CACHE_FLUSH_IDLE_MS = 12000
 METADATA_CACHE_FLUSH_SLOW_WARNING_MS = 3000.0
 SPOTIFY_ROW_DRAG_MIME = "application/x-tidal-dl-spotify-playlist-rows"
+TABLE_TRACKS_DRAG_MIME = "application/x-tidal-dl-table-track-rows"
 
 
 class TableHandler(QObject):
@@ -308,6 +309,22 @@ class TableHandler(QObject):
         index = self.table_widget.indexAt(pos)
         return index.row() if index.isValid() else self.table_widget.rowCount()
 
+    def _selected_table_rows_for_drag(self, fallback_row: int) -> List[int]:
+        if self._is_shutting_down or not self._table_widget_alive():
+            return []
+
+        selected_rows = list(self.table_widget.getSelectedRows())
+        if fallback_row not in selected_rows:
+            selected_rows = [fallback_row]
+
+        payloads = self.get_table_track_payloads_for_rows(selected_rows)
+        payload_row_set = {
+            int(payload.get("row_index"))
+            for payload in payloads
+            if isinstance(payload.get("row_index"), int)
+        }
+        return [row for row in selected_rows if row in payload_row_set]
+
     def _selected_spotify_rows_for_drag(self, fallback_row: int) -> List[int]:
         if self._is_shutting_down or not self._table_widget_alive():
             return []
@@ -317,8 +334,42 @@ class TableHandler(QObject):
             selected_rows = [fallback_row]
 
         payloads = self.get_spotify_track_payloads_for_rows(selected_rows)
-        payload_row_set = {int(payload.get("row_index")) for payload in payloads if isinstance(payload.get("row_index"), int)}
+        payload_row_set = {
+            int(payload.get("row_index"))
+            for payload in payloads
+            if isinstance(payload.get("row_index"), int)
+        }
         return [row for row in selected_rows if row in payload_row_set]
+
+    def _build_table_track_drag_pixmap(self, rows: List[int]) -> QtGui.QPixmap:
+        count = len(rows)
+        title = "Selected tracks"
+        if count == 1 and self._table_widget_alive():
+            title_item = self.table_widget.item(rows[0], 1)
+            if title_item and title_item.text():
+                title = title_item.text()
+
+        subtitle = f"{count} track{'s' if count != 1 else ''} ready for Spotify playlist drop"
+        pixmap = QtGui.QPixmap(360, 58)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QtGui.QColor(18, 18, 22, 235))
+        painter.setPen(QtGui.QColor(0, 200, 200, 130))
+        painter.drawRoundedRect(0, 0, 359, 57, 12, 12)
+
+        painter.setPen(QtGui.QColor("#ffffff"))
+        title_font = QtGui.QFont("Segoe UI Variable", 10, QtGui.QFont.Weight.DemiBold)
+        painter.setFont(title_font)
+        painter.drawText(QtCore.QRect(16, 9, 328, 20), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
+
+        painter.setPen(QtGui.QColor("#b9c7c7"))
+        subtitle_font = QtGui.QFont("Segoe UI Variable", 8)
+        painter.setFont(subtitle_font)
+        painter.drawText(QtCore.QRect(16, 31, 328, 18), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, subtitle)
+        painter.end()
+        return pixmap
 
     def get_spotify_drop_insert_position(self, drop_row: int) -> int:
         if self._is_shutting_down or not self._table_widget_alive():
@@ -336,18 +387,36 @@ class TableHandler(QObject):
             return int(payloads[0]["playlist_position"])
         return max(0, int(drop_row))
 
-    def _start_spotify_row_drag(self, rows: List[int]) -> bool:
+    def _start_table_row_drag(self, rows: List[int]) -> bool:
         if self._is_shutting_down or not self._table_widget_alive() or not rows:
             return False
 
+        payloads = self.get_table_track_payloads_for_rows(rows)
+        if not payloads:
+            return False
+
         mime = QtCore.QMimeData()
-        mime.setData(SPOTIFY_ROW_DRAG_MIME, QtCore.QByteArray(",".join(str(row) for row in rows).encode("utf-8")))
+        mime.setData(
+            TABLE_TRACKS_DRAG_MIME,
+            QtCore.QByteArray(json.dumps({"rows": rows}).encode("utf-8")),
+        )
+
+        spotify_payloads = self.get_spotify_track_payloads_for_rows(rows)
+        if self._active_spotify_playlist_can_reorder() and len(spotify_payloads) == len(rows):
+            mime.setData(
+                SPOTIFY_ROW_DRAG_MIME,
+                QtCore.QByteArray(",".join(str(row) for row in rows).encode("utf-8")),
+            )
 
         drag = QtGui.QDrag(self.table_widget)
         drag.setMimeData(mime)
-        drag.setPixmap(self.table_widget.grab())
+        drag.setPixmap(self._build_table_track_drag_pixmap(rows))
         drag.setHotSpot(QPoint(18, 18))
-        return drag.exec(Qt.DropAction.MoveAction) == Qt.DropAction.MoveAction
+        result = drag.exec(
+            Qt.DropAction.CopyAction | Qt.DropAction.MoveAction,
+            Qt.DropAction.CopyAction,
+        )
+        return result in (Qt.DropAction.CopyAction, Qt.DropAction.MoveAction)
 
     def eventFilter(self, watched: QObject, event: Optional[QEvent]) -> bool:
         if self._is_shutting_down or event is None or not self._table_widget_alive():
@@ -360,20 +429,29 @@ class TableHandler(QObject):
         event_type = event.type()
 
         if event_type == QEvent.Type.MouseButtonPress and isinstance(event, QtGui.QMouseEvent):
-            if event.button() == Qt.MouseButton.LeftButton and self._active_spotify_playlist_can_reorder():
+            if event.button() == Qt.MouseButton.LeftButton:
                 row = self._get_row_from_event_position(event)
-                if row is not None and row < self.table_widget.rowCount():
+                if (
+                    row is not None
+                    and row < self.table_widget.rowCount()
+                    and self._selected_table_rows_for_drag(row)
+                ):
                     self._spotify_drag_start_pos = event.pos()
                     self._spotify_drag_start_row = row
             return super().eventFilter(watched, event)
+
         if event_type == QEvent.Type.MouseMove and isinstance(event, QtGui.QMouseEvent):
-            if self._spotify_drag_start_pos is not None and self._spotify_drag_start_row is not None and event.buttons() & Qt.MouseButton.LeftButton and self._active_spotify_playlist_can_reorder():
+            if (
+                self._spotify_drag_start_pos is not None
+                and self._spotify_drag_start_row is not None
+                and event.buttons() & Qt.MouseButton.LeftButton
+            ):
                 if (event.pos() - self._spotify_drag_start_pos).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
-                    rows = self._selected_spotify_rows_for_drag(self._spotify_drag_start_row)
+                    rows = self._selected_table_rows_for_drag(self._spotify_drag_start_row)
                     self._spotify_drag_start_pos = None
                     self._spotify_drag_start_row = None
                     if rows:
-                        self._start_spotify_row_drag(rows)
+                        self._start_table_row_drag(rows)
                         return True
             return super().eventFilter(watched, event)
 
@@ -1182,6 +1260,49 @@ class TableHandler(QObject):
             if not isinstance(payload.get("playlist_position"), int):
                 payload["playlist_position"] = row
             payloads.append(payload)
+        return payloads
+
+    def get_table_track_payloads_for_rows(self, rows: List[int]) -> List[Dict[str, Any]]:
+        if not self.table_widget:
+            return []
+
+        payloads: List[Dict[str, Any]] = []
+        for row in rows:
+            title_item = self.table_widget.item(row, 1)
+            if not title_item:
+                continue
+
+            item_metadata = title_item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(item_metadata, dict) and item_metadata.get("type") == "spotify_track":
+                track_data = item_metadata.get("data", {})
+                if not isinstance(track_data, dict):
+                    continue
+                track_id = track_data.get("id")
+                uri = track_data.get("uri") or (f"spotify:track:{track_id}" if track_id else None)
+                payload = dict(track_data)
+                payload["uri"] = uri
+                payload["row_index"] = row
+                payload["source_type"] = "spotify"
+                payload["display_title"] = str(track_data.get("name") or title_item.text() or "Spotify track")
+                payloads.append(payload)
+                continue
+
+            tidal_track = item_metadata if isinstance(item_metadata, Track) else None
+            if tidal_track is None and isinstance(item_metadata, dict):
+                candidate_track = item_metadata.get("tidal_track")
+                if isinstance(candidate_track, Track):
+                    tidal_track = candidate_track
+
+            if isinstance(tidal_track, Track):
+                payloads.append(
+                    {
+                        "row_index": row,
+                        "source_type": "tidal",
+                        "display_title": str(getattr(tidal_track, "title", "") or title_item.text() or "TIDAL track"),
+                        "tidal_track": tidal_track,
+                    }
+                )
+
         return payloads
 
     @pyqtSlot(str, list)

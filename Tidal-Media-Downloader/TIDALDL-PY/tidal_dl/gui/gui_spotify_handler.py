@@ -1,4 +1,5 @@
 import datetime
+import difflib
 import logging
 import threading
 from typing import TYPE_CHECKING, Any, Callable, Optional, List, Dict, Sequence, Tuple, Union
@@ -15,6 +16,7 @@ from .gui_utils import format_duration_ms
 from .gui_custom_dialog import CustomQMessageBox
 from ..persistence import LinkPersistenceManager
 from .. import paths
+from ..linking import normalize_title, fuzzy_normalize, _titles_are_review_compatible
 
 if TYPE_CHECKING:
     from .gui_main import MainView
@@ -28,6 +30,9 @@ setup_gui_logger(__name__, logging.INFO)
 
 
 class SpotifyGuiHandler(QObject):
+    dropAddPreflightFinished = pyqtSignal(dict)
+    dropAddPreflightError = pyqtSignal(str)
+
     def __init__(self, main_view: "MainView", spotify_api: SpotifyAPI):
         super().__init__()
         self.main_view = main_view
@@ -38,6 +43,9 @@ class SpotifyGuiHandler(QObject):
 
         self._mutation_lock = threading.Lock()
         self._mutation_active = False
+        self._drop_preflight_active = False
+        self.dropAddPreflightFinished.connect(self._on_drop_add_preflight_finished)
+        self.dropAddPreflightError.connect(self._on_drop_add_preflight_error)
 
     def _spotify_dialog_stylesheet(self) -> str:
         return """
@@ -156,6 +164,15 @@ class SpotifyGuiHandler(QObject):
             table_widget = getattr(self.main_view, "tableWidget", None)
             rows = table_widget.getSelectedRows() if table_widget else []
         return table_handler.get_spotify_track_payloads_for_rows(list(rows))
+
+    def _get_selected_table_track_payloads(self, rows: Optional[Sequence[int]] = None) -> List[Dict[str, Any]]:
+        table_handler = getattr(self.main_view, "table_handler", None)
+        if not table_handler or not hasattr(table_handler, "get_table_track_payloads_for_rows"):
+            return []
+        if rows is None:
+            table_widget = getattr(self.main_view, "tableWidget", None)
+            rows = table_widget.getSelectedRows() if table_widget else []
+        return table_handler.get_table_track_payloads_for_rows(list(rows))
 
     def _get_spotify_playlist_choices(self) -> List[Dict[str, Any]]:
         tree_handler = getattr(self.main_view, "tree_handler", None)
@@ -369,14 +386,499 @@ class SpotifyGuiHandler(QObject):
             self._run_spotify_mutation("Remove Spotify playlist from library", lambda: self.spotify_api.unfollow_playlist(playlist_id))
 
     def addSelectedRowsToSpotifyPlaylist(self, playlist_data: Dict[str, Any], rows: Optional[Sequence[int]] = None) -> None:
+        self.addTableRowsToSpotifyPlaylist(playlist_data, rows)
+
+    def addTableRowsToSpotifyPlaylist(self, playlist_data: Dict[str, Any], rows: Optional[Sequence[int]] = None) -> None:
         playlist_id = str(playlist_data.get("id") or "")
         if not playlist_id:
             return
-        uris = [payload.get("uri") for payload in self._get_selected_spotify_track_payloads(rows) if payload.get("uri")]
-        if not uris:
-            CustomQMessageBox.warning(self.main_view, "Add Tracks to Spotify Playlist", "No selected Spotify track URIs were available.", "Only table rows with Spotify track URIs can be added directly to Spotify playlists.")
+        if not playlist_data.get("can_modify_items"):
+            CustomQMessageBox.warning(
+                self.main_view,
+                "Add Tracks to Spotify Playlist",
+                "This Spotify playlist cannot be modified.",
+                "Playlist ownership or collaborator access is required.",
+            )
             return
-        self._run_spotify_mutation("Add selected tracks to Spotify playlist", lambda: self.spotify_api.add_items_to_playlist(playlist_id, uris), refresh_playlist_id=playlist_id)
+
+        row_payloads = self._get_selected_table_track_payloads(rows)
+        if not row_payloads:
+            CustomQMessageBox.warning(
+                self.main_view,
+                "Add Tracks to Spotify Playlist",
+                "No draggable table tracks were available.",
+                "Select one or more TIDAL/search/Spotify track rows and drop them on a modifiable Spotify playlist.",
+            )
+            return
+
+        with self._mutation_lock:
+            if self._mutation_active or self._drop_preflight_active:
+                CustomQMessageBox.warning(
+                    self.main_view,
+                    "Spotify Action Running",
+                    "Another Spotify playlist action is already running.",
+                    "Wait for the current Spotify action to finish before starting another one.",
+                )
+                return
+            self._drop_preflight_active = True
+
+        self.main_view.spotify_mutation_active = True
+        self._set_mutation_controls_enabled(False)
+        self._show_spotify_status("Spotify: preparing dropped tracks...", "info", timeout_ms=0)
+
+        def _preflight_thread() -> None:
+            try:
+                result = self._prepare_drop_add_preflight(playlist_data, row_payloads)
+                self.dropAddPreflightFinished.emit(result)
+            except Exception as exc:
+                logger.error("Spotify drop preflight failed: %s", exc, exc_info=True)
+                self.dropAddPreflightError.emit(str(exc))
+
+        threading.Thread(target=_preflight_thread, daemon=True).start()
+
+    def _reset_drop_preflight_state(self) -> None:
+        with self._mutation_lock:
+            self._drop_preflight_active = False
+        self.main_view.spotify_mutation_active = False
+        self._set_mutation_controls_enabled(True)
+
+    def _tidal_track_drop_metadata(self, track: Track) -> Dict[str, Any]:
+        artists_raw = getattr(track, "artists", None)
+        if not isinstance(artists_raw, list):
+            artists_raw = [getattr(track, "artist", None)]
+
+        try:
+            artists_text = TIDAL_API.getArtistsName([artist for artist in artists_raw if artist is not None])
+        except Exception:
+            artists_text = ""
+
+        artists = [part.strip() for part in artists_text.split(",") if part.strip()]
+        album_obj = getattr(track, "album", None)
+        duration_seconds = getattr(track, "duration", None)
+        duration_ms = int(float(duration_seconds) * 1000) if duration_seconds else None
+
+        return {
+            "title": str(getattr(track, "title", "") or ""),
+            "artists": artists,
+            "album": str(getattr(album_obj, "title", "") or ""),
+            "duration_ms": duration_ms,
+            "isrc": getattr(track, "isrc", None),
+            "track": track,
+        }
+
+    def _score_spotify_candidate_for_tidal(self, tidal_meta: Dict[str, Any], candidate: Dict[str, Any]) -> Tuple[int, List[str]]:
+        score = 0
+        reasons: List[str] = []
+
+        tidal_isrc = str(tidal_meta.get("isrc") or "").strip().upper()
+        candidate_isrc = str(candidate.get("isrc") or "").strip().upper()
+        if tidal_isrc and candidate_isrc and tidal_isrc == candidate_isrc:
+            return 0, []
+
+        title_ok, similarity_ratio, token_overlap = _titles_are_review_compatible(
+            tidal_meta.get("title"),
+            candidate.get("name"),
+        )
+        if not title_ok:
+            score += 4
+            reasons.append("Title mismatch")
+        elif similarity_ratio is not None and similarity_ratio < 0.92:
+            score += 1
+            reasons.append("Title differs")
+
+        tidal_artists = [fuzzy_normalize(artist) for artist in tidal_meta.get("artists", []) if artist]
+        candidate_artists = [fuzzy_normalize(artist) for artist in candidate.get("artists", []) if artist]
+        if tidal_artists and candidate_artists:
+            artist_match = any(
+                left == right or left in right or right in left
+                for left in tidal_artists
+                for right in candidate_artists
+            )
+            if not artist_match:
+                best_ratio = max(
+                    (
+                        difflib.SequenceMatcher(None, left, right).ratio()
+                        for left in tidal_artists
+                        for right in candidate_artists
+                    ),
+                    default=0.0,
+                )
+                if best_ratio < 0.78:
+                    score += 3
+                    reasons.append("Artist mismatch")
+                else:
+                    score += 1
+                    reasons.append("Artist differs")
+
+        tidal_duration = tidal_meta.get("duration_ms")
+        candidate_duration = candidate.get("duration_ms")
+        if isinstance(tidal_duration, int) and isinstance(candidate_duration, int):
+            duration_diff_ms = abs(tidal_duration - candidate_duration)
+            if duration_diff_ms > 60000:
+                score += 3
+                reasons.append("Duration > 60s")
+            elif duration_diff_ms > 30000:
+                score += 2
+                reasons.append("Duration > 30s")
+            elif duration_diff_ms > 8000:
+                score += 1
+                reasons.append("Duration differs")
+
+        tidal_album = fuzzy_normalize(str(tidal_meta.get("album") or ""))
+        candidate_album = fuzzy_normalize(str(candidate.get("album") or ""))
+        if tidal_album and candidate_album and tidal_album != candidate_album:
+            score += 1
+            reasons.append("Album differs")
+
+        if token_overlap < 0.60:
+            score += 1
+            reasons.append("Low title token overlap")
+
+        return score, reasons
+
+    def _resolve_tidal_track_to_spotify_candidates(self, track: Track) -> Dict[str, Any]:
+        tidal_meta = self._tidal_track_drop_metadata(track)
+        title = str(tidal_meta.get("title") or "").strip()
+        artists = tidal_meta.get("artists", [])
+        primary_artist = artists[0] if artists else ""
+        album = str(tidal_meta.get("album") or "").strip()
+
+        queries = []
+        if title and primary_artist:
+            queries.append(f"{title} {primary_artist}")
+        if title and album:
+            queries.append(f"{title} {album}")
+        if title:
+            queries.append(title)
+
+        seen_queries: set[str] = set()
+        seen_ids: set[str] = set()
+        scored_candidates: List[Dict[str, Any]] = []
+        for query in queries:
+            normalized_query = normalize_title(query).lower()
+            if normalized_query in seen_queries:
+                continue
+            seen_queries.add(normalized_query)
+            for candidate in self.spotify_api.search_tracks(query, limit=12):
+                candidate_id = str(candidate.get("id") or candidate.get("uri") or "")
+                if not candidate_id or candidate_id in seen_ids:
+                    continue
+                seen_ids.add(candidate_id)
+                score, reasons = self._score_spotify_candidate_for_tidal(tidal_meta, candidate)
+                if score <= 4:
+                    scored_candidates.append(
+                        {
+                            "track": candidate,
+                            "score": score,
+                            "mismatch_reasons": reasons,
+                        }
+                    )
+
+        scored_candidates.sort(key=lambda item: (int(item.get("score", 99)), str(item.get("track", {}).get("name", ""))))
+        auto_candidate = scored_candidates[0] if scored_candidates and int(scored_candidates[0].get("score", 99)) <= 1 else None
+
+        return {
+            "source": tidal_meta,
+            "auto_candidate": auto_candidate,
+            "candidates": scored_candidates[:6],
+        }
+
+    def _prepare_drop_add_preflight(self, playlist_data: Dict[str, Any], row_payloads: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        playlist_id = str(playlist_data.get("id") or "")
+        existing_tracks = self.spotify_api.get_playlist_tracks(playlist_id) or []
+        existing_uris = {
+            str(track.get("uri") or "").strip()
+            for track in existing_tracks
+            if isinstance(track, dict) and str(track.get("uri") or "").strip()
+        }
+
+        resolved: List[Dict[str, Any]] = []
+        needs_review: List[Dict[str, Any]] = []
+        no_matches: List[Dict[str, Any]] = []
+
+        for payload in row_payloads:
+            source_type = payload.get("source_type")
+            if source_type == "spotify":
+                uri = str(payload.get("uri") or "").strip()
+                if uri:
+                    resolved.append(
+                        {
+                            "uri": uri,
+                            "spotify_track": dict(payload),
+                            "source_title": str(payload.get("display_title") or payload.get("name") or "Spotify track"),
+                            "source_type": "spotify",
+                        }
+                    )
+                continue
+
+            tidal_track = payload.get("tidal_track")
+            if isinstance(tidal_track, Track):
+                resolution = self._resolve_tidal_track_to_spotify_candidates(tidal_track)
+                auto_candidate = resolution.get("auto_candidate")
+                if isinstance(auto_candidate, dict) and isinstance(auto_candidate.get("track"), dict):
+                    spotify_track = auto_candidate["track"]
+                    resolved.append(
+                        {
+                            "uri": str(spotify_track.get("uri") or ""),
+                            "spotify_track": spotify_track,
+                            "source_title": str(resolution.get("source", {}).get("title") or payload.get("display_title") or "TIDAL track"),
+                            "source_type": "tidal",
+                            "score": auto_candidate.get("score"),
+                            "mismatch_reasons": auto_candidate.get("mismatch_reasons", []),
+                        }
+                    )
+                elif resolution.get("candidates"):
+                    needs_review.append(resolution)
+                else:
+                    no_matches.append(
+                        {
+                            "source_title": str(payload.get("display_title") or getattr(tidal_track, "title", "") or "TIDAL track"),
+                            "source_type": "tidal",
+                        }
+                    )
+
+        return {
+            "playlist_data": dict(playlist_data),
+            "resolved": resolved,
+            "needs_review": needs_review,
+            "no_matches": no_matches,
+            "existing_uris": list(existing_uris),
+        }
+
+    def _candidate_display_text(self, candidate: Dict[str, Any]) -> str:
+        track = candidate.get("track", {})
+        artists = ", ".join(track.get("artists", []) or [])
+        duration = format_duration_ms(track.get("duration_ms"))
+        reasons = ", ".join(candidate.get("mismatch_reasons", []) or ["Close match"])
+        return f"{track.get('name', 'Unknown Track')} — {artists} · {track.get('album', 'Unknown Album')} · {duration} · score {candidate.get('score')} · {reasons}"
+
+    def _choose_spotify_candidates_for_drop(self, needs_review: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not needs_review:
+            return []
+
+        dialog = QtWidgets.QDialog(self.main_view)
+        dialog.setWindowTitle("Review Spotify Matches")
+        dialog.setStyleSheet(self._spotify_dialog_stylesheet())
+        dialog.setMinimumSize(760, 560)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(12)
+
+        header = QtWidgets.QLabel("Review Spotify matches before adding tracks")
+        header.setStyleSheet("font-size: 16px; font-weight: 800;")
+        layout.addWidget(header)
+
+        intro = QtWidgets.QLabel("Some TIDAL/search rows need manual Spotify match selection. Rows left on “Skip this track” will not be added.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+
+        content = QtWidgets.QWidget()
+        content_layout = QtWidgets.QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+
+        combo_rows: List[Tuple[Dict[str, Any], QtWidgets.QComboBox]] = []
+        for review_item in needs_review:
+            source = review_item.get("source", {})
+            source_title = str(source.get("title") or "TIDAL track")
+            source_artists = ", ".join(source.get("artists", []) or [])
+            source_label = QtWidgets.QLabel(f"{source_title} — {source_artists}")
+            source_label.setStyleSheet("font-weight: 700; color: #ffffff;")
+            content_layout.addWidget(source_label)
+
+            combo = QtWidgets.QComboBox()
+            combo.addItem("Skip this track", None)
+            for candidate in review_item.get("candidates", []):
+                combo.addItem(self._candidate_display_text(candidate), candidate)
+            content_layout.addWidget(combo)
+            combo_rows.append((review_item, combo))
+
+        content_layout.addStretch()
+        scroll_area.setWidget(content)
+        layout.addWidget(scroll_area, 1)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return []
+
+        selected: List[Dict[str, Any]] = []
+        for review_item, combo in combo_rows:
+            candidate = combo.currentData()
+            if not isinstance(candidate, dict) or not isinstance(candidate.get("track"), dict):
+                continue
+            spotify_track = candidate["track"]
+            selected.append(
+                {
+                    "uri": str(spotify_track.get("uri") or ""),
+                    "spotify_track": spotify_track,
+                    "source_title": str(review_item.get("source", {}).get("title") or "TIDAL track"),
+                    "source_type": "tidal",
+                    "score": candidate.get("score"),
+                    "mismatch_reasons": candidate.get("mismatch_reasons", []),
+                }
+            )
+        return selected
+
+    def _confirm_drop_add_mode(self, playlist_name: str, resolved: Sequence[Dict[str, Any]], duplicate_count: int) -> Optional[str]:
+        total_count = len(resolved)
+        if total_count <= 0:
+            return None
+
+        if duplicate_count <= 0:
+            if total_count == 1:
+                track_name = str(resolved[0].get("source_title") or "Selected track")
+                accepted = CustomQMessageBox.question(
+                    self.main_view,
+                    "Add Track to Spotify Playlist",
+                    f"Add “{track_name}” to “{playlist_name}”?",
+                    "This action modifies the connected Spotify playlist.",
+                )
+            else:
+                accepted = CustomQMessageBox.question(
+                    self.main_view,
+                    "Add Tracks to Spotify Playlist",
+                    f"Add {total_count} selected tracks to “{playlist_name}”?",
+                    "This action modifies the connected Spotify playlist.",
+                )
+            return "append_all" if accepted else None
+
+        dialog = QtWidgets.QDialog(self.main_view)
+        dialog.setWindowTitle("Duplicates Found")
+        dialog.setStyleSheet(self._spotify_dialog_stylesheet())
+        dialog.setMinimumWidth(560)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(12)
+
+        title = QtWidgets.QLabel("Spotify playlist duplicates found")
+        title.setStyleSheet("font-size: 16px; font-weight: 800;")
+        layout.addWidget(title)
+
+        message = QtWidgets.QLabel(
+            f"{duplicate_count} of {total_count} selected track(s) already exist in “{playlist_name}”."
+        )
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        hint = QtWidgets.QLabel("Choose whether duplicate occurrences should still be added, or add only tracks that are not already present.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #c8c8c8;")
+        layout.addWidget(hint)
+
+        choice: Dict[str, Optional[str]] = {"value": None}
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addStretch()
+
+        add_duplicates_button = QtWidgets.QPushButton("Add duplicates")
+        only_new_button = QtWidgets.QPushButton("Only new tracks")
+        cancel_button = QtWidgets.QPushButton("Cancel")
+
+        add_duplicates_button.clicked.connect(lambda: (choice.update({"value": "append_all"}), dialog.accept()))
+        only_new_button.clicked.connect(lambda: (choice.update({"value": "new_only"}), dialog.accept()))
+        cancel_button.clicked.connect(dialog.reject)
+
+        buttons.addWidget(add_duplicates_button)
+        buttons.addWidget(only_new_button)
+        buttons.addWidget(cancel_button)
+        layout.addLayout(buttons)
+
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return None
+        return choice.get("value")
+
+    @pyqtSlot(dict)
+    def _on_drop_add_preflight_finished(self, result: Dict[str, Any]) -> None:
+        self._reset_drop_preflight_state()
+
+        playlist_data = result.get("playlist_data", {})
+        playlist_id = str(playlist_data.get("id") or "")
+        playlist_name = str(playlist_data.get("name") or "Spotify playlist")
+        resolved = list(result.get("resolved", []) or [])
+        no_matches = list(result.get("no_matches", []) or [])
+        existing_uris = {str(uri).strip() for uri in result.get("existing_uris", []) if str(uri).strip()}
+
+        reviewed = self._choose_spotify_candidates_for_drop(result.get("needs_review", []) or [])
+        resolved.extend(reviewed)
+
+        clean_resolved = [
+            item for item in resolved
+            if str(item.get("uri") or "").strip()
+        ]
+
+        if not clean_resolved:
+            detail = ""
+            if no_matches:
+                detail = f"{len(no_matches)} TIDAL/search track(s) had no Spotify match."
+            CustomQMessageBox.warning(
+                self.main_view,
+                "Add Tracks to Spotify Playlist",
+                "No Spotify tracks were available to add.",
+                detail,
+            )
+            self._show_spotify_status("Spotify: no tracks were added.", "warning")
+            return
+
+        duplicate_count = sum(1 for item in clean_resolved if str(item.get("uri") or "").strip() in existing_uris)
+        mode = self._confirm_drop_add_mode(playlist_name, clean_resolved, duplicate_count)
+        if not mode:
+            self._show_spotify_status("Spotify: playlist add cancelled.", "warning")
+            return
+
+        if mode == "new_only":
+            clean_resolved = [
+                item for item in clean_resolved
+                if str(item.get("uri") or "").strip() not in existing_uris
+            ]
+
+        if not clean_resolved:
+            CustomQMessageBox.information(
+                self.main_view,
+                "Add Tracks to Spotify Playlist",
+                "No new tracks to add.",
+                "All selected tracks already exist in the target Spotify playlist.",
+            )
+            self._show_spotify_status("Spotify: all selected tracks already exist in the playlist.", "warning")
+            return
+
+        uris = [str(item.get("uri")).strip() for item in clean_resolved if str(item.get("uri") or "").strip()]
+        skipped_count = len(no_matches) + max(0, len(result.get("needs_review", []) or []) - len(reviewed))
+
+        def _operation() -> Dict[str, Any]:
+            add_result = self.spotify_api.add_items_to_playlist(playlist_id, uris)
+            if add_result.get("success"):
+                suffix = f" Skipped {skipped_count} unresolved track(s)." if skipped_count else ""
+                add_result["message"] = f"Added {len(uris)} track(s) to “{playlist_name}”.{suffix}"
+            return add_result
+
+        self._run_spotify_mutation(
+            "Add dropped tracks to Spotify playlist",
+            _operation,
+            refresh_playlist_id=playlist_id,
+        )
+
+    @pyqtSlot(str)
+    def _on_drop_add_preflight_error(self, error_message: str) -> None:
+        self._reset_drop_preflight_state()
+        self._show_spotify_status(f"Spotify error: {error_message}", "error")
+        CustomQMessageBox.critical(
+            self.main_view,
+            "Spotify Drop Error",
+            "Could not prepare dropped tracks.",
+            error_message,
+        )
 
     def addSelectedRowsToChosenSpotifyPlaylist(self, rows: Sequence[int]) -> None:
         playlist_data = self._choose_spotify_playlist("Add Selected Tracks to Spotify Playlist")
@@ -384,9 +886,20 @@ class SpotifyGuiHandler(QObject):
             self.addSelectedRowsToSpotifyPlaylist(playlist_data, rows)
 
     def createSpotifyPlaylistFromSelectedRows(self, rows: Sequence[int]) -> None:
-        uris = [payload.get("uri") for payload in self._get_selected_spotify_track_payloads(rows) if payload.get("uri")]
+        payloads = self._get_selected_table_track_payloads(rows)
+        spotify_payloads = [payload for payload in payloads if payload.get("source_type") == "spotify" and payload.get("uri")]
+        if len(spotify_payloads) != len(payloads):
+            CustomQMessageBox.warning(
+                self.main_view,
+                "Create Spotify Playlist",
+                "Only already-linked Spotify rows can create a playlist directly.",
+                "Use drag/drop onto an existing Spotify playlist for TIDAL/search rows so match review can run first.",
+            )
+            return
+
+        uris = [str(payload.get("uri")).strip() for payload in spotify_payloads if str(payload.get("uri") or "").strip()]
         if not uris:
-            CustomQMessageBox.warning(self.main_view, "Create Spotify Playlist", "No selected Spotify track URIs were available.", "Only table rows with Spotify track URIs can be used for this action.")
+            CustomQMessageBox.warning(self.main_view, "Create Spotify Playlist", "No selected Spotify track URIs were available.")
             return
         name = self._prompt_text("Create Spotify Playlist from Selection", "Enter a name for the playlist created from selected rows:")
         if not name:

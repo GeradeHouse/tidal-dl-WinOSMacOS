@@ -10,6 +10,8 @@
 @Desc    :   Manages the playlist QTreeWidget in the GUI.
 """
 
+import contextlib
+import json
 import logging
 import os
 import sys
@@ -106,6 +108,7 @@ MENU_STYLESHEET = """
         margin: 4px 0px;
     }
 """
+TABLE_TRACKS_DRAG_MIME = "application/x-tidal-dl-table-track-rows"
 
 # --- Custom Delegate for Playlist Tree Items ---
 class PlaylistDelegate(QtWidgets.QStyledItemDelegate):
@@ -311,6 +314,7 @@ class PlaylistTreeHandler(QObject):
         self.original_item_data: Dict[str, Dict[str, Any]] = {}
         self._spotify_playlist_cache: List[Dict[str, Any]] = []
         self._spotify_sort_mode = "default"
+        self._spotify_drop_target_item: Optional[QTreeWidgetItem] = None
         self.active_job_actions: Dict[str, str] = {}  # Track active job actions per playlist ID
         self.active_job_totals: Dict[str, int] = {}   # Track total items per playlist ID
         self._pending_geometry_playlist_ids: Set[str] = set()
@@ -389,6 +393,105 @@ class PlaylistTreeHandler(QObject):
         )
         return selected_count > 1 or modifier_multi_select
 
+    def _clear_spotify_playlist_drop_target(self) -> None:
+        item = self._spotify_drop_target_item
+        if item is not None:
+            with contextlib.suppress(RuntimeError):
+                item.setBackground(0, QBrush())
+        self._spotify_drop_target_item = None
+
+    def _set_spotify_playlist_drop_target(self, item: Optional[QTreeWidgetItem]) -> None:
+        if item is self._spotify_drop_target_item:
+            return
+        self._clear_spotify_playlist_drop_target()
+        if item is not None:
+            item.setBackground(0, QBrush(QColor(0, 200, 200, 70)))
+            self._spotify_drop_target_item = item
+
+    def _spotify_playlist_payload_for_drop_item(self, item: Optional[QTreeWidgetItem]) -> Optional[Dict[str, Any]]:
+        if item is None:
+            return None
+        item_data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(item_data, dict):
+            return None
+        if item_data.get("type") != "spotify":
+            return None
+        playlist_data = item_data.get("data")
+        if not isinstance(playlist_data, dict):
+            return None
+        if not playlist_data.get("can_modify_items"):
+            return None
+        return playlist_data
+
+    def _drag_rows_from_table_mime(self, event: QtCore.QEvent) -> List[int]:
+        if not isinstance(event, (QtGui.QDragEnterEvent, QtGui.QDragMoveEvent, QtGui.QDropEvent)):
+            return []
+        mime_data = event.mimeData()
+        if not mime_data or not mime_data.hasFormat(TABLE_TRACKS_DRAG_MIME):
+            return []
+        try:
+            raw_payload = bytes(mime_data.data(TABLE_TRACKS_DRAG_MIME)).decode("utf-8")
+            payload = json.loads(raw_payload)
+            rows = payload.get("rows", [])
+            return [int(row) for row in rows if isinstance(row, int) or str(row).isdigit()]
+        except Exception:
+            logger.warning("Could not parse table-track drag payload.", exc_info=True)
+            return []
+
+    def eventFilter(self, watched: QObject, event: Optional[QEvent]) -> bool:
+        if event is None:
+            return super().eventFilter(watched, event)
+
+        viewport = self.tree_widget.viewport()
+        if watched is viewport and event.type() in (
+            QEvent.Type.DragEnter,
+            QEvent.Type.DragMove,
+            QEvent.Type.DragLeave,
+            QEvent.Type.Drop,
+        ):
+            if event.type() == QEvent.Type.DragLeave:
+                self._clear_spotify_playlist_drop_target()
+                return super().eventFilter(watched, event)
+
+            rows = self._drag_rows_from_table_mime(event)
+            if not rows:
+                self._clear_spotify_playlist_drop_target()
+                return super().eventFilter(watched, event)
+
+            pos = (
+                event.position().toPoint()
+                if hasattr(event, "position")
+                else event.pos()
+                if hasattr(event, "pos")
+                else QPoint()
+            )
+            target_item = self.tree_widget.itemAt(pos)
+            playlist_data = self._spotify_playlist_payload_for_drop_item(target_item)
+
+            if isinstance(event, (QtGui.QDragEnterEvent, QtGui.QDragMoveEvent)):
+                if playlist_data:
+                    self._set_spotify_playlist_drop_target(target_item)
+                    event.setDropAction(Qt.DropAction.CopyAction)
+                    event.accept()
+                    return True
+                self._clear_spotify_playlist_drop_target()
+                event.ignore()
+                return True
+
+            if event.type() == QEvent.Type.Drop and isinstance(event, QtGui.QDropEvent):
+                self._clear_spotify_playlist_drop_target()
+                if playlist_data:
+                    spotify_handler = getattr(self.main_view, "spotify_gui_handler", None)
+                    if spotify_handler:
+                        spotify_handler.addTableRowsToSpotifyPlaylist(playlist_data, rows)
+                    event.setDropAction(Qt.DropAction.CopyAction)
+                    event.accept()
+                    return True
+                event.ignore()
+                return True
+
+        return super().eventFilter(watched, event)
+
     def set_task_queue_manager(self, manager: "TaskQueueManager"):
         self.task_queue_manager = manager
 
@@ -408,6 +511,10 @@ class PlaylistTreeHandler(QObject):
         self.tree_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree_widget.setIndentation(15)
         self.tree_widget.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree_widget.setAcceptDrops(True)
+        self.tree_widget.setDropIndicatorShown(True)
+        self.tree_widget.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+        self.tree_widget.setDefaultDropAction(Qt.DropAction.CopyAction)
 
         self.playlist_delegate = PlaylistDelegate(self, self.tree_widget)
         self.tree_widget.setItemDelegate(self.playlist_delegate)
@@ -482,6 +589,11 @@ class PlaylistTreeHandler(QObject):
         scrollbar = self.tree_widget.verticalScrollBar()
         if scrollbar:
             scrollbar.valueChanged.connect(self._onSpotifyScroll)
+
+        viewport = self.tree_widget.viewport()
+        if viewport:
+            viewport.setAcceptDrops(True)
+            viewport.installEventFilter(self)
         
         self.filter_input_widget.textChanged.connect(self._apply_playlist_filter)
 

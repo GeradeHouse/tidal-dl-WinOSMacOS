@@ -744,6 +744,73 @@ class SpotifyAPI:
             logger.error("Check log file for detailed traceback.")
             return None
 
+    def search_tracks(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Search Spotify tracks and return normalized track dictionaries."""
+        if not self._ensure_client():
+            logger.error("Authentication failed within search_tracks.")
+            return []
+
+        clean_query = str(query or "").strip()
+        if not clean_query:
+            return []
+
+        try:
+            results = self.sp.search(q=clean_query, type="track", limit=max(1, min(int(limit), 50)))
+            items = (
+                results.get("tracks", {}).get("items", [])
+                if isinstance(results, dict)
+                else []
+            )
+            tracks: List[Dict[str, Any]] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+
+                album_info = item.get("album", {})
+                external_ids = item.get("external_ids", {})
+                artists = item.get("artists", [])
+                track_id = item.get("id")
+                uri = item.get("uri") or (f"spotify:track:{track_id}" if track_id else None)
+
+                if not uri:
+                    continue
+
+                tracks.append(
+                    {
+                        "id": track_id,
+                        "uri": uri,
+                        "name": item.get("name", "Unknown Track"),
+                        "artists": [
+                            artist.get("name", "Unknown Artist")
+                            for artist in artists
+                            if isinstance(artist, dict)
+                        ],
+                        "album": (
+                            album_info.get("name", "Unknown Album")
+                            if isinstance(album_info, dict)
+                            else "Unknown Album"
+                        ),
+                        "duration_ms": item.get("duration_ms"),
+                        "isrc": (
+                            external_ids.get("isrc")
+                            if isinstance(external_ids, dict)
+                            else None
+                        ),
+                    }
+                )
+            return tracks
+        except spotipy.SpotifyException as exc:
+            logger.error(
+                "Spotify API error searching tracks: %s - %s",
+                exc.http_status,
+                exc.msg,
+                exc_info=True,
+            )
+            return []
+        except Exception as exc:
+            logger.error("Unexpected error searching Spotify tracks: %s", exc, exc_info=True)
+            return []
+
     def create_playlist(
         self,
         name: str,
