@@ -62,8 +62,8 @@ from .gui_table_candidate_widget import CandidateWidget
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)  # Set specific level for this module
 
-TABLE_ROW_HEIGHT = 40
-TABLE_COVER_ICON_SIZE = 28
+TABLE_ROW_HEIGHT = 36
+TABLE_COVER_ICON_SIZE = 26
 
 _CAMELOT_WHEEL_COLORS: Dict[int, str] = {
     1: "#e53935",
@@ -125,6 +125,8 @@ class SplitterTable(QtWidgets.QTableWidget):
         self.setObjectName("splitterTrackTable")
         self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self.setLineWidth(0)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
         self.viewport().setAutoFillBackground(False)
         self.viewport().setStyleSheet("background: transparent; border: none;")
         self.setSortingEnabled(True)  # Enable sorting
@@ -166,7 +168,7 @@ class SplitterTable(QtWidgets.QTableWidget):
         self.setShowGrid(False)
         self.setGridStyle(Qt.PenStyle.NoPen)
         self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.verticalScrollBar().setSingleStep(18)
+        self.verticalScrollBar().setSingleStep(14)
         # Use ExtendedSelection to allow selecting multiple rows.
         self.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
@@ -180,7 +182,7 @@ class SplitterTable(QtWidgets.QTableWidget):
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )  # Disable editing
         self.setItemDelegate(HighlightPreservingDelegate(self))  # Add this line
-        self.setWordWrap(True)
+        self.setWordWrap(False)
         self.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.setAlternatingRowColors(False)
         self.setStyleSheet(
@@ -200,7 +202,7 @@ class SplitterTable(QtWidgets.QTableWidget):
                 padding: 0px;
             }
             QTableWidget#splitterTrackTable::item:hover {
-                background-color: rgba(255, 255, 255, 0.035);
+                background-color: transparent;
                 border: none;
             }
             QTableWidget#splitterTrackTable::item:selected {
@@ -271,6 +273,7 @@ class SplitterTable(QtWidgets.QTableWidget):
         self.selectedRows = set()
         self.lastClickedRow = None
         self._selection_before_mouse_press = set()
+        self._hoveredRow = -1
 
         # Variables for mouse–based toggling.
         self._mousePressPos = None
@@ -309,6 +312,7 @@ class SplitterTable(QtWidgets.QTableWidget):
         self.selectedRows.clear()
         self.lastClickedRow = None
         self._selection_before_mouse_press = set()
+        self._hoveredRow = -1
 
     def _is_toggle_selection_modifier(self, modifiers) -> bool:
         """Return True when the platform toggle-selection modifier is pressed."""
@@ -557,18 +561,33 @@ class SplitterTable(QtWidgets.QTableWidget):
             self._dragging = False
         super().mousePressEvent(e)
 
+    def _set_hovered_row(self, row: int) -> None:
+        if row == self._hoveredRow:
+            return
+        old_row = self._hoveredRow
+        self._hoveredRow = row
+        for affected_row in (old_row, row):
+            if 0 <= affected_row < self.rowCount():
+                self.viewport().update(self.visualItemRect(self.item(affected_row, 0)))
+
     # Fix parameter name mismatch: event -> e
     def mouseMoveEvent(self, e: QtGui.QMouseEvent | None):
         """
         Monitors mouse movement to determine if the user is dragging.
         """
         if e:
+            index = self.indexAt(e.pos())
+            self._set_hovered_row(index.row() if index.isValid() else -1)
             super().mouseMoveEvent(e)
             if self._mousePressPos is not None and not self._dragging:
                 if (
                     e.pos() - self._mousePressPos
                 ).manhattanLength() > self.drag_threshold:
                     self._dragging = True
+
+    def leaveEvent(self, a0: QtCore.QEvent | None) -> None:
+        self._set_hovered_row(-1)
+        super().leaveEvent(a0)
 
     # Fix parameter name mismatch: event -> e
     def mouseReleaseEvent(self, e: QtGui.QMouseEvent | None):

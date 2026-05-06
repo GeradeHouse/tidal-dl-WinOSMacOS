@@ -13,7 +13,7 @@ from typing import Optional
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 
-TABLE_TEXT_MARGIN = 1
+TABLE_TEXT_MARGIN = 0
 
 # --- Setup Logging ---
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
     ) -> QtCore.QSize:
         """Keep rows compact and single-line."""
         size = super().sizeHint(option, index)
-        size.setHeight(max(size.height(), 40))
+        size.setHeight(max(size.height(), 36))
         return size
 
     def paint(
@@ -110,9 +110,13 @@ class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
         style: QtWidgets.QStyle = actual_style
         # --- END FIX ---
 
-        # Copy the incoming option so we don't mutate it in place
+        # Copy the incoming option so the original option remains unchanged.
         opt = QtWidgets.QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
+
+        hovered_row = getattr(option.widget, "_hoveredRow", -1) if option.widget is not None else -1
+        if hovered_row == index.row() and not (opt.state & QtWidgets.QStyle.StateFlag.State_Selected):
+            opt.state |= QtWidgets.QStyle.StateFlag.State_MouseOver
 
         foreground_brush = self._foreground_brush(index)
         if foreground_brush is not None:

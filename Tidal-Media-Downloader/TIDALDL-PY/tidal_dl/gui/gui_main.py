@@ -441,7 +441,7 @@ class MainView(QWidget):
             "QWidget#playlistTableContainer { background: transparent; border: none; }"
         )
         self.playlistTableLayout = QVBoxLayout(self.playlistTableContainer)
-        self.playlistTableLayout.setContentsMargins(0, 0, 0, 0)
+        self.playlistTableLayout.setContentsMargins(0, 0, 14, 0)
         self.playlistTableLayout.setSpacing(0)
 
         self.playlistHeaderWidget = PlaylistTableHeaderWidget(self.playlistTableContainer)
@@ -706,7 +706,7 @@ class MainView(QWidget):
         self._set_search_results_page("tracks")
 
         self.funcGrid = QVBoxLayout()
-        self.funcGrid.setContentsMargins(6, 0, 6, 10)
+        self.funcGrid.setContentsMargins(6, 0, 12, 10)
         self.funcGrid.setSpacing(0)
         searchBarLayout = QHBoxLayout()
         searchBarLayout.addStretch(1)
