@@ -30,6 +30,7 @@ from tidal_dl.tidal import Type, Track, Playlist, Album, AudioQuality, TIDAL_API
 from tidal_dl.printf import Printf
 from tidal_dl.gui.gui_utils import format_duration_ms
 from tidal_dl.gui.gui_custom_dialog import CustomQMessageBox
+from tidal_dl.gui.gui_cover_cache import CoverArtWorker
 from tidal_dl.persistence import LinkPersistenceManager
 from tidal_dl.format import getAudioTypeFolder, getTrackPath
 from tidal_dl.paths import get_user_download_path
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
     from tidal_dl.gui.gui_main import MainView
     from tidal_dl.gui.gui_download import DownloadHandler
     from tidal_dl.gui.gui_linking_handler import LinkingGuiHandler
+    from tidal_dl.gui.gui_playlist_table_header import PlaylistTableHeaderWidget
 
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,14 @@ class TableHandler(QObject):
 
         self.trackMetadataResolved.connect(self._on_track_metadata_resolved)
         self.completedStatusResolved.connect(self._on_completed_status_resolved)
+        self.playlist_header_widget: Optional["PlaylistTableHeaderWidget"] = None
+        self._playlist_cover_generation = 0
+        self._row_cover_generation = 0
+        self._active_playlist_filter_text = ""
+        self._clearing_playlist_header = False
+        self._playlist_filter_timer = QTimer(self)
+        self._playlist_filter_timer.setSingleShot(True)
+        self._playlist_filter_timer.timeout.connect(self._apply_playlist_filter_now)
 
         if self.table_widget:
             self._connect_table_signals()
@@ -486,6 +496,8 @@ class TableHandler(QObject):
         return super().eventFilter(watched, event)
 
     def clear_table(self):
+        self._row_cover_generation += 1
+        self._hide_playlist_header()
         if not self.table_widget:
             return
         self._visible_metadata_refresh_timer.stop()
@@ -1226,6 +1238,7 @@ class TableHandler(QObject):
             self.main_view.s_array = tracks
             self.main_view.s_type = Type.Track
             self._populate_table_generic(tracks, Type.Track)
+            self._show_playlist_header_for_tracks(tracks)
         if self.linking_handler:
             self.linking_handler.update_link_button_state()
         if self.download_handler:
@@ -1388,6 +1401,177 @@ class TableHandler(QObject):
             share_url,
         )
 
+    def set_playlist_header_widget(self, widget: "PlaylistTableHeaderWidget") -> None:
+        self.playlist_header_widget = widget
+
+    def _hide_playlist_header(self) -> None:
+        self._active_playlist_filter_text = ""
+        if self.playlist_header_widget is not None:
+            self._clearing_playlist_header = True
+            try:
+                self.playlist_header_widget.clear_playlist()
+            finally:
+                self._clearing_playlist_header = False
+
+    def _show_playlist_header_for_tracks(self, tracks: List[Any]) -> None:
+        widget = self.playlist_header_widget
+        context = getattr(self.main_view, "s_playlist_obj", None)
+        if widget is None or not getattr(self.main_view, "s_playlist", False) or context is None:
+            self._hide_playlist_header()
+            return
+
+        widget.set_playlist_context(context, tracks or [])
+        self._request_playlist_header_cover(context)
+
+    def _best_spotify_image_url(self, images: Any, prefer_small: bool = False) -> str:
+        if not isinstance(images, list):
+            return ""
+        valid_images = [image for image in images if isinstance(image, dict) and str(image.get("url") or "").strip()]
+        if not valid_images:
+            return ""
+        sorted_images = sorted(valid_images, key=lambda image: int(image.get("width") or image.get("height") or 0))
+        selected = sorted_images[0] if prefer_small else sorted_images[-1]
+        return str(selected.get("url") or "").strip()
+
+    def _request_playlist_header_cover(self, context: Any) -> None:
+        if self.playlist_header_widget is None:
+            return
+        self._playlist_cover_generation += 1
+        generation = self._playlist_cover_generation
+        cover_cache = getattr(self.main_view, "cover_cache", None)
+        if cover_cache is None:
+            return
+        if isinstance(context, dict) and context.get("type") == "spotify":
+            playlist_data = context.get("data") if isinstance(context.get("data"), dict) else {}
+            playlist_id = str(playlist_data.get("id") or "")
+            image_url = self._best_spotify_image_url(playlist_data.get("images"), prefer_small=False)
+            if not image_url:
+                return
+            cached = cover_cache.get(image_url)
+            if cached:
+                self._on_playlist_header_cover_ready(generation, image_url, cached)
+                return
+            worker = CoverArtWorker(image_url, cover_cache, "spotify", playlist_id)
+            worker.signals.cover_ready.connect(lambda key, pixmap, gen=generation: self._on_playlist_header_cover_ready(gen, key, pixmap))
+            QtCore.QThreadPool.globalInstance().start(worker)
+            return
+        if isinstance(context, dict) and context.get("type") == "tidal":
+            playlist_data = context.get("data")
+            playlist_id = str(playlist_data.get("uuid") or playlist_data.get("id") or "") if isinstance(playlist_data, dict) else str(getattr(playlist_data, "uuid", "") or getattr(playlist_data, "id", ""))
+            playlist_title = str(playlist_data.get("title") or playlist_data.get("name") or "") if isinstance(playlist_data, dict) else str(getattr(playlist_data, "title", "") or getattr(playlist_data, "name", ""))
+            if not playlist_id:
+                return
+            cache_key = f"tidal_playlist_{playlist_id}"
+            cached = cover_cache.get(cache_key)
+            if cached:
+                self._on_playlist_header_cover_ready(generation, cache_key, cached)
+                return
+            worker = CoverArtWorker(None, cover_cache, "tidal", playlist_id, playlist_title)
+            worker.signals.cover_ready.connect(lambda key, pixmap, gen=generation: self._on_playlist_header_cover_ready(gen, key, pixmap))
+            QtCore.QThreadPool.globalInstance().start(worker)
+
+    def _on_playlist_header_cover_ready(self, generation: int, _key: str, pixmap: QtGui.QPixmap) -> None:
+        if generation != self._playlist_cover_generation:
+            return
+        if self.playlist_header_widget is None or pixmap.isNull():
+            return
+        self.playlist_header_widget.set_cover_pixmap(pixmap)
+
+    def apply_playlist_filter_text(self, text: str) -> None:
+        if self._clearing_playlist_header:
+            return
+        self._active_playlist_filter_text = str(text or "").strip().casefold()
+        self._playlist_filter_timer.start(90)
+
+    def _apply_playlist_filter_now(self) -> None:
+        table = self.table_widget
+        if table is None:
+            return
+        query = self._active_playlist_filter_text
+        if not query:
+            for row in range(table.rowCount()):
+                table.setRowHidden(row, False)
+            return
+        columns = [self.column_indices.get("Title", 1), self.column_indices.get("Artists", 2), self.column_indices.get("Album", 3)]
+        previous_main_row_visible = True
+        for row in range(table.rowCount()):
+            is_candidate_row = table.columnSpan(row, 0) > 1 or table.cellWidget(row, 0) is not None
+            if is_candidate_row:
+                table.setRowHidden(row, not previous_main_row_visible)
+                continue
+            row_text_parts = []
+            for column in columns:
+                item = table.item(row, column)
+                if item is not None:
+                    row_text_parts.append(item.text())
+            is_visible = query in " ".join(row_text_parts).casefold()
+            table.setRowHidden(row, not is_visible)
+            previous_main_row_visible = is_visible
+
+    def _request_row_cover(self, row: int, item_metadata: Any, spotify_track_data: Optional[Dict[str, Any]], generation: int) -> None:
+        cover_cache = getattr(self.main_view, "cover_cache", None)
+        if cover_cache is None:
+            return
+        identity = ""
+        signal_key = ""
+        worker: Optional[CoverArtWorker] = None
+        if spotify_track_data:
+            spotify_id = str(spotify_track_data.get("id") or "")
+            image_url = str(spotify_track_data.get("cover_url") or "").strip() or self._best_spotify_image_url(spotify_track_data.get("album_images"), prefer_small=True)
+            if not spotify_id or not image_url:
+                return
+            identity = f"spotify:{spotify_id}"
+            signal_key = image_url
+            cached = cover_cache.get(signal_key)
+            if cached:
+                self._on_row_cover_ready(generation, identity, cached)
+                return
+            worker = CoverArtWorker(image_url, cover_cache, "spotify_track", spotify_id)
+        else:
+            if isinstance(item_metadata, dict):
+                item_metadata = item_metadata.get("tidal_track")
+            track_id = str(getattr(item_metadata, "id", "") or "")
+            album = getattr(item_metadata, "album", None)
+            cover_id = str(getattr(album, "cover", "") or "")
+            if not track_id or not cover_id:
+                return
+            identity = f"tidal:{track_id}"
+            signal_key = cover_id
+            cached = cover_cache.get(signal_key)
+            if cached:
+                self._on_row_cover_ready(generation, identity, cached)
+                return
+            worker = CoverArtWorker(None, cover_cache, "Track", signal_key, getattr(item_metadata, "title", ""))
+        worker.signals.cover_ready.connect(lambda _key, pixmap, gen=generation, row_identity=identity: self._on_row_cover_ready(gen, row_identity, pixmap))
+        QtCore.QThreadPool.globalInstance().start(worker)
+
+    def _on_row_cover_ready(self, generation: int, identity: str, pixmap: QtGui.QPixmap) -> None:
+        if generation != self._row_cover_generation or pixmap.isNull():
+            return
+        row = self._find_row_for_cover_identity(identity)
+        if row is None:
+            return
+        if hasattr(self.table_widget, "setRowCoverPixmap"):
+            self.table_widget.setRowCoverPixmap(row, pixmap)
+
+    def _find_row_for_cover_identity(self, identity: str) -> Optional[int]:
+        table = self.table_widget
+        if table is None or not identity:
+            return None
+        title_column = self.column_indices.get("Title", 1)
+        for row in range(table.rowCount()):
+            item = table.item(row, title_column)
+            if item is None:
+                continue
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if identity.startswith("spotify:") and isinstance(data, dict):
+                spotify_data = data.get("data") if isinstance(data.get("data"), dict) else data
+                if str(spotify_data.get("id") or "") == identity.split(":", 1)[1]:
+                    return row
+            if identity.startswith("tidal:") and str(getattr(data, "id", "") or "") == identity.split(":", 1)[1]:
+                return row
+        return None
+
     @pyqtSlot(str, list)
     def populate_spotify_tracks(
         self, playlist_id: str, tracks: Optional[List[Dict[str, Any]]]
@@ -1439,6 +1623,7 @@ class TableHandler(QObject):
         self._populate_table_generic(
             spotify_track_array_for_mainview, Type.Track, playlist_id=playlist_id
         )
+        self._show_playlist_header_for_tracks(spotify_track_array_for_mainview)
         if self.linking_handler:
             self.linking_handler.update_link_button_state()
         if self.download_handler:
@@ -1451,6 +1636,7 @@ class TableHandler(QObject):
             return
         self.main_view.s_playlist = False
         self.main_view.s_playlist_obj = None
+        self._hide_playlist_header()
         self.main_view.s_array = tracks
         self.main_view.s_type = Type.Track
         self._populate_table_generic(tracks, Type.Track)
@@ -2531,6 +2717,8 @@ class TableHandler(QObject):
         if sorting_was_enabled:
             table.setSortingEnabled(False)
         table.clearRows()
+        self._row_cover_generation += 1
+        row_cover_generation = self._row_cover_generation
         self._track_id_to_rows.clear()
         with self._metadata_state_lock:
             self._metadata_inflight_track_ids.clear()
@@ -2571,6 +2759,10 @@ class TableHandler(QObject):
                 self.download_handler._update_download_button_text()
             if sorting_was_enabled:
                 table.setSortingEnabled(True)
+            if getattr(self.main_view, "s_playlist", False):
+                self._show_playlist_header_for_tracks([])
+            else:
+                self._hide_playlist_header()
             return
 
         persisted_links: Dict[str, Any] = {}
@@ -2600,12 +2792,14 @@ class TableHandler(QObject):
                 has_candidates = False
                 candidates_list = []
                 linked_tidal_id = None
+                spotify_track_data_for_cover: Optional[Dict[str, Any]] = None
 
                 try:
                     if is_spotify_track_list:
                         original_spotify_track_data = item.get("data", {})
                         spotify_track_id = original_spotify_track_data.get("id")
                         spotify_track_data_to_use = original_spotify_track_data
+                        spotify_track_data_for_cover = spotify_track_data_to_use
                         tidal_track_obj: Optional[Track] = None
 
                         link_status_text = "Not Linked"
@@ -2780,6 +2974,7 @@ class TableHandler(QObject):
                             track=item_metadata,
                             apply_row_style=False,
                         )
+                        self._request_row_cover(index, item_metadata, spotify_track_data_for_cover, row_cover_generation)
                         self._register_row_track_id(
                             index,
                             self._extract_tidal_track_id_from_row(index),
@@ -2890,6 +3085,8 @@ class TableHandler(QObject):
                     )
 
             table.adjustColumnWidths()
+            if self._active_playlist_filter_text:
+                self._apply_playlist_filter_now()
             table.update()
             self._schedule_visible_metadata_resolution()
             elapsed_ms = (time.perf_counter() - populate_start) * 1000.0

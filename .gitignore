@@ -125,6 +125,10 @@ Tidal-Media-Downloader/TIDALDL-PY/*.spec
 Tidal-Media-Downloader/TIDALDL-PY/tidal_gui/
 Tidal-Media-Downloader/TIDALDL-PY-原/
 
+# backup folder
+.backup/
+
+
 ###############################################################################
 # 8. Tidal-Media-Downloader – “other” projects you showed
 ###############################################################################
@@ -165,3 +169,4 @@ generate-file-listing.ps1
 generate-folded-project-context/*
 project-files-listing.txt
 tidal-dl-WinOSMacOS_project-files-listing_*
+

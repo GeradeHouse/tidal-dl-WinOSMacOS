@@ -646,7 +646,7 @@ class SpotifyAPI:
                     playlist_id,
                     fields=(
                         "items(added_at,added_by(id,display_name),is_local,"
-                        "track(id,uri,name,artists(name),album(name),duration_ms,external_ids,external_urls)),next"
+                        "track(id,uri,name,artists(name),album(name,images(url,width,height)),duration_ms,external_ids,external_urls)),next"
                     ),
                     limit=limit,
                     offset=offset,
@@ -673,6 +673,25 @@ class SpotifyAPI:
                     if isinstance(track_info, dict) and (track_info.get("id") or is_local):
                         artists = track_info.get("artists", [])
                         album_info = track_info.get("album", {})
+                        album_images = (
+                            album_info.get("images", [])
+                            if isinstance(album_info, dict)
+                            else []
+                        )
+                        if not isinstance(album_images, list):
+                            album_images = []
+                        cover_url = ""
+                        if album_images:
+                            sorted_images = sorted(
+                                [
+                                    image
+                                    for image in album_images
+                                    if isinstance(image, dict) and image.get("url")
+                                ],
+                                key=lambda image: int(image.get("width") or image.get("height") or 0),
+                            )
+                            if sorted_images:
+                                cover_url = str(sorted_images[0].get("url") or "")
                         external_ids = track_info.get("external_ids", {})
                         external_urls = track_info.get("external_urls", {})
                         added_by = item.get("added_by", {})
@@ -697,6 +716,8 @@ class SpotifyAPI:
                                     if isinstance(album_info, dict)
                                     else "Unknown Album"
                                 ),
+                                "album_images": album_images,
+                                "cover_url": cover_url,
                                 "duration_ms": track_info.get("duration_ms"),
                                 "isrc": external_ids.get("isrc"),
                                 "playlist_position": len(tracks_data),

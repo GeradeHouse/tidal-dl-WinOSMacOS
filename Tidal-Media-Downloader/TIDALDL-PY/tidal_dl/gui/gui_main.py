@@ -59,6 +59,7 @@ from tidal_dl.paths import getSettingsFilePath, get_user_download_path
 from tidal_dl.linking import LinkingWorker
 from tidal_dl.persistence import LinkPersistenceManager
 from tidal_dl.gui.gui_cover_cache import CoverCache
+from tidal_dl.gui.gui_playlist_table_header import PlaylistTableHeaderWidget
 from tidal_dl.spotify import SpotifyAPI
 
 from .gui_settings import SettingsPage
@@ -183,6 +184,15 @@ class MainView(QWidget):
         self.table_handler = TableHandler(
             self.tableWidget, self.link_persistence_manager, None, parent=self
         )
+        if hasattr(self, "playlistHeaderWidget"):
+            self.table_handler.set_playlist_header_widget(self.playlistHeaderWidget)
+            self.playlistHeaderWidget.filterTextChanged.connect(
+                self.table_handler.apply_playlist_filter_text
+            )
+            self.tableWidget.verticalScrollBar().valueChanged.connect(
+                self.playlistHeaderWidget.set_scroll_offset
+            )
+            self.playlistHeaderWidget.set_scroll_target(self.tableWidget)
         
         # Inject table_handler reference into playlist tree handler to avoid circular access
         self.tree_handler.set_table_handler(self.table_handler)
@@ -408,6 +418,7 @@ class MainView(QWidget):
         self.search_bar = SearchBarWidget(self)
         self.c_tableArea = QScrollArea()
         self.c_tableArea.setWidgetResizable(True)
+        self.c_tableArea.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.c_tableArea.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
         )
@@ -424,10 +435,25 @@ class MainView(QWidget):
             "Length",
             "Quality",
         ]
+        self.playlistTableContainer = QWidget()
+        self.playlistTableContainer.setObjectName("playlistTableContainer")
+        self.playlistTableContainer.setStyleSheet(
+            "QWidget#playlistTableContainer { background: transparent; border: none; }"
+        )
+        self.playlistTableLayout = QVBoxLayout(self.playlistTableContainer)
+        self.playlistTableLayout.setContentsMargins(0, 0, 0, 0)
+        self.playlistTableLayout.setSpacing(0)
+
+        self.playlistHeaderWidget = PlaylistTableHeaderWidget(self.playlistTableContainer)
+        self.playlistHeaderWidget.setVisible(False)
+        self.playlistTableLayout.addWidget(self.playlistHeaderWidget, 0)
+
         self.tableWidget = SplitterTable(initialColumnNames, self)
         self.tableWidget.setProperty("spotifyReorderActive", False)
         self.tableWidget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.c_tableArea.setWidget(self.tableWidget)
+        self.playlistTableLayout.addWidget(self.tableWidget, 1)
+
+        self.c_tableArea.setWidget(self.playlistTableContainer)
 
         self.spotifyActionStatusLabel = QLabel("")
         self.spotifyActionStatusLabel.setVisible(False)

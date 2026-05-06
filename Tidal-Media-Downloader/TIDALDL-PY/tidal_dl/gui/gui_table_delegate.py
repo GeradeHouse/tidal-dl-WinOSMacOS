@@ -13,7 +13,7 @@ from typing import Optional
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 
-TABLE_TEXT_MARGIN = 3
+TABLE_TEXT_MARGIN = 1
 
 # --- Setup Logging ---
 logger = logging.getLogger(__name__)
@@ -72,9 +72,9 @@ class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
         option: QtWidgets.QStyleOptionViewItem,
         index: QtCore.QModelIndex,
     ) -> QtCore.QSize:
-        """Add breathing room around wrapped text inside each table row."""
+        """Keep rows compact while preserving enough room for cover artwork."""
         size = super().sizeHint(option, index)
-        size.setHeight(max(size.height() + (TABLE_TEXT_MARGIN * 2), 70))
+        size.setHeight(max(size.height() + (TABLE_TEXT_MARGIN * 2), 46))
         return size
 
     def paint(

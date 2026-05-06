@@ -62,7 +62,8 @@ from .gui_table_candidate_widget import CandidateWidget
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)  # Set specific level for this module
 
-TABLE_ROW_HEIGHT = 70
+TABLE_ROW_HEIGHT = 46
+TABLE_COVER_ICON_SIZE = 34
 
 _CAMELOT_WHEEL_COLORS: Dict[int, str] = {
     1: "#e53935",
@@ -139,14 +140,27 @@ class SplitterTable(QtWidgets.QTableWidget):
             h_header.customContextMenuRequested.connect(
                 self._show_column_visibility_menu
             )
-            # Apply stylesheet for smaller header padding (ensure correct syntax)
-            base_header_style = "QHeaderView::section { background-color: transparent; padding-top: 2px; padding-bottom: 2px; padding-left: 4px; padding-right: 4px; }"
+            # Apply stylesheet for smaller header padding without visible cell borders.
+            base_header_style = (
+                "QHeaderView::section { "
+                "background-color: transparent; "
+                "padding-top: 2px; padding-bottom: 2px; "
+                "padding-left: 4px; padding-right: 4px; "
+                "border: none; "
+                "border-bottom: 1px solid rgba(255, 255, 255, 0.08); "
+                "}"
+            )
             h_header.setStyleSheet(base_header_style)  # Apply base style first
-        # Set default row height for better readability and clickability
+        # Set compact TIDAL-like row height while preserving larger row artwork.
         v_header = self.verticalHeader()
         if v_header:
             v_header.setDefaultSectionSize(TABLE_ROW_HEIGHT)
             v_header.setMinimumSectionSize(TABLE_ROW_HEIGHT)
+        self.setIconSize(QtCore.QSize(TABLE_COVER_ICON_SIZE, TABLE_COVER_ICON_SIZE))
+        self.setShowGrid(False)
+        self.setGridStyle(Qt.PenStyle.NoPen)
+        self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.verticalScrollBar().setSingleStep(18)
         # Use ExtendedSelection to allow selecting multiple rows.
         self.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
@@ -181,8 +195,8 @@ class SplitterTable(QtWidgets.QTableWidget):
                 os.path.join(script_dir, "..", "assets", "icons", "icon-down-arrow.png")
             ).replace("\\", "/")
 
-            # Get existing style to append to
-            base_header_style = h_header.styleSheet()  # Get the style set earlier
+            # Get existing borderless style to append to
+            base_header_style = h_header.styleSheet()
 
             # Define styles for sort indicators
             indicator_style = f"""
@@ -405,6 +419,26 @@ class SplitterTable(QtWidgets.QTableWidget):
 
         if apply_row_style:
             self._update_row_appearance_for_row(row)
+
+    def setRowCoverPixmap(self, row: int, pixmap: QtGui.QPixmap) -> None:
+        if pixmap.isNull() or row < 0 or row >= self.rowCount():
+            return
+
+        title_column = self._get_column_index_by_header("Title")
+        if title_column < 0:
+            title_column = 1
+        item = self.item(row, title_column)
+        if item is None:
+            return
+
+        icon_pixmap = pixmap.scaled(
+            TABLE_COVER_ICON_SIZE,
+            TABLE_COVER_ICON_SIZE,
+            QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
+        item.setIcon(QtGui.QIcon(icon_pixmap))
+        self.setRowHeight(row, TABLE_ROW_HEIGHT)
 
     def addRow(self, row_data, track=None):
         """
