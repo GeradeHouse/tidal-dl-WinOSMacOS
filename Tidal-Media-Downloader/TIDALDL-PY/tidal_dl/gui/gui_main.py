@@ -770,8 +770,8 @@ class MainView(QWidget):
                 background-color: transparent;
             }
             SplitterTable[spotifyReorderActive="true"] {
-                border: 1px solid rgba(0, 200, 200, 0.32);
-                border-radius: 8px;
+                border: none;
+                border-radius: 0px;
             }
         """
         )

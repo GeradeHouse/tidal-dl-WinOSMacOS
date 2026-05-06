@@ -62,8 +62,8 @@ from .gui_table_candidate_widget import CandidateWidget
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)  # Set specific level for this module
 
-TABLE_ROW_HEIGHT = 46
-TABLE_COVER_ICON_SIZE = 34
+TABLE_ROW_HEIGHT = 40
+TABLE_COVER_ICON_SIZE = 28
 
 _CAMELOT_WHEEL_COLORS: Dict[int, str] = {
     1: "#e53935",
@@ -122,6 +122,11 @@ class SplitterTable(QtWidgets.QTableWidget):
 
     def __init__(self, column_names, parent=None):
         super().__init__(parent)
+        self.setObjectName("splitterTrackTable")
+        self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.setLineWidth(0)
+        self.viewport().setAutoFillBackground(False)
+        self.viewport().setStyleSheet("background: transparent; border: none;")
         self.setSortingEnabled(True)  # Enable sorting
         self.linking_gui_handler = None
         self.setColumnCount(len(column_names))
@@ -142,13 +147,14 @@ class SplitterTable(QtWidgets.QTableWidget):
             )
             # Apply stylesheet for smaller header padding without visible cell borders.
             base_header_style = (
+                "QHeaderView { background-color: transparent; border: none; }"
                 "QHeaderView::section { "
                 "background-color: transparent; "
-                "padding-top: 2px; padding-bottom: 2px; "
+                "padding-top: 1px; padding-bottom: 1px; "
                 "padding-left: 4px; padding-right: 4px; "
                 "border: none; "
-                "border-bottom: 1px solid rgba(255, 255, 255, 0.08); "
                 "}"
+                "QTableCornerButton::section { background-color: transparent; border: none; }"
             )
             h_header.setStyleSheet(base_header_style)  # Apply base style first
         # Set compact TIDAL-like row height while preserving larger row artwork.
@@ -177,6 +183,51 @@ class SplitterTable(QtWidgets.QTableWidget):
         self.setWordWrap(True)
         self.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.setAlternatingRowColors(False)
+        self.setStyleSheet(
+            """
+            QTableWidget#splitterTrackTable {
+                background-color: transparent;
+                alternate-background-color: transparent;
+                gridline-color: transparent;
+                border: none;
+                outline: 0;
+                selection-background-color: rgba(58, 58, 63, 0.86);
+                selection-color: #ffffff;
+            }
+            QTableWidget#splitterTrackTable::item {
+                background-color: transparent;
+                border: none;
+                padding: 0px;
+            }
+            QTableWidget#splitterTrackTable::item:hover {
+                background-color: rgba(255, 255, 255, 0.035);
+                border: none;
+            }
+            QTableWidget#splitterTrackTable::item:selected {
+                background-color: rgba(58, 58, 63, 0.86);
+                border: none;
+            }
+            QTableWidget#splitterTrackTable::item:focus {
+                outline: 0;
+                border: none;
+            }
+            QHeaderView {
+                background-color: transparent;
+                border: none;
+            }
+            QHeaderView::section {
+                background-color: transparent;
+                color: #d8d8d8;
+                padding: 1px 4px;
+                border: none;
+                font-weight: bold;
+            }
+            QTableCornerButton::section {
+                background-color: transparent;
+                border: none;
+            }
+            """
+        )
 
         # Initially, set the resize modes for all columns to Interactive so that the user can change each column's width.
         h_header = self.horizontalHeader()  # Get header again
@@ -663,14 +714,8 @@ class SplitterTable(QtWidgets.QTableWidget):
             return
 
         # Determine background color based on selection.
+        row_selected = row in self.selectedRows
         selected_bg_color = QtGui.QColor(58, 58, 63, 224)
-        transparent_bg_color = (
-            Qt.GlobalColor.transparent
-        )  # Or your default item background from QSS
-
-        bg_color_to_apply = (
-            selected_bg_color if row in self.selectedRows else transparent_bg_color
-        )
 
         # Determine foreground color
         default_fg_color = QtGui.QColor(
@@ -717,7 +762,10 @@ class SplitterTable(QtWidgets.QTableWidget):
         for col in range(self.columnCount()):
             item = self.item(row, col)
             if item:
-                item.setBackground(bg_color_to_apply)
+                if row_selected:
+                    item.setBackground(selected_bg_color)
+                else:
+                    item.setData(QtCore.Qt.ItemDataRole.BackgroundRole, None)
                 foreground_brush = QtGui.QBrush(fg_color_to_apply)
                 item.setForeground(foreground_brush)  # Set foreground
                 item.setData(QtCore.Qt.ItemDataRole.ForegroundRole, foreground_brush)

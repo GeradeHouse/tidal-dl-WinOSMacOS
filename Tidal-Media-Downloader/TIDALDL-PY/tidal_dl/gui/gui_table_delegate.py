@@ -64,7 +64,7 @@ class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
             return
         super().initStyleOption(option, index)
         option.displayAlignment |= QtCore.Qt.AlignmentFlag.AlignVCenter
-        option.features |= QtWidgets.QStyleOptionViewItem.ViewItemFeature.WrapText
+        option.features &= ~QtWidgets.QStyleOptionViewItem.ViewItemFeature.WrapText
         option.textElideMode = QtCore.Qt.TextElideMode.ElideRight
 
     def sizeHint(
@@ -72,9 +72,9 @@ class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
         option: QtWidgets.QStyleOptionViewItem,
         index: QtCore.QModelIndex,
     ) -> QtCore.QSize:
-        """Keep rows compact while preserving enough room for cover artwork."""
+        """Keep rows compact and single-line."""
         size = super().sizeHint(option, index)
-        size.setHeight(max(size.height() + (TABLE_TEXT_MARGIN * 2), 46))
+        size.setHeight(max(size.height(), 40))
         return size
 
     def paint(
