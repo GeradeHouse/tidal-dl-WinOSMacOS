@@ -29,6 +29,7 @@ from tidal_dl.gui.gui_table import SplitterTable
 from tidal_dl.tidal import Type, Track, Playlist, Album, AudioQuality, TIDAL_API, SETTINGS
 from tidal_dl.printf import Printf
 from tidal_dl.gui.gui_utils import format_duration_ms
+from tidal_dl.gui.gui_custom_dialog import CustomQMessageBox
 from tidal_dl.persistence import LinkPersistenceManager
 from tidal_dl.format import getAudioTypeFolder, getTrackPath
 from tidal_dl.paths import get_user_download_path
@@ -1304,6 +1305,88 @@ class TableHandler(QObject):
                 )
 
         return payloads
+
+    def _spotify_track_url_from_payload(self, payload: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return None
+
+        external_urls = payload.get("external_urls")
+        if isinstance(external_urls, dict):
+            spotify_url = str(external_urls.get("spotify") or "").strip()
+            if spotify_url:
+                return spotify_url
+
+        for key in ("spotify_url", "external_url", "url"):
+            candidate_url = str(payload.get(key) or "").strip()
+            if "open.spotify.com/track/" in candidate_url:
+                return candidate_url
+
+        uri = str(payload.get("uri") or "").strip()
+        if uri.startswith("spotify:track:"):
+            track_id = uri.rsplit(":", 1)[-1].strip()
+            if track_id:
+                return f"https://open.spotify.com/track/{track_id}"
+
+        track_id = str(
+            payload.get("id")
+            or payload.get("track_id")
+            or payload.get("spotify_id")
+            or ""
+        ).strip()
+        if track_id:
+            return f"https://open.spotify.com/track/{track_id}"
+
+        return None
+
+    def _spotify_track_share_payload_for_row(self, row: int) -> Optional[Dict[str, Any]]:
+        payloads = self.get_table_track_payloads_for_rows([row])
+        if not payloads:
+            return None
+
+        payload = payloads[0]
+        if payload.get("source_type") != "spotify":
+            return None
+
+        share_url = self._spotify_track_url_from_payload(payload)
+        if not share_url:
+            return None
+
+        payload = dict(payload)
+        payload["spotify_share_url"] = share_url
+        return payload
+
+    def copySpotifyTrackUrlForRow(self, row: int) -> None:
+        payload = self._spotify_track_share_payload_for_row(row)
+        if not payload:
+            CustomQMessageBox.warning(
+                self.main_view,
+                "Spotify URL Unavailable",
+                "Spotify track URL unavailable.",
+                "This row does not contain a Spotify track ID or URI.",
+            )
+            return
+
+        share_url = str(payload.get("spotify_share_url") or "").strip()
+        if not share_url:
+            CustomQMessageBox.warning(
+                self.main_view,
+                "Spotify URL Unavailable",
+                "Spotify track URL unavailable.",
+                "This row does not contain a shareable Spotify URL.",
+            )
+            return
+
+        clipboard = QtWidgets.QApplication.clipboard()
+        if clipboard:
+            clipboard.setText(share_url)
+
+        display_title = str(payload.get("display_title") or payload.get("name") or "Spotify track")
+        CustomQMessageBox.information(
+            self.main_view,
+            "Spotify URL Copied",
+            f"Copied Spotify URL for: {display_title}",
+            share_url,
+        )
 
     @pyqtSlot(str, list)
     def populate_spotify_tracks(
@@ -2889,6 +2972,17 @@ class TableHandler(QObject):
                 self.download_handler.downloadTableContextMenu(
                     context_menu, selected_rows_indices
                 )
+            if len(selected_rows_indices) == 1:
+                if not context_menu.isEmpty():
+                    context_menu.addSeparator()
+
+                share_payload = self._spotify_track_share_payload_for_row(selected_rows_indices[0])
+                copy_spotify_url_action = context_menu.addAction("Copy Spotify Track URL")
+                if copy_spotify_url_action:
+                    copy_spotify_url_action.setEnabled(bool(share_payload))
+                    copy_spotify_url_action.triggered.connect(
+                        lambda _checked=False, row=selected_rows_indices[0]: self.copySpotifyTrackUrlForRow(row)
+                    )
             spotify_handler = getattr(self.main_view, "spotify_gui_handler", None)
             if spotify_handler:
                 if not context_menu.isEmpty():

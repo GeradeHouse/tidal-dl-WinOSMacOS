@@ -646,7 +646,7 @@ class SpotifyAPI:
                     playlist_id,
                     fields=(
                         "items(added_at,added_by(id,display_name),is_local,"
-                        "track(id,uri,name,artists(name),album(name),duration_ms,external_ids)),next"
+                        "track(id,uri,name,artists(name),album(name),duration_ms,external_ids,external_urls)),next"
                     ),
                     limit=limit,
                     offset=offset,
@@ -674,6 +674,7 @@ class SpotifyAPI:
                         artists = track_info.get("artists", [])
                         album_info = track_info.get("album", {})
                         external_ids = track_info.get("external_ids", {})
+                        external_urls = track_info.get("external_urls", {})
                         added_by = item.get("added_by", {})
                         track_id = track_info.get("id")
                         uri = track_info.get("uri")
@@ -684,6 +685,7 @@ class SpotifyAPI:
                             {
                                 "id": track_id,
                                 "uri": uri,
+                                "external_urls": external_urls if isinstance(external_urls, dict) else {},
                                 "name": track_info.get("name", "Unknown Track"),
                                 "artists": [
                                     artist.get("name", "Unknown Artist")
