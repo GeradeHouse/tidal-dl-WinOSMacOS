@@ -879,7 +879,13 @@ class SpotifyAPI:
                 )
                 if isinstance(result, dict):
                     latest_snapshot_id = result.get("snapshot_id") or latest_snapshot_id
-            return self._spotify_success_result(f"Added {len(clean_uris)} Spotify item(s) to playlist.", playlist_id=playlist_id, snapshot_id=latest_snapshot_id)
+            result = self._spotify_success_result(
+                f"Added {len(clean_uris)} Spotify item(s) to playlist.",
+                playlist_id=playlist_id,
+                snapshot_id=latest_snapshot_id,
+            )
+            result["tracks_delta"] = len(clean_uris)
+            return result
         except spotipy.SpotifyException as exc:
             return self._spotify_error_result(operation, exc, playlist_id)
         except Exception as exc:
@@ -936,7 +942,13 @@ class SpotifyAPI:
                 latest_snapshot_id = append_result.get("snapshot_id") or latest_snapshot_id
                 if not append_result.get("success"):
                     return append_result
-            return self._spotify_success_result(f"Replaced Spotify playlist contents with {len(clean_uris)} item(s).", playlist_id=playlist_id, snapshot_id=latest_snapshot_id)
+            result = self._spotify_success_result(
+                f"Replaced Spotify playlist contents with {len(clean_uris)} item(s).",
+                playlist_id=playlist_id,
+                snapshot_id=latest_snapshot_id,
+            )
+            result["tracks_total"] = len(clean_uris)
+            return result
         except spotipy.SpotifyException as exc:
             return self._spotify_error_result(operation, exc, playlist_id)
         except Exception as exc:

@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import difflib
 import logging
@@ -292,8 +293,27 @@ class SpotifyGuiHandler(QObject):
         if result.get("success"):
             logger.info(message)
             CustomQMessageBox.information(self.main_view, "Spotify Action Complete", message)
-            self.refreshSpotifyPlaylists()
+
             refresh_playlist_id = result.get("refresh_playlist_id") or result.get("playlist_id")
+            tree_handler = getattr(self.main_view, "tree_handler", None)
+
+            tracks_delta: Optional[int] = None
+            tracks_total: Optional[int] = None
+            if result.get("tracks_delta") is not None:
+                with contextlib.suppress(TypeError, ValueError):
+                    tracks_delta = int(result.get("tracks_delta"))
+            if result.get("tracks_total") is not None:
+                with contextlib.suppress(TypeError, ValueError):
+                    tracks_total = int(result.get("tracks_total"))
+
+            if tree_handler and refresh_playlist_id and (tracks_delta is not None or tracks_total is not None):
+                tree_handler.adjust_spotify_playlist_track_count(
+                    str(refresh_playlist_id),
+                    delta=tracks_delta,
+                    total=tracks_total,
+                )
+
+            self.refreshSpotifyPlaylists()
             if refresh_playlist_id and self._active_spotify_playlist_id() == str(refresh_playlist_id):
                 self.fetchSpotifyTracks(str(refresh_playlist_id))
         else:

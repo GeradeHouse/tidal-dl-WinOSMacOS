@@ -42,7 +42,6 @@ from PyQt6.QtGui import (
     QPixmap,
     QColor,
     QBrush,
-    QPen,
 )
 from PyQt6.QtWidgets import (
     QTreeWidget,
@@ -128,9 +127,6 @@ class PlaylistDelegate(QtWidgets.QStyledItemDelegate):
         self.tree_handler = tree_handler
         self.hover_background_color = QColor("#3e3e43")
         self.folder_child_background_color = QColor("#050507ED")
-        self.drop_target_background_color = QColor(29, 185, 84, 46)
-        self.drop_target_border_color = QColor(29, 185, 84, 220)
-        self.drop_target_text_color = QColor("#ffffff")
 
     def paint(
         self,
@@ -155,27 +151,6 @@ class PlaylistDelegate(QtWidgets.QStyledItemDelegate):
 
         if isinstance(item_data, dict) and item_data.get("is_folder_child"):
             painter.fillRect(option.rect, self.folder_child_background_color)
-
-        if item is self.tree_handler._spotify_drop_target_item:
-            drop_rect = option.rect.adjusted(3, 1, -5, -1)
-            if drop_rect.isValid():
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                painter.setBrush(QBrush(self.drop_target_background_color))
-                painter.setPen(QPen(self.drop_target_border_color, 1.4))
-                painter.drawRoundedRect(drop_rect, 9.0, 9.0)
-
-                glyph_rect = QtCore.QRect(
-                    drop_rect.right() - 24,
-                    drop_rect.top(),
-                    22,
-                    drop_rect.height(),
-                )
-                painter.setPen(self.drop_target_text_color)
-                painter.drawText(
-                    glyph_rect,
-                    Qt.AlignmentFlag.AlignCenter,
-                    "+",
-                )
 
         if option.state & QtWidgets.QStyle.StateFlag.State_MouseOver:
             if isinstance(tree_widget, QWidget):
@@ -463,7 +438,6 @@ class PlaylistTreeHandler(QObject):
 
         with contextlib.suppress(RuntimeError):
             self._set_spotify_drop_target_widget_active(item, False)
-            item.setBackground(0, QBrush())
             viewport = self.tree_widget.viewport()
             if viewport is not None:
                 rect = self.tree_widget.visualItemRect(item)
@@ -480,7 +454,6 @@ class PlaylistTreeHandler(QObject):
             return
 
         with contextlib.suppress(RuntimeError):
-            item.setBackground(0, QBrush(QColor(29, 185, 84, 42)))
             self._set_spotify_drop_target_widget_active(item, True)
             self._spotify_drop_target_item = item
             viewport = self.tree_widget.viewport()
@@ -926,6 +899,84 @@ class PlaylistTreeHandler(QObject):
         if self._spotify_sort_mode == "alpha":
             return "Alphabetical"
         return "Default Spotify order"
+
+    def adjust_spotify_playlist_track_count(
+        self,
+        playlist_id: str,
+        delta: Optional[int] = None,
+        total: Optional[int] = None,
+    ) -> None:
+        normalized_playlist_id = str(playlist_id or "").strip()
+        if not normalized_playlist_id:
+            return
+
+        updated_playlist: Optional[Dict[str, Any]] = None
+        for playlist in self._spotify_playlist_cache:
+            if not isinstance(playlist, dict):
+                continue
+            if str(playlist.get("id") or "").strip() != normalized_playlist_id:
+                continue
+
+            try:
+                previous_total = int(playlist.get("tracks_total") or 0)
+            except (TypeError, ValueError):
+                previous_total = 0
+
+            if total is not None:
+                try:
+                    next_total = max(0, int(total))
+                except (TypeError, ValueError):
+                    next_total = previous_total
+            else:
+                try:
+                    next_total = max(0, previous_total + int(delta or 0))
+                except (TypeError, ValueError):
+                    next_total = previous_total
+
+            playlist["tracks_total"] = next_total
+            updated_playlist = playlist
+            break
+
+        if not updated_playlist:
+            return
+
+        playlist_name = str(updated_playlist.get("name") or "Unknown Name")
+        item_text = f"{playlist_name} ({updated_playlist.get('tracks_total', '?')})"
+
+        self.original_item_data.setdefault(normalized_playlist_id, {})["text"] = item_text
+
+        item = self.id_to_item.get(normalized_playlist_id)
+        if item is not None:
+            with contextlib.suppress(RuntimeError):
+                item.setText(0, item_text)
+                item_data = item.data(0, Qt.ItemDataRole.UserRole)
+                if isinstance(item_data, dict):
+                    item_data["data"] = updated_playlist
+                    item.setData(0, Qt.ItemDataRole.UserRole, item_data)
+
+        widget = self.item_widgets.get(normalized_playlist_id)
+        if widget is not None:
+            with contextlib.suppress(RuntimeError):
+                name_label = getattr(widget, "name_label", None)
+                if name_label is not None:
+                    name_label.setText(item_text)
+                widget.updateGeometry()
+                widget.update()
+
+        active_playlist_obj = getattr(self.main_view, "s_playlist_obj", None)
+        if isinstance(active_playlist_obj, dict) and active_playlist_obj.get("type") == "spotify":
+            active_data = active_playlist_obj.get("data")
+            if (
+                isinstance(active_data, dict)
+                and str(active_data.get("id") or "").strip() == normalized_playlist_id
+            ):
+                active_data["tracks_total"] = updated_playlist.get("tracks_total")
+
+        with contextlib.suppress(RuntimeError):
+            self.spotify_root_item.setText(0, f"Spotify Playlists ({len(self._spotify_playlist_cache)})")
+            viewport = self.tree_widget.viewport()
+            if viewport is not None:
+                viewport.update()
 
     def _iter_spotify_folder_items(self):
         if not self.spotify_root_item:

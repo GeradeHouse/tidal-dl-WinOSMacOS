@@ -372,7 +372,7 @@ class SearchBarWidget(QWidget):
                 self.search_input.setProperty("state", "focus")
                 self._repolish(self.search_input)
                 # Expand width
-                self.search_input_container.setFixedWidth(self._expanded_width)
+                self._set_search_surface_expanded(True)
                 # No icon label to move
                 # No timer to stop
             elif event.type() == QEvent.Type.FocusOut:
@@ -384,9 +384,11 @@ class SearchBarWidget(QWidget):
                 QTimer.singleShot(0, self._check_focus_after_search_input_lost_focus)
                 # Do not hide the list here directly; let the timed check handle it.
 
-                # Revert width and style immediately when focus leaves input
-                self.search_input_container.setFixedWidth(self._original_width)
-                self.search_input.setProperty("state", "default")
+                # Keep the expanded search surface stable while focus moves into the result list.
+                self.search_input.setProperty(
+                    "state",
+                    "focus" if self.live_results_list.isVisible() else "default",
+                )
                 self._repolish(self.search_input)
 
         # Also handle FocusOut for the list widget itself
@@ -421,7 +423,7 @@ class SearchBarWidget(QWidget):
             self.liveSearchRequested.emit(text)  # Emit only text
         else:
             # Hide results if input is empty
-            self.live_results_list.hide()
+            self._hide_results_list()
 
     def _on_enter_pressed(self):
         """Triggers the main search when Enter is pressed."""
@@ -560,7 +562,7 @@ class SearchBarWidget(QWidget):
         # 3. Set list position and width (doubled)
         list_x = parent_relative_pos.x()
         list_y = parent_relative_pos.y() + 1  # Position 1 pixel below the container
-        list_width = self.search_input_container.width() * 2  # *** Doubled width ***
+        list_width = self._expanded_width * 2  # Stable width while moving between input and results.
 
         # --- Calculate Height ---
         content_height = 0
@@ -662,11 +664,40 @@ class SearchBarWidget(QWidget):
             self._hide_results_list()
             return
 
+    def _set_search_surface_expanded(self, expanded: bool) -> None:
+        """Keeps the input and floating result list at a stable width."""
+        target_width = self._expanded_width if expanded else self._original_width
+        if self.search_input_container.width() != target_width:
+            self.search_input_container.setFixedWidth(target_width)
+        if self.live_results_list.isVisible():
+            self._update_results_list_geometry()
+
+    def _is_results_list_focus_target(self, widget: Optional[QWidget]) -> bool:
+        if widget is None:
+            return False
+        if widget == self.live_results_list:
+            return True
+
+        current_widget = widget
+        while current_widget:
+            if current_widget == self.live_results_list:
+                return True
+            if isinstance(current_widget, QWidget):
+                current_widget = current_widget.parentWidget()
+            else:
+                break
+        return False
+
     def _hide_results_list(self):
-        """Hides the results list."""
+        """Hides the results list and restores compact width when the input is inactive."""
         if self.live_results_list.isVisible():
             logger.debug("Hiding live results list.")
             self.live_results_list.hide()
+
+        if not self.search_input.hasFocus():
+            self._set_search_surface_expanded(False)
+            self.search_input.setProperty("state", "default")
+            self._repolish(self.search_input)
 
     def _repolish(self, widget):
         """Helper function to force style recalculation."""
@@ -681,32 +712,19 @@ class SearchBarWidget(QWidget):
             f"SearchBarWidget: _check_focus_after_search_input_lost_focus. Newly focused: {newly_focused_widget}"
         )
 
-        is_focus_on_list_or_child = False
-        if newly_focused_widget:
-            if newly_focused_widget == self.live_results_list:
-                is_focus_on_list_or_child = True
-            else:
-                # Check if focus went to a child widget of the list
-                current_widget = newly_focused_widget
-                while current_widget:  # Iterate up the parent chain
-                    if current_widget == self.live_results_list:
-                        is_focus_on_list_or_child = True
-                        break
-                    # Ensure current_widget is a QWidget before calling parentWidget()
-                    if isinstance(current_widget, QWidget):
-                        current_widget = current_widget.parentWidget()
-                    else:
-                        break  # Should not happen if focus is on a Qt widget
+        if self._is_results_list_focus_target(newly_focused_widget):
+            logger.debug(
+                "Focus from search input moved to results list or its children. Keeping list visible."
+            )
+            self._set_search_surface_expanded(True)
+            self.search_input.setProperty("state", "focus")
+            self._repolish(self.search_input)
+            return
 
-        if not is_focus_on_list_or_child:
-            logger.debug(
-                "Focus (from search_input) did not go to results list or its children. Hiding list."
-            )
-            self._hide_results_list()
-        else:
-            logger.debug(
-                "Focus (from search_input) went to results list or its children. Keeping list visible."
-            )
+        logger.debug(
+            "Focus from search input moved away from results list. Hiding list."
+        )
+        self._hide_results_list()
 
     def _check_focus_after_results_list_lost_focus(self):
         newly_focused_widget = QApplication.focusWidget()
@@ -714,36 +732,24 @@ class SearchBarWidget(QWidget):
             f"SearchBarWidget: _check_focus_after_results_list_lost_focus. Newly focused: {newly_focused_widget}"
         )
 
-        # Hide list if focus moves away from both input and list (and its children)
-        if (
-            newly_focused_widget != self.search_input
-            and newly_focused_widget != self.live_results_list
-        ):
-            is_focus_on_list_child = False
-            if newly_focused_widget:
-                current_widget = newly_focused_widget
-                while current_widget:
-                    if current_widget == self.live_results_list:
-                        is_focus_on_list_child = True
-                        break
-                    if isinstance(current_widget, QWidget):
-                        current_widget = current_widget.parentWidget()
-                    else:
-                        break
-
-            if not is_focus_on_list_child:
-                logger.debug(
-                    "FocusOut from list: Focus moved away from input and list/children. Hiding list."
-                )
-                self._hide_results_list()
-            else:
-                logger.debug(
-                    "FocusOut from list: Focus moved to list child. Keeping visible."
-                )
-        else:
+        if newly_focused_widget == self.search_input:
             logger.debug(
-                "FocusOut from list: Focus moved back to input or stayed on list. Keeping visible."
+                "FocusOut from list: focus moved back to input. Keeping visible."
             )
+            self._set_search_surface_expanded(True)
+            return
+
+        if self._is_results_list_focus_target(newly_focused_widget):
+            logger.debug(
+                "FocusOut from list: focus moved to list child. Keeping visible."
+            )
+            self._set_search_surface_expanded(True)
+            return
+
+        logger.debug(
+            "FocusOut from list: focus moved away from input and list/children. Hiding list."
+        )
+        self._hide_results_list()
 
     def _apply_styles(self):
         """Applies initial stylesheets to the widget and its components."""
