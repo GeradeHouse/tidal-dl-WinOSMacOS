@@ -42,6 +42,7 @@ from PyQt6.QtGui import (
     QPixmap,
     QColor,
     QBrush,
+    QPen,
 )
 from PyQt6.QtWidgets import (
     QTreeWidget,
@@ -127,6 +128,9 @@ class PlaylistDelegate(QtWidgets.QStyledItemDelegate):
         self.tree_handler = tree_handler
         self.hover_background_color = QColor("#3e3e43")
         self.folder_child_background_color = QColor("#050507ED")
+        self.drop_target_background_color = QColor(29, 185, 84, 46)
+        self.drop_target_border_color = QColor(29, 185, 84, 220)
+        self.drop_target_text_color = QColor("#ffffff")
 
     def paint(
         self,
@@ -139,26 +143,48 @@ class PlaylistDelegate(QtWidgets.QStyledItemDelegate):
 
         painter.save()
 
-        # +++ START: CUSTOM BACKGROUND FOR FOLDER CHILDREN +++
         tree_widget = cast(QTreeWidget, self.parent())
+        item: Optional[QTreeWidgetItem] = None
+        item_data: Any = None
+
         if isinstance(tree_widget, QTreeWidget):
             item = tree_widget.itemFromIndex(index)
             if item:
-                item_data = item.data(0, Qt.ItemDataRole.UserRole)
-                if isinstance(item_data, dict) and item_data.get("is_folder_child"):
-                    painter.fillRect(option.rect, self.folder_child_background_color)
-        # +++ END: CUSTOM BACKGROUND +++
+                with contextlib.suppress(RuntimeError):
+                    item_data = item.data(0, Qt.ItemDataRole.UserRole)
 
-        # Draw custom hover background for the text area
+        if isinstance(item_data, dict) and item_data.get("is_folder_child"):
+            painter.fillRect(option.rect, self.folder_child_background_color)
+
+        if item is self.tree_handler._spotify_drop_target_item:
+            drop_rect = option.rect.adjusted(3, 1, -5, -1)
+            if drop_rect.isValid():
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setBrush(QBrush(self.drop_target_background_color))
+                painter.setPen(QPen(self.drop_target_border_color, 1.4))
+                painter.drawRoundedRect(drop_rect, 9.0, 9.0)
+
+                glyph_rect = QtCore.QRect(
+                    drop_rect.right() - 24,
+                    drop_rect.top(),
+                    22,
+                    drop_rect.height(),
+                )
+                painter.setPen(self.drop_target_text_color)
+                painter.drawText(
+                    glyph_rect,
+                    Qt.AlignmentFlag.AlignCenter,
+                    "+",
+                )
+
         if option.state & QtWidgets.QStyle.StateFlag.State_MouseOver:
-            view_widget = cast(QTreeWidget, self.parent())
-            if isinstance(view_widget, QWidget):
+            if isinstance(tree_widget, QWidget):
                 style = QApplication.style()
                 if style:
                     text_rect = style.subElementRect(
                         QtWidgets.QStyle.SubElement.SE_ItemViewItemText,
                         option,
-                        view_widget,
+                        tree_widget,
                     )
                     if text_rect.isValid():
                         painter.setBrush(QBrush(self.hover_background_color))
@@ -393,25 +419,88 @@ class PlaylistTreeHandler(QObject):
         )
         return selected_count > 1 or modifier_multi_select
 
+    def _set_spotify_drop_target_widget_active(
+        self,
+        item: Optional[QTreeWidgetItem],
+        active: bool,
+    ) -> None:
+        if item is None:
+            return
+
+        try:
+            widget = self.tree_widget.itemWidget(item, 0)
+        except RuntimeError:
+            return
+
+        if not isinstance(widget, QWidget):
+            return
+
+        with contextlib.suppress(RuntimeError):
+            setter = getattr(widget, "set_drop_target_active", None)
+            if callable(setter):
+                setter(active)
+            else:
+                widget.setAttribute(
+                    Qt.WidgetAttribute.WA_StyledBackground,
+                    bool(active),
+                )
+                if active:
+                    widget.setCursor(Qt.CursorShape.PointingHandCursor)
+                    widget.setToolTip(
+                        "Drop selected tracks to add them to this Spotify playlist."
+                    )
+                else:
+                    widget.unsetCursor()
+                    widget.setToolTip("")
+                widget.update()
+
     def _clear_spotify_playlist_drop_target(self) -> None:
         item = self._spotify_drop_target_item
-        if item is not None:
-            with contextlib.suppress(RuntimeError):
-                item.setBackground(0, QBrush())
         self._spotify_drop_target_item = None
+
+        if item is None:
+            return
+
+        with contextlib.suppress(RuntimeError):
+            self._set_spotify_drop_target_widget_active(item, False)
+            item.setBackground(0, QBrush())
+            viewport = self.tree_widget.viewport()
+            if viewport is not None:
+                rect = self.tree_widget.visualItemRect(item)
+                if rect.isValid():
+                    viewport.update(rect.adjusted(-2, -2, 2, 2))
 
     def _set_spotify_playlist_drop_target(self, item: Optional[QTreeWidgetItem]) -> None:
         if item is self._spotify_drop_target_item:
             return
-        self._clear_spotify_playlist_drop_target()
-        if item is not None:
-            item.setBackground(0, QBrush(QColor(0, 200, 200, 70)))
-            self._spotify_drop_target_item = item
 
-    def _spotify_playlist_payload_for_drop_item(self, item: Optional[QTreeWidgetItem]) -> Optional[Dict[str, Any]]:
+        self._clear_spotify_playlist_drop_target()
+
+        if item is None:
+            return
+
+        with contextlib.suppress(RuntimeError):
+            item.setBackground(0, QBrush(QColor(29, 185, 84, 42)))
+            self._set_spotify_drop_target_widget_active(item, True)
+            self._spotify_drop_target_item = item
+            viewport = self.tree_widget.viewport()
+            if viewport is not None:
+                rect = self.tree_widget.visualItemRect(item)
+                if rect.isValid():
+                    viewport.update(rect.adjusted(-2, -2, 2, 2))
+
+    def _spotify_playlist_payload_for_drop_item(
+        self,
+        item: Optional[QTreeWidgetItem],
+    ) -> Optional[Dict[str, Any]]:
         if item is None:
             return None
-        item_data = item.data(0, Qt.ItemDataRole.UserRole)
+
+        try:
+            item_data = item.data(0, Qt.ItemDataRole.UserRole)
+        except RuntimeError:
+            return None
+
         if not isinstance(item_data, dict):
             return None
         if item_data.get("type") != "spotify":
@@ -442,7 +531,15 @@ class PlaylistTreeHandler(QObject):
         if event is None:
             return super().eventFilter(watched, event)
 
-        viewport = self.tree_widget.viewport()
+        try:
+            viewport = self.tree_widget.viewport()
+        except RuntimeError:
+            self._spotify_drop_target_item = None
+            return False
+
+        if viewport is None:
+            return False
+
         if watched is viewport and event.type() in (
             QEvent.Type.DragEnter,
             QEvent.Type.DragMove,
@@ -451,22 +548,30 @@ class PlaylistTreeHandler(QObject):
         ):
             if event.type() == QEvent.Type.DragLeave:
                 self._clear_spotify_playlist_drop_target()
-                return super().eventFilter(watched, event)
+                return True
 
             rows = self._drag_rows_from_table_mime(event)
             if not rows:
                 self._clear_spotify_playlist_drop_target()
-                return super().eventFilter(watched, event)
+                if isinstance(event, (QtGui.QDragEnterEvent, QtGui.QDragMoveEvent, QtGui.QDropEvent)):
+                    event.ignore()
+                return True
 
-            pos = (
-                event.position().toPoint()
-                if hasattr(event, "position")
-                else event.pos()
-                if hasattr(event, "pos")
-                else QPoint()
-            )
-            target_item = self.tree_widget.itemAt(pos)
-            playlist_data = self._spotify_playlist_payload_for_drop_item(target_item)
+            try:
+                pos = (
+                    event.position().toPoint()
+                    if hasattr(event, "position")
+                    else event.pos()
+                    if hasattr(event, "pos")
+                    else QPoint()
+                )
+                target_item = self.tree_widget.itemAt(pos)
+                playlist_data = self._spotify_playlist_payload_for_drop_item(target_item)
+            except RuntimeError:
+                self._clear_spotify_playlist_drop_target()
+                if isinstance(event, (QtGui.QDragEnterEvent, QtGui.QDragMoveEvent, QtGui.QDropEvent)):
+                    event.ignore()
+                return True
 
             if isinstance(event, (QtGui.QDragEnterEvent, QtGui.QDragMoveEvent)):
                 if playlist_data:
@@ -480,13 +585,25 @@ class PlaylistTreeHandler(QObject):
 
             if event.type() == QEvent.Type.Drop and isinstance(event, QtGui.QDropEvent):
                 self._clear_spotify_playlist_drop_target()
+
                 if playlist_data:
                     spotify_handler = getattr(self.main_view, "spotify_gui_handler", None)
-                    if spotify_handler:
-                        spotify_handler.addTableRowsToSpotifyPlaylist(playlist_data, rows)
+                    drop_rows = list(rows)
+                    drop_playlist_data = dict(playlist_data)
+
                     event.setDropAction(Qt.DropAction.CopyAction)
                     event.accept()
+
+                    if spotify_handler:
+                        QTimer.singleShot(
+                            0,
+                            lambda: spotify_handler.addTableRowsToSpotifyPlaylist(
+                                drop_playlist_data,
+                                drop_rows,
+                            ),
+                        )
                     return True
+
                 event.ignore()
                 return True
 
@@ -830,6 +947,19 @@ class PlaylistTreeHandler(QObject):
     @pyqtSlot(list)
     def populate_spotify_playlists(self, playlists: List[Dict[str, Any]], refresh_cache: bool = True) -> None:
         try:
+            self._clear_spotify_playlist_drop_target()
+
+            previous_spotify_playlist_ids = [
+                str(playlist.get("id") or "").strip()
+                for playlist in self._spotify_playlist_cache
+                if isinstance(playlist, dict)
+            ]
+            for playlist_id in previous_spotify_playlist_ids:
+                if playlist_id:
+                    self.id_to_item.pop(playlist_id, None)
+                    self.item_widgets.pop(playlist_id, None)
+                    self.original_item_data.pop(playlist_id, None)
+
             if refresh_cache:
                 self._spotify_playlist_cache = [
                     dict(playlist)
@@ -1904,10 +2034,17 @@ class PlaylistTreeHandler(QObject):
         for playlist_id in pending_ids:
             if playlist_id not in self.id_to_item or playlist_id not in self.item_widgets:
                 continue
+
             item = self.id_to_item[playlist_id]
             widget = self.item_widgets[playlist_id]
-            item.setSizeHint(0, widget.sizeHint())
-            updated_any = True
+
+            try:
+                item.setSizeHint(0, widget.sizeHint())
+                updated_any = True
+            except RuntimeError:
+                self.id_to_item.pop(playlist_id, None)
+                self.item_widgets.pop(playlist_id, None)
+                self.original_item_data.pop(playlist_id, None)
 
         if updated_any:
             self.tree_widget.doItemsLayout()  # type: ignore

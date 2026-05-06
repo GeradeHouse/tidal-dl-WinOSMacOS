@@ -32,6 +32,8 @@ class PlaylistItemProgressWidget(QWidget):
 
     def __init__(self, name: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.setObjectName("playlistItemProgressWidget")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         
         # --- Main Vertical Layout ---
         self.main_layout = QVBoxLayout(self)
@@ -142,6 +144,45 @@ class PlaylistItemProgressWidget(QWidget):
         self.main_layout.invalidate()
         self.main_layout.activate()
         self.geometryRequest.emit()
+
+    def set_drop_target_active(self, active: bool) -> None:
+        """Applies the visual state used while dragged tracks hover over this playlist."""
+        active = bool(active)
+
+        if self.property("spotifyDropTarget") == active:
+            return
+
+        self.setProperty("spotifyDropTarget", active)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, active)
+
+        if active:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setToolTip("Drop selected tracks to add them to this Spotify playlist.")
+            self.setStyleSheet("""
+                PlaylistItemProgressWidget {
+                    background-color: rgba(29, 185, 84, 42);
+                    border: 1px solid rgba(29, 185, 84, 210);
+                    border-radius: 8px;
+                }
+                PlaylistItemProgressWidget QLabel {
+                    background: transparent;
+                    border: none;
+                    color: #ffffff;
+                }
+                PlaylistItemProgressWidget QProgressBar {
+                    background-color: rgba(0, 0, 0, 95);
+                    border: 1px solid rgba(255, 255, 255, 45);
+                    border-radius: 4px;
+                }
+            """)
+        else:
+            self.unsetCursor()
+            self.setToolTip("")
+            self.setStyleSheet("")
+
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
 
     def set_icon(self, icon: QIcon):
         if not icon.isNull():

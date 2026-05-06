@@ -868,7 +868,15 @@ class SpotifyAPI:
         latest_snapshot_id: Optional[str] = None
         try:
             for index, batch in enumerate(self._chunked(clean_uris)):
-                result = self.sp.playlist_add_items(playlist_id, batch, position=position if index == 0 else None)
+                add_kwargs: Dict[str, Any] = {}
+                if index == 0 and position is not None:
+                    add_kwargs["position"] = position
+
+                result = self.sp.playlist_add_items(
+                    playlist_id,
+                    batch,
+                    **add_kwargs,
+                )
                 if isinstance(result, dict):
                     latest_snapshot_id = result.get("snapshot_id") or latest_snapshot_id
             return self._spotify_success_result(f"Added {len(clean_uris)} Spotify item(s) to playlist.", playlist_id=playlist_id, snapshot_id=latest_snapshot_id)

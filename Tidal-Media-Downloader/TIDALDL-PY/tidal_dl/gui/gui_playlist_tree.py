@@ -10,6 +10,7 @@
 @Desc    :   Defines the UI widget for the playlist tree panel.
 """
 
+import contextlib
 import logging
 import os
 import time
@@ -82,100 +83,64 @@ class HoverAwareTreeWidget(QTreeWidget):
             Qt.GlobalColor.white
         )  # Or your default item text color
 
-    def mouseMoveEvent(self, event: Optional[QtGui.QMouseEvent]):
-        """Handles mouse movement to update the hover state manually."""
-        # current_time = time.time()
-        # if current_time - self._last_mousemove_log_time > self._mousemove_log_interval:
-        #     logger.debug(f"mouseMoveEvent triggered at {event.position().toPoint() if event else 'N/A'}")
-        #     self._last_mousemove_log_time = current_time
-        # logger.debug(f"mouseMoveEvent triggered at {event.position().toPoint() if event else 'N/A'}")
+    def _clear_current_hover_item(self) -> None:
+        current_item = self._currently_hovered_item
+        self._currently_hovered_item = None
 
-        if event is None:
-            # logger.debug("mouseMoveEvent: event is None, returning")
-            super().mouseMoveEvent(event)
+        if current_item is None:
             return
 
-        pos = event.position().toPoint()
-        item_under_mouse = self.itemAt(pos)
-        item_under_mouse_text = item_under_mouse.text(0) if item_under_mouse else "None"
+        with contextlib.suppress(RuntimeError):
+            self._apply_item_style(current_item, False)
 
-        currently_hovered_text = (
-            self._currently_hovered_item.text(0)
-            if self._currently_hovered_item
-            else "None"
-        )
-        # logger.debug(f"mouseMoveEvent: Pos: {pos}, ItemAtMouse: '{item_under_mouse_text}', PrevHovered: '{currently_hovered_text}'")
+    def mouseMoveEvent(self, event: Optional[QtGui.QMouseEvent]):
+        """Handles mouse movement to update hover state without keeping deleted items alive."""
+        if event is None:
+            with contextlib.suppress(RuntimeError):
+                super().mouseMoveEvent(event)
+            return
 
-        if item_under_mouse != self._currently_hovered_item:
-            # logger.debug(f"mouseMoveEvent: Hovered item changed. Old: '{currently_hovered_text}', New: '{item_under_mouse_text}'")
+        try:
+            pos = event.position().toPoint()
+            item_under_mouse = self.itemAt(pos)
+        except RuntimeError:
+            self._currently_hovered_item = None
+            return
 
-            if self._currently_hovered_item is not None:
-                # logger.debug(f"mouseMoveEvent: Attempting to UN-HOVER (manual): '{self._currently_hovered_item.text(0)}'")
-                self._apply_item_style(self._currently_hovered_item, False)
-                # Force an immediate repaint of the old item's area for diagnostics
-                # self.viewport().update(self.visualItemRect(self._currently_hovered_item)) # Already there
-                # self.viewport().repaint() # Add for more aggressive diagnostic repaint
+        if item_under_mouse is not self._currently_hovered_item:
+            self._clear_current_hover_item()
 
             if item_under_mouse is not None:
-                # logger.debug(f"mouseMoveEvent: Attempting to HOVER (manual): '{item_under_mouse.text(0)}'")
-                self._apply_item_style(item_under_mouse, True)
-                # Force an immediate repaint of the new item's area for diagnostics
-                # self.viewport().update(self.visualItemRect(item_under_mouse)) # Already there
-                # self.viewport().repaint() # Add for more aggressive diagnostic repaint
+                with contextlib.suppress(RuntimeError):
+                    self._apply_item_style(item_under_mouse, True)
+                self._currently_hovered_item = item_under_mouse
 
-            self._currently_hovered_item = item_under_mouse
-            # logger.debug(f"mouseMoveEvent: Updated _currently_hovered_item to '{item_under_mouse_text}'")
-
-        super().mouseMoveEvent(event)
+        with contextlib.suppress(RuntimeError):
+            super().mouseMoveEvent(event)
 
     def leaveEvent(self, a0: Optional[QtCore.QEvent]):
-        """Clears hover state when the mouse leaves the widget."""
-        # logger.debug(f"leaveEvent triggered. Current hovered: '{self._currently_hovered_item.text(0) if self._currently_hovered_item else 'None'}'")
-        if self._currently_hovered_item is not None:
-            # logger.debug(f"leaveEvent: Clearing hover state (manual) for item '{self._currently_hovered_item.text(0)}'")
-            self._apply_item_style(self._currently_hovered_item, False)
-            # self.viewport().repaint() # Add for more aggressive diagnostic repaint
-            self._currently_hovered_item = None
-        else:
-            # logger.debug("leaveEvent: No item was hovered.")
-            pass
-        super().leaveEvent(a0)
+        """Clears hover state when the pointer leaves the widget."""
+        self._clear_current_hover_item()
+        with contextlib.suppress(RuntimeError):
+            super().leaveEvent(a0)
 
     def _apply_item_style(self, item: QTreeWidgetItem, hover: bool):
-        """Applies or removes hover styling directly to the item."""
-        item_text = item.text(0) if item else "None"
-        action = "APPLYING MANUAL HOVER" if hover else "REMOVING MANUAL HOVER"
-        # logger.debug(f"_apply_item_style: {action} for item '{item_text}'")
+        """Requests repaint for hover styling while tolerating deleted tree items."""
+        if item is None:
+            return
 
-        # Delegate will now handle visual hover styling (background/foreground).
-        # This method can be kept for other hover-related data if needed,
-        # or simplified if only visual styling was its purpose.
-        # For now, let's prevent it from changing background/foreground.
-        # if hover:
-        #     # item.setBackground(0, QBrush(self.hover_background_color)) # Disabled
-        #     # item.setForeground(0, QBrush(self.hover_text_color)) # Disabled
-        #     item.setData(0, self._hover_role, "true")
-        # else:
-        #     # item.setBackground(0, QBrush(self.default_background_color)) # Disabled
-        #     # item.setForeground(0, QBrush(self.default_text_color)) # Disabled
-        #     item.setData(0, self._hover_role, "false")
+        try:
+            item_rect = self.visualItemRect(item)
+        except RuntimeError:
+            return
 
-        # The item.setData calls for _hover_role can remain if this role is used elsewhere
-        # to track hover state programmatically.
+        try:
+            viewport = self.viewport()
+        except RuntimeError:
+            return
 
-        item_rect = self.visualItemRect(item)
-        # logger.debug(f"  Item '{item_text}' visualRect: {item_rect}. Requesting update.")
-
-        viewport = self.viewport()
         if viewport and item_rect.isValid():
             viewport.update(item_rect)
-            # For extreme diagnostics, force a full repaint after every style change
-            # logger.debug(f"  Calling viewport.repaint() after styling '{item_text}'")
-            # viewport.repaint()
-        else:
-            logger.warning(
-                f"  Viewport or item_rect invalid for '{item_text}'. Viewport: {viewport}, Rect valid: {item_rect.isValid()}"
-            )
 
 
 # HoverItemDelegate class removed as per simplification
