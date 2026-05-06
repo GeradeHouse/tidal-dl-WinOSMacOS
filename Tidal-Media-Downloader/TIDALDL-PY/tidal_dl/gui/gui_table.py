@@ -274,6 +274,7 @@ class SplitterTable(QtWidgets.QTableWidget):
         self.lastClickedRow = None
         self._selection_before_mouse_press = set()
         self._hoveredRow = -1
+        self._playlist_header_widget = None
 
         # Variables for mouse–based toggling.
         self._mousePressPos = None
@@ -301,6 +302,9 @@ class SplitterTable(QtWidgets.QTableWidget):
 
     def set_linking_gui_handler(self, handler):
         self.linking_gui_handler = handler
+
+    def set_playlist_header_widget(self, playlist_header_widget: Any) -> None:
+        self._playlist_header_widget = playlist_header_widget
 
     # Removed _set_initial_column_widths and _restore_interactive_resize_modes methods
 
@@ -568,7 +572,19 @@ class SplitterTable(QtWidgets.QTableWidget):
         self._hoveredRow = row
         for affected_row in (old_row, row):
             if 0 <= affected_row < self.rowCount():
-                self.viewport().update(self.visualItemRect(self.item(affected_row, 0)))
+                for col in range(self.columnCount()):
+                    item = self.item(affected_row, col)
+                    if item is not None:
+                        self.viewport().update(self.visualItemRect(item))
+
+    def wheelEvent(self, e: QtGui.QWheelEvent | None) -> None:
+        if e is not None:
+            playlist_header = getattr(self, "_playlist_header_widget", None)
+            consume = getattr(playlist_header, "consume_wheel_event_for_header", None)
+            if callable(consume) and consume(e):
+                e.accept()
+                return
+        super().wheelEvent(e)
 
     # Fix parameter name mismatch: event -> e
     def mouseMoveEvent(self, e: QtGui.QMouseEvent | None):

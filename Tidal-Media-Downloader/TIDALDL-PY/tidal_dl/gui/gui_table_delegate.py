@@ -115,14 +115,17 @@ class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
         self.initStyleOption(opt, index)
 
         hovered_row = getattr(option.widget, "_hoveredRow", -1) if option.widget is not None else -1
-        if hovered_row == index.row() and not (opt.state & QtWidgets.QStyle.StateFlag.State_Selected):
+        selected_rows = getattr(option.widget, "selectedRows", set()) if option.widget is not None else set()
+        row_selected = index.row() in selected_rows
+        row_hovered = hovered_row == index.row() and not row_selected
+        if row_hovered:
             opt.state |= QtWidgets.QStyle.StateFlag.State_MouseOver
 
         foreground_brush = self._foreground_brush(index)
         if foreground_brush is not None:
             self._apply_foreground_brush(opt, foreground_brush)
 
-        # Draw the selection/hover panel over the full cell, then inset text for readability.
+        # Draw the base item, then paint explicit row-level hover/selection overlays.
         background_option = QtWidgets.QStyleOptionViewItem(opt)
         background_option.text = ""
         style.drawControl(
@@ -131,6 +134,11 @@ class HighlightPreservingDelegate(QtWidgets.QStyledItemDelegate):
             painter,
             background_option.widget,
         )
+
+        if row_selected:
+            painter.fillRect(option.rect, QtGui.QColor(58, 58, 63, 224))
+        elif row_hovered:
+            painter.fillRect(option.rect, QtGui.QColor(255, 255, 255, 24))
 
         opt.rect = style.subElementRect(
             QtWidgets.QStyle.SubElement.SE_ItemViewItemText,

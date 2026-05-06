@@ -193,7 +193,9 @@ class MainView(QWidget):
                 self.playlistHeaderWidget.set_scroll_offset
             )
             self.playlistHeaderWidget.set_scroll_target(self.tableWidget)
-        
+            if hasattr(self.tableWidget, "set_playlist_header_widget"):
+                self.tableWidget.set_playlist_header_widget(self.playlistHeaderWidget)
+
         # Inject table_handler reference into playlist tree handler to avoid circular access
         self.tree_handler.set_table_handler(self.table_handler)
         
