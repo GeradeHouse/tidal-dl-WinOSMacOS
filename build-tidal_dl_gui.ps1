@@ -36,6 +36,21 @@ Enables "Testing Mode". Behavior depends on whether -Installer is used:
     with the 'TestingMode' flag, causing it to install into 'Music\Tidal-dl-test'.
 Example: .\build-tidal_dl_gui.ps1 -Windowed -Testing
 
+.PARAMETER DeployInstalled
+Enables "Installed Deploy Mode" for fast local iteration without rebuilding the installer.
+After PyInstaller completes, the script copies the rebuilt EXE and replaces the '_internal'
+folder in the actual installed OneDrive location:
+
+    C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl
+
+Before copying, the script checks whether tidal-dl-gui.exe is running and force-closes it
+to avoid locked EXE/DLL files. The deployment only replaces the EXE and '_internal' folder;
+other existing files and settings in the install folder are left untouched.
+
+This flag cannot be combined with -Installer or -Testing.
+
+Example: .\build-tidal_dl_gui.ps1 -Windowed -BuildMode Fast -DeployInstalled
+
 .PARAMETER BuildMode
 Controls the cleanup strategy:
 - 'Full' (Default): Deletes all artifacts (dist, build, spec) and reinstalls requirements.
@@ -78,6 +93,11 @@ Alias: -h
 # 6. Show Help
 .\build-tidal_dl_gui.ps1 -Help
 .\build-tidal_dl_gui.ps1 -h
+
+.EXAMPLE
+# 7. Fast Deploy to Actual Installed Location
+# Rebuilds the EXE, closes the running app if needed, then deploys to the real install folder.
+.\build-tidal_dl_gui.ps1 -Windowed -BuildMode Fast -DeployInstalled
 #>
 param(
     [Parameter(Mandatory=$false)]
@@ -99,6 +119,9 @@ param(
 
     [Parameter(Mandatory=$false)]
     [switch]$Testing,
+
+    [Parameter(Mandatory=$false)]
+    [switch]$DeployInstalled,
 
     [Parameter(Mandatory=$false)]
     [Alias("h")]
@@ -162,6 +185,16 @@ if (Test-Path $IssPath) {
 # --- Resolve Build Type (new switch style takes precedence) ---
 if ($Windowed -and $Console) {
     Write-Error "You cannot specify both -Windowed and -Console at the same time."
+    exit 1
+}
+
+if ($DeployInstalled -and $Installer) {
+    Write-Error "The -DeployInstalled flag cannot be combined with -Installer. Use -DeployInstalled for fast direct deployment, or -Installer for installer creation."
+    exit 1
+}
+
+if ($DeployInstalled -and $Testing) {
+    Write-Error "The -DeployInstalled flag cannot be combined with -Testing because both flags deploy to different target folders."
     exit 1
 }
 
@@ -258,10 +291,117 @@ $IconFile = Join-Path $PackageDir "tidal_dl\assets\icons\icon-tidal-dl-gui.ico" 
 $SplashImage = Join-Path $PackageDir "tidal_dl\assets\images\splash.png" # Path to the splash screen image
 
 # --- Post-Build Copy Configuration ---
-$BuildOutputDir     = Join-Path $ProjectSourceDir ("dist\" + $AppName)
-$PostBuildExePath   = Join-Path $BuildOutputDir ($AppName + ".exe")
-$PostBuildFolder    = Join-Path $BuildOutputDir "_internal"
-$PostBuildTargetDir = "C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl-test"
+$BuildOutputDir        = Join-Path $ProjectSourceDir ("dist\" + $AppName)
+$PostBuildExePath      = Join-Path $BuildOutputDir ($AppName + ".exe")
+$PostBuildFolder       = Join-Path $BuildOutputDir "_internal"
+
+# Test deployment target used by -Testing
+$PostBuildTargetDir    = "C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl-test"
+
+# Actual installed app location used by -DeployInstalled
+$InstalledDeployTargetDir = "C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl"
+
+# Windows process name without ".exe"
+$AppProcessName = $AppName
+
+function Stop-AppProcessIfRunning {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$ProcessName,
+
+        [Parameter(Mandatory=$false)]
+        [int]$TimeoutSeconds = 10
+    )
+
+    $runningProcesses = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
+
+    if ($runningProcesses.Count -eq 0) {
+        Write-Host "No running '$ProcessName' process detected." -ForegroundColor Green
+        return
+    }
+
+    Write-Warning "Detected running process '$ProcessName'. Force-closing before deployment..."
+
+    foreach ($proc in $runningProcesses) {
+        try {
+            Write-Host "Stopping $($proc.ProcessName).exe with PID $($proc.Id)..." -ForegroundColor Yellow
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+        } catch {
+            throw "Failed to stop process '$($proc.ProcessName).exe' with PID $($proc.Id): $($_.Exception.Message)"
+        }
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+
+    do {
+        Start-Sleep -Milliseconds 250
+        $stillRunning = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
+    } while ($stillRunning.Count -gt 0 -and (Get-Date) -lt $deadline)
+
+    if ($stillRunning.Count -gt 0) {
+        $remainingPids = ($stillRunning | ForEach-Object { $_.Id }) -join ", "
+        throw "Process '$ProcessName' is still running after $TimeoutSeconds second(s). Remaining PID(s): $remainingPids"
+    }
+
+    Write-Host "Process '$ProcessName' is closed." -ForegroundColor Green
+}
+
+function Copy-BuildArtifactsToTarget {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$SourceExePath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$SourceInternalFolder,
+
+        [Parameter(Mandatory=$true)]
+        [string]$TargetDir,
+
+        [Parameter(Mandatory=$true)]
+        [string]$ProcessName,
+
+        [Parameter(Mandatory=$false)]
+        [switch]$ForceCloseApp
+    )
+
+    if ($ForceCloseApp) {
+        Stop-AppProcessIfRunning -ProcessName $ProcessName
+    }
+
+    if (-not (Test-Path $SourceExePath)) {
+        throw "Expected EXE not found at '$SourceExePath'."
+    }
+
+    if (-not (Test-Path $SourceInternalFolder)) {
+        throw "Expected '_internal' folder not found at '$SourceInternalFolder'."
+    }
+
+    if (-not (Test-Path $TargetDir)) {
+        Write-Host "Target directory does not exist. Creating: $TargetDir" -ForegroundColor Yellow
+        New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
+    }
+
+    $targetExePath = Join-Path $TargetDir (Split-Path $SourceExePath -Leaf)
+    $targetInternalFolder = Join-Path $TargetDir "_internal"
+
+    Write-Host "Copying EXE:" -ForegroundColor Yellow
+    Write-Host "  From: $SourceExePath"
+    Write-Host "  To:   $targetExePath"
+    Copy-Item -Path $SourceExePath -Destination $targetExePath -Force
+
+    if (Test-Path $targetInternalFolder) {
+        Write-Host "Replacing existing '_internal' folder:" -ForegroundColor Yellow
+        Write-Host "  Removing: $targetInternalFolder"
+        Remove-Item -Path $targetInternalFolder -Recurse -Force
+    }
+
+    Write-Host "Copying new '_internal' folder:" -ForegroundColor Yellow
+    Write-Host "  From: $SourceInternalFolder"
+    Write-Host "  To:   $TargetDir"
+    Copy-Item -Path $SourceInternalFolder -Destination $TargetDir -Recurse -Force
+
+    Write-Host "Deployment copy completed successfully." -ForegroundColor Green
+}
 
 # --- Start ---
 Write-Host "-------------------------------------" -ForegroundColor Cyan
@@ -269,6 +409,7 @@ Write-Host "Starting Build for '$AppName'" -ForegroundColor Cyan
 Write-Host "Build Type: $BuildType" -ForegroundColor Cyan
 Write-Host "Build Mode: $BuildMode" -ForegroundColor Cyan
 Write-Host "Testing Mode: $(if ($Testing) {'Enabled'} else {'Disabled'})" -ForegroundColor Cyan
+Write-Host "Deploy Installed: $(if ($DeployInstalled) {'Enabled'} else {'Disabled'})" -ForegroundColor Cyan
 Write-Host "Project Source: $ProjectSourceDir" -ForegroundColor Cyan
 Write-Host "-------------------------------------"
 
@@ -425,6 +566,27 @@ finally {
 Set-Location $ScriptDir
 Write-Host "Restored working directory to: $ScriptDir"
 
+# --- Post-Build: Deploy Artifacts to Actual Installed Location (CONDITIONAL) ---
+if ($DeployInstalled) {
+    Write-Host "-------------------------------------" -ForegroundColor Cyan
+    Write-Host "Deploying build artifacts to actual installed location..." -ForegroundColor Cyan
+    Write-Host "Target: $InstalledDeployTargetDir" -ForegroundColor Cyan
+    Write-Host "Only the EXE and '_internal' folder will be replaced." -ForegroundColor Yellow
+    Write-Host "Other files and settings in the target folder will be left untouched." -ForegroundColor Yellow
+
+    try {
+        Copy-BuildArtifactsToTarget `
+            -SourceExePath $PostBuildExePath `
+            -SourceInternalFolder $PostBuildFolder `
+            -TargetDir $InstalledDeployTargetDir `
+            -ProcessName $AppProcessName `
+            -ForceCloseApp
+    } catch {
+        Write-Error "Failed to deploy to actual installed location: $($_.Exception.Message)"
+        exit 1
+    }
+}
+
 # --- Post-Build: Copy Artifacts to Test Location (CONDITIONAL) ---
 # Logic:
 # 1. If -Testing is ON and -Installer is OFF: Copy files manually (for raw EXE testing).
@@ -435,40 +597,14 @@ if ($Testing -and -not $Installer) {
     Write-Host "-------------------------------------" -ForegroundColor Cyan
     Write-Host "Copying build artifacts to test location (Testing Mode)..." -ForegroundColor Cyan
 
-    # Ensure the target directory exists
     try {
-        if (-not (Test-Path $PostBuildTargetDir)) {
-            Write-Host "Test directory does not exist. Creating: $PostBuildTargetDir" -ForegroundColor Yellow
-            New-Item -ItemType Directory -Path $PostBuildTargetDir -Force | Out-Null
-        }
+        Copy-BuildArtifactsToTarget `
+            -SourceExePath $PostBuildExePath `
+            -SourceInternalFolder $PostBuildFolder `
+            -TargetDir $PostBuildTargetDir `
+            -ProcessName $AppProcessName
     } catch {
-        Write-Error "Failed to ensure test directory '$PostBuildTargetDir' exists: $($_.Exception.Message)"
-    }
-
-    # Copy the EXE
-    if (Test-Path $PostBuildExePath) {
-        try {
-            Write-Host "Copying EXE from '$PostBuildExePath' to '$PostBuildTargetDir'..." -ForegroundColor Yellow
-            Copy-Item -Path $PostBuildExePath -Destination $PostBuildTargetDir -Force
-            Write-Host "EXE copied successfully." -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to copy EXE to test location: $($_.Exception.Message)"
-        }
-    } else {
-        Write-Warning "Expected EXE not found at '$PostBuildExePath'. Skipping EXE copy."
-    }
-
-    # Copy the _internal folder (and its contents)
-    if (Test-Path $PostBuildFolder) {
-        try {
-            Write-Host "Copying '_internal' folder from '$PostBuildFolder' to '$PostBuildTargetDir'..." -ForegroundColor Yellow
-            Copy-Item -Path $PostBuildFolder -Destination $PostBuildTargetDir -Recurse -Force
-            Write-Host "'_internal' folder copied successfully." -ForegroundColor Green
-        } catch {
-            Write-Error "Failed to copy '_internal' folder to test location: $($_.Exception.Message)"
-        }
-    } else {
-        Write-Warning "Expected '_internal' folder not found at '$PostBuildFolder'. Skipping folder copy."
+        Write-Error "Failed to copy artifacts to test location: $($_.Exception.Message)"
     }
 } elseif ($Testing -and $Installer) {
     Write-Host "-------------------------------------" -ForegroundColor Cyan
