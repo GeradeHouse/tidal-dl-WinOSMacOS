@@ -16,7 +16,7 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 splash = Splash(
-    'C:\\PythonProjects\\tidal-dl-WinOSMacOS\\Tidal-Media-Downloader\\TIDALDL-PY\\tidal_dl\\assets\\images\\splash.png',
+    'C:\\PythonProjects\\tidal-dl-WinOSMacOS\\Tidal-Media-Downloader\\build\\splash\\splash-versioned.png',
     binaries=a.binaries,
     datas=a.datas,
     text_pos=None,

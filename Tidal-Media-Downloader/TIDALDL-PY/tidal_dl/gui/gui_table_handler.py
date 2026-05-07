@@ -1536,12 +1536,13 @@ class TableHandler(QObject):
             if not track_id or not cover_id:
                 return
             identity = f"tidal:{track_id}"
-            signal_key = cover_id
-            cached = cover_cache.get(signal_key)
+            image_url = TIDAL_API.getCoverUrl(cover_id, "320", "320") or cover_id
+            signal_key = image_url
+            cached = cover_cache.get(signal_key) or cover_cache.get(cover_id)
             if cached:
                 self._on_row_cover_ready(generation, identity, cached)
                 return
-            worker = CoverArtWorker(None, cover_cache, "Track", signal_key, getattr(item_metadata, "title", ""))
+            worker = CoverArtWorker(signal_key, cover_cache, "Track", cover_id, getattr(item_metadata, "title", ""))
         worker.signals.cover_ready.connect(lambda _key, pixmap, gen=generation, row_identity=identity: self._on_row_cover_ready(gen, row_identity, pixmap))
         QtCore.QThreadPool.globalInstance().start(worker)
 

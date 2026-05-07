@@ -11,6 +11,7 @@
 
 import logging
 import pickle
+import re
 import threading
 from pathlib import Path
 from typing import Dict, Optional
@@ -43,6 +44,18 @@ def _setup_gui_logging():
 _setup_gui_logging()
 
 CACHE_FILE_NAME = "cover_cache.pkl"
+
+TIDAL_COVER_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}[-/][0-9a-fA-F]{4}[-/][0-9a-fA-F]{4}[-/][0-9a-fA-F]{4}[-/][0-9a-fA-F]{12}$"
+)
+
+
+def _looks_like_tidal_cover_id(value: Optional[str]) -> bool:
+    text = str(value or "").strip()
+    if not text or text.startswith(("http://", "https://")):
+        return False
+    return bool(TIDAL_COVER_ID_RE.match(text.replace("-", "/")))
+
 
 class CoverCache:
     """A persistent, singleton, disk-based cache for cover art (QPixmap)."""
@@ -173,6 +186,27 @@ class CoverArtWorker(QRunnable):
         self.item_name = item_name or ""
         self.signals = CoverArtWorkerSignals()
 
+    def _fetch_tidal_cover_data(self, cover_sid_or_url: str) -> tuple[bytes, str]:
+        resolved_key = TIDAL_API.getCoverUrl(str(cover_sid_or_url), "320", "320")
+        cache_key = resolved_key if resolved_key else str(cover_sid_or_url)
+
+        for cover_size in ("320", "640", "1280"):
+            image_data = TIDAL_API.getCoverData(
+                str(cover_sid_or_url),
+                cover_size,
+                cover_size,
+                suppress_logs=(self.type == "Artist"),
+            )
+            if image_data:
+                resolved_size_key = TIDAL_API.getCoverUrl(
+                    str(cover_sid_or_url),
+                    cover_size,
+                    cover_size,
+                )
+                return image_data, resolved_size_key if resolved_size_key else cache_key
+
+        return b"", cache_key
+
     def run(self):
         logger.debug(
             "[CoverArtWorker] Starting run for URL: '%s', Type: %s, ID: %s, Name: %s",
@@ -217,35 +251,36 @@ class CoverArtWorker(QRunnable):
             elif self.type in ["Track", "Album", "Artist"]:
                 cover_sid_or_url: Optional[str] = self.url
 
-                # Resolve from API only when source is missing.
-                # If we already have a UUID/full URL, getCoverData can handle it directly.
+                # Resolve from API only when no direct cover source is available.
                 if not cover_sid_or_url:
                     if self.type == "Track":
-                        track = TIDAL_API.getTrack(self.item_id)
-                        if (
-                            track
-                            and hasattr(track, "album")
-                            and track.album
-                            and hasattr(track.album, "cover")
-                        ):
-                            cover_sid_or_url = getattr(track.album, "cover", None)
+                        if _looks_like_tidal_cover_id(self.item_id):
+                            cover_sid_or_url = self.item_id
+                        else:
+                            track = TIDAL_API.getTrack(self.item_id)
+                            if (
+                                track
+                                and hasattr(track, "album")
+                                and track.album
+                                and hasattr(track.album, "cover")
+                            ):
+                                cover_sid_or_url = getattr(track.album, "cover", None)
                     elif self.type == "Album":
-                        album = TIDAL_API.getAlbum(self.item_id)
-                        if album and hasattr(album, "cover"):
-                            cover_sid_or_url = getattr(album, "cover", None)
+                        if _looks_like_tidal_cover_id(self.item_id):
+                            cover_sid_or_url = self.item_id
+                        else:
+                            album = TIDAL_API.getAlbum(self.item_id)
+                            if album and hasattr(album, "cover"):
+                                cover_sid_or_url = getattr(album, "cover", None)
                     elif self.type == "Artist":
-                        # Search results may pass an artist picture UUID (not a full URL).
-                        # getCoverData handles both UUIDs and full URLs.
-                        if not cover_sid_or_url:
-                            artist = TIDAL_API.getArtist(self.item_id)
-                            if artist and hasattr(artist, "picture"):
-                                cover_sid_or_url = getattr(artist, "picture", None)
+                        artist = TIDAL_API.getArtist(self.item_id)
+                        if artist and hasattr(artist, "picture"):
+                            cover_sid_or_url = getattr(artist, "picture", None)
 
                 if cover_sid_or_url:
                     resolved_key = TIDAL_API.getCoverUrl(str(cover_sid_or_url), "320", "320")
                     signal_key = resolved_key if resolved_key else str(cover_sid_or_url)
 
-                    # Re-check cache using the normalized key after source resolution.
                     cached_pixmap = self.cache.get(signal_key)
                     if cached_pixmap:
                         self.signals.cover_ready.emit(signal_key, cached_pixmap)
@@ -261,17 +296,12 @@ class CoverArtWorker(QRunnable):
                 )
 
                 if self.type == "Artist" and not cover_sid_or_url:
-                    # Missing artist pictures are expected for some catalog entries.
-                    # Emit an empty pixmap so subscribers can clean up silently.
                     self.signals.cover_ready.emit(signal_key, QPixmap())
                     return
 
                 if cover_sid_or_url:
-                    image_data = TIDAL_API.getCoverData(
-                        str(cover_sid_or_url),
-                        "320",
-                        "320",
-                        suppress_logs=(self.type == "Artist"),
+                    image_data, signal_key = self._fetch_tidal_cover_data(
+                        str(cover_sid_or_url)
                     )
 
             else: # For other types like Spotify
@@ -281,10 +311,18 @@ class CoverArtWorker(QRunnable):
                         image_data = response.content
 
             if not image_data:
-                if self.type == "Artist":
-                    # Empty artist image payloads are non-fatal and should stay silent.
+                if self.type in {"Artist", "Track", "Album", "tidal"}:
+                    logger.warning(
+                        "COVER_DIAG_NO_IMAGE_DATA type=%s item_id=%s item_name=%s url=%s signal_key=%s",
+                        self.type,
+                        self.item_id,
+                        self.item_name,
+                        self.url,
+                        signal_key,
+                    )
                     self.signals.cover_ready.emit(signal_key, QPixmap())
                     return
+
                 logger.warning(
                     "COVER_DIAG_NO_IMAGE_DATA type=%s item_id=%s item_name=%s url=%s signal_key=%s",
                     self.type,
@@ -297,9 +335,30 @@ class CoverArtWorker(QRunnable):
 
             pixmap = QPixmap()
             pixmap.loadFromData(image_data)
+            if pixmap.isNull():
+                logger.warning(
+                    "COVER_DIAG_INVALID_IMAGE_DATA type=%s item_id=%s item_name=%s url=%s signal_key=%s",
+                    self.type,
+                    self.item_id,
+                    self.item_name,
+                    self.url,
+                    signal_key,
+                )
+                self.signals.cover_ready.emit(signal_key, QPixmap())
+                return
 
-            # Cache the new pixmap using the signal_key
-            self.cache.set(signal_key, pixmap)
+            cache_aliases = {signal_key}
+            if self.url:
+                cache_aliases.add(str(self.url))
+            if _looks_like_tidal_cover_id(self.item_id):
+                cache_aliases.add(str(self.item_id))
+                cover_url_alias = TIDAL_API.getCoverUrl(str(self.item_id), "320", "320")
+                if cover_url_alias:
+                    cache_aliases.add(cover_url_alias)
+
+            for cache_alias in cache_aliases:
+                if cache_alias:
+                    self.cache.set(cache_alias, pixmap)
 
             self.signals.cover_ready.emit(signal_key, pixmap)
 
