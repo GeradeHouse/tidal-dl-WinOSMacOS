@@ -162,7 +162,6 @@ cover_cache.pkl
 spotify_to_tidal_links.json
 dist-installer/
 TidalDL_Installer_v*.exe
-version.iss
 generate-file-listing.ps1
 
 

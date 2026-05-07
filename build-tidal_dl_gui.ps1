@@ -39,13 +39,16 @@ Example: .\build-tidal_dl_gui.ps1 -Windowed -Testing
 .PARAMETER DeployInstalled
 Enables "Installed Deploy Mode" for fast local iteration without rebuilding the installer.
 After PyInstaller completes, the script copies the rebuilt EXE and replaces the '_internal'
-folder in the actual installed OneDrive location:
+folder in the actual installed Program Files location:
 
-    C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl
+    C:\Program Files\Tidal-DL GUI
 
 Before copying, the script checks whether tidal-dl-gui.exe is running and force-closes it
 to avoid locked EXE/DLL files. The deployment only replaces the EXE and '_internal' folder;
-other existing files and settings in the install folder are left untouched.
+other existing files, installer metadata, and settings in the install folder are left untouched.
+
+Because this target is inside 'C:\Program Files', the copy step requires elevation. The build
+itself still runs unelevated; only the final deploy helper is launched with a UAC prompt when needed.
 
 This flag cannot be combined with -Installer or -Testing.
 
@@ -139,10 +142,29 @@ $ScriptDir = $PSScriptRoot # Directory where this script is located
 $ProjectSourceDir = Join-Path $ScriptDir "Tidal-Media-Downloader" # Path to the folder containing main.py
 $PackageDir = Join-Path $ProjectSourceDir "TIDALDL-PY" # Path to the main Python package
 
+function Get-AppVersionFromIss {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        return $null
+    }
+
+    $content = Get-Content -Path $Path -Raw -Encoding UTF8
+    if ($content -match '(?m)^#define\s+MyAppVersion\s+"([^"]+)"') {
+        return $matches[1]
+    }
+
+    return $null
+}
+
 # --- 0. Automatic Version Increment ---
 # This runs every time the script is executed.
 # Targets the separate version file 'version.iss' to avoid Git noise on the main script.
 $IssPath = Join-Path $ScriptDir "version.iss"
+$AppVersion = $null
 if (Test-Path $IssPath) {
     Write-Host "Checking version in version.iss..." -ForegroundColor Yellow
     try {
@@ -165,6 +187,7 @@ if (Test-Path $IssPath) {
             }
 
             $newVersion = "$major.$minor.$patch"
+            $AppVersion = $newVersion
             
             # Replace with new version
             $issContent = $issContent -replace $verPattern, "#define MyAppVersion `"$newVersion`""
@@ -180,6 +203,15 @@ if (Test-Path $IssPath) {
     }
 } else {
     Write-Warning "version.iss not found at '$IssPath'. Skipping version update."
+}
+
+if (-not $AppVersion) {
+    $AppVersion = Get-AppVersionFromIss -Path $IssPath
+}
+
+if (-not $AppVersion) {
+    $AppVersion = "unknown"
+    Write-Warning "Application version could not be read from version.iss. The splash screen will use '$AppVersion'."
 }
 
 # --- Resolve Build Type (new switch style takes precedence) ---
@@ -288,7 +320,11 @@ Write-Host "Using Python from: $PythonPath" -ForegroundColor Green
 $AppName = "tidal-dl-gui"
 $MainScript = "main.py" # Relative to $ProjectSourceDir
 $IconFile = Join-Path $PackageDir "tidal_dl\assets\icons\icon-tidal-dl-gui.ico" # Relative to $PackageDir, use backslash for Windows path
-$SplashImage = Join-Path $PackageDir "tidal_dl\assets\images\splash.png" # Path to the splash screen image
+$SplashSourceImage = Join-Path $PackageDir "tidal_dl\assets\images\splash.png" # Original splash screen image
+$SplashImage = $SplashSourceImage # May be replaced with a generated versioned splash image below
+$SplashVersionFont = Join-Path $PackageDir "tidal_dl\assets\fonts\nationale-black.otf"
+$VersionedSplashDir = Join-Path $ProjectSourceDir "build\splash"
+$VersionedSplashImage = Join-Path $VersionedSplashDir "splash-versioned.png"
 
 # --- Post-Build Copy Configuration ---
 $BuildOutputDir        = Join-Path $ProjectSourceDir ("dist\" + $AppName)
@@ -299,7 +335,7 @@ $PostBuildFolder       = Join-Path $BuildOutputDir "_internal"
 $PostBuildTargetDir    = "C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl-test"
 
 # Actual installed app location used by -DeployInstalled
-$InstalledDeployTargetDir = "C:\Users\imede.IME-DEKKER\OneDrive\Muziek\Tidal-dl"
+$InstalledDeployTargetDir = "C:\Program Files\Tidal-DL GUI"
 
 # Windows process name without ".exe"
 $AppProcessName = $AppName
@@ -403,6 +439,335 @@ function Copy-BuildArtifactsToTarget {
     Write-Host "Deployment copy completed successfully." -ForegroundColor Green
 }
 
+function Test-IsAdministrator {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Invoke-ElevatedBuildArtifactDeploy {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$SourceExePath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$SourceInternalFolder,
+
+        [Parameter(Mandatory=$true)]
+        [string]$TargetDir,
+
+        [Parameter(Mandatory=$true)]
+        [string]$ProcessName
+    )
+
+    $helperScriptPath = Join-Path $env:TEMP "tidal-dl-gui-elevated-deploy.ps1"
+
+    Set-Content -Path $helperScriptPath -Encoding UTF8 -Value @'
+#Requires -Version 5.1
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$SourceExePath,
+
+    [Parameter(Mandatory=$true)]
+    [string]$SourceInternalFolder,
+
+    [Parameter(Mandatory=$true)]
+    [string]$TargetDir,
+
+    [Parameter(Mandatory=$true)]
+    [string]$ProcessName
+)
+
+$ErrorActionPreference = "Stop"
+
+function Stop-AppProcessIfRunning {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$ProcessName,
+
+        [Parameter(Mandatory=$false)]
+        [int]$TimeoutSeconds = 10
+    )
+
+    $runningProcesses = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
+
+    if ($runningProcesses.Count -eq 0) {
+        Write-Host "No running '$ProcessName' process detected." -ForegroundColor Green
+        return
+    }
+
+    Write-Warning "Detected running process '$ProcessName'. Force-closing before deployment..."
+
+    foreach ($proc in $runningProcesses) {
+        Write-Host "Stopping $($proc.ProcessName).exe with PID $($proc.Id)..." -ForegroundColor Yellow
+        Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+
+    do {
+        Start-Sleep -Milliseconds 250
+        $stillRunning = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
+    } while ($stillRunning.Count -gt 0 -and (Get-Date) -lt $deadline)
+
+    if ($stillRunning.Count -gt 0) {
+        $remainingPids = ($stillRunning | ForEach-Object { $_.Id }) -join ", "
+        throw "Process '$ProcessName' is still running after $TimeoutSeconds second(s). Remaining PID(s): $remainingPids"
+    }
+
+    Write-Host "Process '$ProcessName' is closed." -ForegroundColor Green
+}
+
+try {
+    Stop-AppProcessIfRunning -ProcessName $ProcessName
+
+    if (-not (Test-Path $SourceExePath)) {
+        throw "Expected EXE not found at '$SourceExePath'."
+    }
+
+    if (-not (Test-Path $SourceInternalFolder)) {
+        throw "Expected '_internal' folder not found at '$SourceInternalFolder'."
+    }
+
+    if (-not (Test-Path $TargetDir)) {
+        Write-Host "Target directory does not exist. Creating: $TargetDir" -ForegroundColor Yellow
+        New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
+    }
+
+    $targetExePath = Join-Path $TargetDir (Split-Path $SourceExePath -Leaf)
+    $targetInternalFolder = Join-Path $TargetDir "_internal"
+
+    Write-Host "Copying EXE:" -ForegroundColor Yellow
+    Write-Host "  From: $SourceExePath"
+    Write-Host "  To:   $targetExePath"
+    Copy-Item -Path $SourceExePath -Destination $targetExePath -Force
+
+    if (Test-Path $targetInternalFolder) {
+        Write-Host "Replacing existing '_internal' folder:" -ForegroundColor Yellow
+        Write-Host "  Removing: $targetInternalFolder"
+        Remove-Item -Path $targetInternalFolder -Recurse -Force
+    }
+
+    Write-Host "Copying new '_internal' folder:" -ForegroundColor Yellow
+    Write-Host "  From: $SourceInternalFolder"
+    Write-Host "  To:   $TargetDir"
+    Copy-Item -Path $SourceInternalFolder -Destination $TargetDir -Recurse -Force
+
+    Write-Host "Elevated deployment copy completed successfully." -ForegroundColor Green
+    exit 0
+} catch {
+    Write-Error "Elevated deployment failed: $($_.Exception.Message)"
+    Read-Host "Press Enter to close this elevated deployment window"
+    exit 1
+}
+'@
+
+    Write-Host "Launching elevated deploy helper for Program Files copy..." -ForegroundColor Yellow
+    Write-Host "A Windows UAC prompt may appear." -ForegroundColor Yellow
+
+    $argList = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", "`"$helperScriptPath`"",
+        "-SourceExePath", "`"$SourceExePath`"",
+        "-SourceInternalFolder", "`"$SourceInternalFolder`"",
+        "-TargetDir", "`"$TargetDir`"",
+        "-ProcessName", "`"$ProcessName`""
+    )
+
+    $proc = Start-Process `
+        -FilePath "powershell.exe" `
+        -ArgumentList $argList `
+        -Verb RunAs `
+        -Wait `
+        -PassThru
+
+    if ($proc.ExitCode -ne 0) {
+        throw "Elevated deployment helper failed with exit code $($proc.ExitCode)."
+    }
+
+    Write-Host "Elevated deployment helper completed successfully." -ForegroundColor Green
+}
+
+function New-VersionedSplashImage {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$SourceImagePath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$OutputImagePath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$Version,
+
+        [Parameter(Mandatory=$false)]
+        [string]$FontPath
+    )
+
+    Add-Type -AssemblyName System.Drawing
+
+    $outputDir = Split-Path -Path $OutputImagePath -Parent
+    if (-not (Test-Path $outputDir)) {
+        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+    }
+
+    $source = $null
+    $bitmap = $null
+    $graphics = $null
+    $fontCollection = $null
+    $format = $null
+    $shadowPath = $null
+    $textPath = $null
+    $shadowBrush = $null
+    $shadowPen = $null
+    $outlinePen = $null
+    $glowPen = $null
+    $textBrush = $null
+
+    try {
+        $source = [System.Drawing.Image]::FromFile($SourceImagePath)
+        $bitmap = New-Object -TypeName System.Drawing.Bitmap -ArgumentList @(
+            $source.Width,
+            $source.Height,
+            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+        )
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+        $graphics.DrawImage($source, 0, 0, $source.Width, $source.Height)
+
+        $fontCollection = New-Object System.Drawing.Text.PrivateFontCollection
+        $fontFamily = $null
+        if ($FontPath -and (Test-Path $FontPath)) {
+            try {
+                $fontCollection.AddFontFile($FontPath)
+                if ($fontCollection.Families.Count -gt 0) {
+                    $fontFamily = $fontCollection.Families[0]
+                }
+            } catch {
+                Write-Warning "Could not load splash version font '$FontPath': $($_.Exception.Message). Falling back to a system font."
+            }
+        }
+
+        if ($null -eq $fontFamily) {
+            $fontFamily = [System.Drawing.FontFamily]::GenericSansSerif
+        }
+
+        $fontStyle = [System.Drawing.FontStyle]::Regular
+        if ($fontFamily.IsStyleAvailable([System.Drawing.FontStyle]::Bold)) {
+            $fontStyle = [System.Drawing.FontStyle]::Bold
+        }
+
+        $format = New-Object System.Drawing.StringFormat
+        $format.Alignment = [System.Drawing.StringAlignment]::Center
+        $format.LineAlignment = [System.Drawing.StringAlignment]::Center
+
+        $versionText = "v$Version"
+        $fontSize = [single]([Math]::Max(22, [Math]::Round($source.Width / 22)))
+        $textHeight = [single]([Math]::Max(34, [Math]::Round($source.Height / 15)))
+        $textY = [single]($source.Height - 80)
+        $layoutRect = New-Object -TypeName System.Drawing.RectangleF -ArgumentList @(
+            [single]0,
+            $textY,
+            [single]$source.Width,
+            $textHeight
+        )
+        $shadowRect = New-Object -TypeName System.Drawing.RectangleF -ArgumentList @(
+            [single]0,
+            [single]($textY + 3),
+            [single]$source.Width,
+            $textHeight
+        )
+
+        $shadowPath = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $shadowPath.AddString($versionText, $fontFamily, [int]$fontStyle, $fontSize, $shadowRect, $format)
+        $shadowBrush = New-Object -TypeName System.Drawing.SolidBrush -ArgumentList @(
+            [System.Drawing.Color]::FromArgb(180, 0, 0, 0)
+        )
+        $shadowPen = New-Object -TypeName System.Drawing.Pen -ArgumentList @(
+            [System.Drawing.Color]::FromArgb(190, 0, 0, 0),
+            [single]7
+        )
+        $graphics.DrawPath($shadowPen, $shadowPath)
+        $graphics.FillPath($shadowBrush, $shadowPath)
+
+        $textPath = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $textPath.AddString($versionText, $fontFamily, [int]$fontStyle, $fontSize, $layoutRect, $format)
+        $outlinePen = New-Object -TypeName System.Drawing.Pen -ArgumentList @(
+            [System.Drawing.Color]::FromArgb(230, 0, 0, 0),
+            [single]4
+        )
+        $glowPen = New-Object -TypeName System.Drawing.Pen -ArgumentList @(
+            [System.Drawing.Color]::FromArgb(120, 0, 220, 220),
+            [single]2
+        )
+        $textBrush = New-Object -TypeName System.Drawing.Drawing2D.LinearGradientBrush -ArgumentList @(
+            $layoutRect,
+            [System.Drawing.Color]::FromArgb(255, 255, 255, 255),
+            [System.Drawing.Color]::FromArgb(255, 116, 246, 246),
+            [System.Drawing.Drawing2D.LinearGradientMode]::Vertical
+        )
+
+        $graphics.DrawPath($outlinePen, $textPath)
+        $graphics.DrawPath($glowPen, $textPath)
+        $graphics.FillPath($textBrush, $textPath)
+        $bitmap.Save($OutputImagePath, [System.Drawing.Imaging.ImageFormat]::Png)
+    } finally {
+        if ($textBrush) { $textBrush.Dispose() }
+        if ($glowPen) { $glowPen.Dispose() }
+        if ($outlinePen) { $outlinePen.Dispose() }
+        if ($shadowPen) { $shadowPen.Dispose() }
+        if ($shadowBrush) { $shadowBrush.Dispose() }
+        if ($textPath) { $textPath.Dispose() }
+        if ($shadowPath) { $shadowPath.Dispose() }
+        if ($format) { $format.Dispose() }
+        if ($fontCollection) { $fontCollection.Dispose() }
+        if ($graphics) { $graphics.Dispose() }
+        if ($bitmap) { $bitmap.Dispose() }
+        if ($source) { $source.Dispose() }
+    }
+}
+
+function Remove-VersionedSplashImage {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$GeneratedImagePath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$GeneratedImageDir,
+
+        [Parameter(Mandatory=$true)]
+        [string]$ActiveSplashImagePath
+    )
+
+    if ($ActiveSplashImagePath -ne $GeneratedImagePath) {
+        return
+    }
+
+    if (Test-Path $GeneratedImagePath) {
+        try {
+            Remove-Item -Path $GeneratedImagePath -Force
+            Write-Host "Cleaned up generated versioned splash image: $GeneratedImagePath" -ForegroundColor Green
+        } catch {
+            Write-Warning "Failed to clean up generated versioned splash image '$GeneratedImagePath': $($_.Exception.Message)"
+        }
+    }
+
+    if (Test-Path $GeneratedImageDir) {
+        try {
+            $remainingItems = @(Get-ChildItem -Path $GeneratedImageDir -Force -ErrorAction SilentlyContinue)
+            if ($remainingItems.Count -eq 0) {
+                Remove-Item -Path $GeneratedImageDir -Force
+                Write-Host "Removed empty generated splash directory: $GeneratedImageDir" -ForegroundColor Green
+            }
+        } catch {
+            Write-Warning "Failed to remove generated splash directory '$GeneratedImageDir': $($_.Exception.Message)"
+        }
+    }
+}
+
 # --- Start ---
 Write-Host "-------------------------------------" -ForegroundColor Cyan
 Write-Host "Starting Build for '$AppName'" -ForegroundColor Cyan
@@ -462,6 +827,21 @@ else {
 }
 
 Write-Host "Cleanup complete." -ForegroundColor Green
+
+# --- Versioned Splash Image ---
+try {
+    New-VersionedSplashImage `
+        -SourceImagePath $SplashSourceImage `
+        -OutputImagePath $VersionedSplashImage `
+        -Version $AppVersion `
+        -FontPath $SplashVersionFont
+    $SplashImage = $VersionedSplashImage
+    Write-Host "Generated versioned splash image: $SplashImage" -ForegroundColor Green
+} catch {
+    Write-Warning "Failed to generate the versioned splash image: $($_.Exception.Message)"
+    Write-Warning "Falling back to the original splash image: $SplashSourceImage"
+    $SplashImage = $SplashSourceImage
+}
 
 # --- Set Working Directory ---
 try {
@@ -560,6 +940,11 @@ finally {
     } else {
         $env:PYTHONPATH = $PreviousPythonPath
     }
+
+    Remove-VersionedSplashImage `
+        -GeneratedImagePath $VersionedSplashImage `
+        -GeneratedImageDir $VersionedSplashDir `
+        -ActiveSplashImagePath $SplashImage
 }
 
 # --- Restore Original Location ---
@@ -572,15 +957,28 @@ if ($DeployInstalled) {
     Write-Host "Deploying build artifacts to actual installed location..." -ForegroundColor Cyan
     Write-Host "Target: $InstalledDeployTargetDir" -ForegroundColor Cyan
     Write-Host "Only the EXE and '_internal' folder will be replaced." -ForegroundColor Yellow
-    Write-Host "Other files and settings in the target folder will be left untouched." -ForegroundColor Yellow
+    Write-Host "Other files, installer metadata, and settings in the target folder will be left untouched." -ForegroundColor Yellow
 
     try {
-        Copy-BuildArtifactsToTarget `
-            -SourceExePath $PostBuildExePath `
-            -SourceInternalFolder $PostBuildFolder `
-            -TargetDir $InstalledDeployTargetDir `
-            -ProcessName $AppProcessName `
-            -ForceCloseApp
+        if (Test-IsAdministrator) {
+            Write-Host "Current PowerShell session is elevated. Deploying directly..." -ForegroundColor Yellow
+
+            Copy-BuildArtifactsToTarget `
+                -SourceExePath $PostBuildExePath `
+                -SourceInternalFolder $PostBuildFolder `
+                -TargetDir $InstalledDeployTargetDir `
+                -ProcessName $AppProcessName `
+                -ForceCloseApp
+        } else {
+            Write-Host "Current PowerShell session is not elevated." -ForegroundColor Yellow
+            Write-Host "The build has already completed unelevated; only the Program Files deploy step will be elevated." -ForegroundColor Yellow
+
+            Invoke-ElevatedBuildArtifactDeploy `
+                -SourceExePath $PostBuildExePath `
+                -SourceInternalFolder $PostBuildFolder `
+                -TargetDir $InstalledDeployTargetDir `
+                -ProcessName $AppProcessName
+        }
     } catch {
         Write-Error "Failed to deploy to actual installed location: $($_.Exception.Message)"
         exit 1

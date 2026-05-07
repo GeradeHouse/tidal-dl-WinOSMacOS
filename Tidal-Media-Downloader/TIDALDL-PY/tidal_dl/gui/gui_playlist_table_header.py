@@ -18,11 +18,14 @@ class PlaylistTableHeaderWidget(QtWidgets.QFrame):
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setMinimumHeight(0)
         self.setMaximumHeight(0)
-        self._expanded_height = 202
+        self._expanded_height = 198
         self._collapsed_height = 72
+        self._compact_filter_height = 42
         self._collapse_trigger_scroll = 84
-        self._expanded_cover_size = 132
-        self._collapsed_cover_size = 36
+        self._filter_hide_trigger_scroll = self._collapse_trigger_scroll + self._compact_filter_height
+        self._expanded_cover_size = 128
+        self._collapsed_cover_size = 44
+        self._header_wheel_pixels_per_step = 42.0
         self._current_cover_size = self._expanded_cover_size
         self._cover_pixmap = QtGui.QPixmap()
         self._background_pixmap = QtGui.QPixmap()
@@ -129,46 +132,66 @@ class PlaylistTableHeaderWidget(QtWidgets.QFrame):
             QLabel#playlistHeaderMeta { color: rgba(255, 255, 255, 0.78); font-size: 9px; font-weight: 800; letter-spacing: 0.32px; }
             QLineEdit#playlistFilterEdit { min-height: 30px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.12); background-color: rgba(0, 0, 0, 0.50); color: #ffffff; padding: 0 13px; font-size: 11px; selection-background-color: rgba(0, 200, 200, 0.34); }
             QLineEdit#playlistFilterEdit:focus { border: 1px solid rgba(255, 255, 255, 0.24); background-color: rgba(0, 0, 0, 0.62); }
-            QPushButton#playlistPrimaryButton { background-color: rgba(255, 255, 255, 0.96); color: #070707; border: none; border-radius: 14px; min-height: 28px; padding: 0 18px; font-size: 11px; font-weight: 900; }
+            QPushButton#playlistPrimaryButton { background-color: rgba(255, 255, 255, 0.96); color: #070707; border: none; border-radius: 13px; min-height: 26px; padding: 0 16px; font-size: 11px; font-weight: 900; }
             QPushButton#playlistPrimaryButton:hover { background-color: #ffffff; }
-            QPushButton#playlistPrimaryButton[compactHeaderButton="true"] { border-radius: 12px; min-height: 24px; min-width: 30px; padding: 0; font-size: 10px; }
-            QPushButton#playlistSecondaryButton { background-color: rgba(255, 255, 255, 0.10); color: #ffffff; border: none; border-radius: 14px; min-height: 28px; padding: 0 17px; font-size: 11px; font-weight: 900; }
+            QPushButton#playlistPrimaryButton[compactHeaderButton="true"] { border-radius: 13px; min-height: 26px; min-width: 32px; padding: 0; font-size: 0px; }
+            QPushButton#playlistSecondaryButton { background-color: rgba(255, 255, 255, 0.10); color: #ffffff; border: none; border-radius: 13px; min-height: 26px; padding: 0 16px; font-size: 11px; font-weight: 900; }
             QPushButton#playlistSecondaryButton:hover { background-color: rgba(255, 255, 255, 0.16); }
-            QPushButton#playlistSecondaryButton[compactHeaderButton="true"] { border-radius: 12px; min-height: 24px; min-width: 30px; padding: 0; font-size: 10px; }
+            QPushButton#playlistSecondaryButton[compactHeaderButton="true"] { border-radius: 13px; min-height: 26px; min-width: 32px; padding: 0; font-size: 14px; font-weight: 900; }
         """)
         self._show_placeholder_cover()
         self._apply_dynamic_label_styles(False)
+
+    def _make_play_icon(self, color: QtGui.QColor) -> QtGui.QIcon:
+        pixmap = QtGui.QPixmap(18, 18)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawPolygon(
+            QtGui.QPolygon(
+                [
+                    QtCore.QPoint(7, 4),
+                    QtCore.QPoint(7, 14),
+                    QtCore.QPoint(14, 9),
+                ]
+            )
+        )
+        painter.end()
+        return QtGui.QIcon(pixmap)
 
     def _make_primary_button(self, text: str) -> QtWidgets.QPushButton:
         button = QtWidgets.QPushButton(text)
         button.setObjectName("playlistPrimaryButton")
         button.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        style = self.style()
-        if style is not None:
-            button.setIcon(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
-            button.setIconSize(QtCore.QSize(11, 11))
-        button.setFixedHeight(28)
+        button.setIcon(self._make_play_icon(QtGui.QColor(8, 8, 8)))
+        button.setIconSize(QtCore.QSize(13, 13))
+        button.setFixedHeight(26)
         return button
 
     def _make_secondary_button(self, text: str) -> QtWidgets.QPushButton:
         button = QtWidgets.QPushButton(text)
         button.setObjectName("playlistSecondaryButton")
         button.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
-        button.setFixedHeight(28)
+        button.setFixedHeight(26)
         return button
 
     def _set_compact_button_state(self, compact: bool) -> None:
         self.play_button.setText("" if compact else "Play")
-        self.shuffle_button.setText("⤨" if compact else "Shuffle")
-        self.play_button.setIconSize(QtCore.QSize(10 if compact else 11, 10 if compact else 11))
+        self.shuffle_button.setText("⇄" if compact else "Shuffle")
+        self.play_button.setIconSize(QtCore.QSize(14 if compact else 13, 14 if compact else 13))
+
         for button in (self.play_button, self.shuffle_button):
             button.setProperty("compactHeaderButton", compact)
             if compact:
-                button.setFixedSize(30, 24)
+                button.setFixedSize(32, 26)
             else:
                 button.setMinimumWidth(0)
                 button.setMaximumWidth(16777215)
-                button.setFixedHeight(28)
+                button.setFixedHeight(26)
+
             style = button.style()
             if style is None:
                 continue
@@ -176,11 +199,11 @@ class PlaylistTableHeaderWidget(QtWidgets.QFrame):
             style.polish(button)
 
     def _apply_dynamic_label_styles(self, compact: bool) -> None:
-        title_px = 14 if compact else 23
+        title_px = 14 if compact else 22
         meta_px = 9
         owner_px = 10
         description_px = 10
-        title_spacing = "-0.2px" if compact else "-0.45px"
+        title_spacing = "-0.16px" if compact else "-0.42px"
 
         self.owner_label.setStyleSheet(
             f"color: rgba(255, 255, 255, 0.76); font-size: {owner_px}px; font-weight: 700;"
@@ -201,15 +224,13 @@ class PlaylistTableHeaderWidget(QtWidgets.QFrame):
     def _wheel_event_scroll_units(self, event: QtGui.QWheelEvent) -> float:
         pixel_delta = event.pixelDelta().y()
         if pixel_delta:
-            return float(-pixel_delta)
+            return float(-pixel_delta) * 0.72
 
         angle_delta = event.angleDelta().y()
         if not angle_delta:
             return 0.0
 
-        scrollbar = self._scroll_target.verticalScrollBar() if self._scroll_target else None
-        step = max(1, scrollbar.singleStep() if scrollbar is not None else 14)
-        return float((-angle_delta / 120.0) * step * 3)
+        return float((-angle_delta / 120.0) * self._header_wheel_pixels_per_step)
 
     def consume_wheel_event_for_header(self, event: Optional[QtGui.QWheelEvent]) -> bool:
         if event is None:
@@ -221,16 +242,10 @@ class PlaylistTableHeaderWidget(QtWidgets.QFrame):
 
         scrollbar = self._scroll_target.verticalScrollBar() if self._scroll_target else None
         table_at_top = scrollbar is None or scrollbar.value() <= scrollbar.minimum()
+        max_header_scroll = float(self._filter_hide_trigger_scroll)
 
-        collapse_pending = (
-            self._target_scroll_offset < self._collapse_trigger_scroll
-            or self._visual_scroll_offset < (self._collapse_trigger_scroll - 0.75)
-        )
-        if scroll_units > 0 and collapse_pending:
-            self._target_scroll_offset = min(
-                float(self._collapse_trigger_scroll),
-                self._target_scroll_offset + scroll_units,
-            )
+        if scroll_units > 0 and self._target_scroll_offset < max_header_scroll:
+            self._target_scroll_offset = min(max_header_scroll, self._target_scroll_offset + scroll_units)
             if not self._scroll_animation_timer.isActive():
                 self._scroll_animation_timer.start()
             event.accept()
@@ -323,7 +338,10 @@ class PlaylistTableHeaderWidget(QtWidgets.QFrame):
         self._update_background_pixmap()
 
     def set_scroll_offset(self, value: int) -> None:
-        self._target_scroll_offset = float(max(0, int(value)))
+        self._target_scroll_offset = max(
+            0.0,
+            min(float(value), float(self._filter_hide_trigger_scroll)),
+        )
         if abs(self._target_scroll_offset - self._visual_scroll_offset) <= 0.5:
             self._visual_scroll_offset = self._target_scroll_offset
             self._apply_scroll_visual_state(self._visual_scroll_offset)
@@ -341,45 +359,68 @@ class PlaylistTableHeaderWidget(QtWidgets.QFrame):
         self._apply_scroll_visual_state(self._visual_scroll_offset)
 
     def _apply_scroll_visual_state(self, value: float) -> None:
-        scroll_value = max(0.0, float(value))
+        scroll_value = max(
+            0.0,
+            min(float(value), float(self._filter_hide_trigger_scroll)),
+        )
         compact = scroll_value >= self._collapse_trigger_scroll
         compact_changed = compact != self._compact_mode
         self._compact_mode = compact
 
-        max_pre_collapse_travel = int(self._expanded_cover_size * 0.50)
+        collapse_travel = max(
+            1,
+            self._expanded_height - (self._collapsed_height + self._compact_filter_height),
+        )
 
         if compact:
-            height = self._collapsed_height
+            filter_scroll = max(0.0, scroll_value - float(self._collapse_trigger_scroll))
+            filter_progress = min(
+                1.0,
+                filter_scroll / max(1.0, float(self._compact_filter_height)),
+            )
+            filter_height = int(round(self._compact_filter_height * (1.0 - filter_progress)))
+            filter_visible = filter_height > 2
+
+            height = self._collapsed_height + max(0, filter_height)
             self._content_y_offset = 0
             self._current_cover_size = self._collapsed_cover_size
-            self._filter_container.setVisible(False)
+            self._filter_container.setVisible(filter_visible)
+            self._filter_container.setMinimumHeight(0)
+            self._filter_container.setMaximumHeight(max(0, filter_height))
+            self.filter_edit.setVisible(filter_height >= 22)
+
             self.owner_label.setVisible(False)
             self.description_label.setVisible(False)
             self.meta_label.setVisible(True)
             self.title_label.setWordWrap(False)
             self.title_label.setMaximumHeight(18)
             self.meta_label.setMaximumHeight(13)
-            self._content_layout.setContentsMargins(28, 7, 24, 7)
-            self._content_layout.setSpacing(2)
-            self._top_row.setSpacing(12)
+            self._content_layout.setContentsMargins(28, 6, 24, 6)
+            self._content_layout.setSpacing(8 if filter_visible else 0)
+            self._top_row.setSpacing(14)
             self._text_column.setSpacing(3)
             self._text_column.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter)
             self._button_row.setSpacing(8)
         else:
             progress = min(1.0, scroll_value / max(1.0, float(self._collapse_trigger_scroll)))
             eased = progress * progress * (3.0 - (2.0 * progress))
-            travel = int(max_pre_collapse_travel * eased)
-            height = self._expanded_height
+            travel = int(round(collapse_travel * eased))
+
+            height = self._expanded_height - travel
             self._content_y_offset = -travel
             self._current_cover_size = self._expanded_cover_size
             self._filter_container.setVisible(True)
+            self._filter_container.setMinimumHeight(0)
+            self._filter_container.setMaximumHeight(16777215)
+            self.filter_edit.setVisible(True)
+
             self.owner_label.setVisible(True)
             self.description_label.setVisible(bool(self.description_label.text().strip()))
             self.meta_label.setVisible(True)
             self.title_label.setWordWrap(True)
-            self.title_label.setMaximumHeight(54)
+            self.title_label.setMaximumHeight(52)
             self.meta_label.setMaximumHeight(16)
-            self._content_layout.setContentsMargins(28, 14, 24, 10)
+            self._content_layout.setContentsMargins(28, 13, 24, 10)
             self._content_layout.setSpacing(10)
             self._top_row.setSpacing(14)
             self._text_column.setSpacing(7)
@@ -404,12 +445,17 @@ class PlaylistTableHeaderWidget(QtWidgets.QFrame):
     def _update_content_shell_geometry(self) -> None:
         if not hasattr(self, "_content_shell"):
             return
-        shell_height = self._collapsed_height if self._compact_mode else self._expanded_height
+
+        if self._compact_mode:
+            shell_height = max(1, self.height())
+        else:
+            shell_height = max(self._expanded_height, self.height())
+
         self._content_shell.setGeometry(
             0,
             self._content_y_offset,
             max(1, self.width()),
-            max(shell_height, self._expanded_height if not self._compact_mode else self._collapsed_height),
+            max(1, shell_height),
         )
 
     def resizeEvent(self, a0: Optional[QtGui.QResizeEvent]) -> None:

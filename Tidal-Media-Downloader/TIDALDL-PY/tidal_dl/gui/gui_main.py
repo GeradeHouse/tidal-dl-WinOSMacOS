@@ -189,9 +189,6 @@ class MainView(QWidget):
             self.playlistHeaderWidget.filterTextChanged.connect(
                 self.table_handler.apply_playlist_filter_text
             )
-            self.tableWidget.verticalScrollBar().valueChanged.connect(
-                self.playlistHeaderWidget.set_scroll_offset
-            )
             self.playlistHeaderWidget.set_scroll_target(self.tableWidget)
             if hasattr(self.tableWidget, "set_playlist_header_widget"):
                 self.tableWidget.set_playlist_header_widget(self.playlistHeaderWidget)
