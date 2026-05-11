@@ -73,9 +73,7 @@ class SettingsPage(QtWidgets.QWidget):
     """
 
     spotifyCredentialsUpdated = pyqtSignal()  # Class-level signal declaration
-    settingsSavedAndClosed = (
-        pyqtSignal()
-    )  # Signal emitted after saving and closing settings
+    settingsSavedAndClosed = pyqtSignal(str)  # Signal emitted after saving and closing settings
     settingsClosedWithoutSaving = pyqtSignal()
     fontSizeChanged = pyqtSignal(int)  # Signal emitted when font size changes
     playlistDisplaySettingsChanged = pyqtSignal()

@@ -269,23 +269,27 @@ if (-not (Test-Path $PyInstallerPath)) {
 }
 
 # --- Check and Install AIGPY ---
-Write-Host "Checking if AIGPY is installed..." -ForegroundColor Yellow
-try {
-    & ".venv\Scripts\python.exe" -c "import aigpy" 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "AIGPY is already installed." -ForegroundColor Green
-    } else {
-        Write-Host "AIGPY not found. Installing AIGPY..." -ForegroundColor Yellow
-        & ".venv\Scripts\pip.exe" install -e "AIGPY"
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "Failed to install AIGPY."
-            exit 1
+if ($BuildMode -eq "Full") {
+    Write-Host "Checking if AIGPY is installed..." -ForegroundColor Yellow
+    try {
+        & ".venv\Scripts\python.exe" -c "import aigpy" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "AIGPY is already installed." -ForegroundColor Green
+        } else {
+            Write-Host "AIGPY not found. Installing AIGPY..." -ForegroundColor Yellow
+            & ".venv\Scripts\pip.exe" install -e "AIGPY"
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Failed to install AIGPY."
+                exit 1
+            }
+            Write-Host "AIGPY installed successfully." -ForegroundColor Green
         }
-        Write-Host "AIGPY installed successfully." -ForegroundColor Green
+    } catch {
+        Write-Error "Error checking/installing AIGPY: $($_.Exception.Message)"
+        exit 1
     }
-} catch {
-    Write-Error "Error checking/installing AIGPY: $($_.Exception.Message)"
-    exit 1
+} else {
+    Write-Host "Fast build: skipping AIGPY import/install check (assuming venv is already set up)." -ForegroundColor Yellow
 }
 
 # --- Check and Install Requirements ---
@@ -739,10 +743,18 @@ function Remove-VersionedSplashImage {
         [string]$GeneratedImageDir,
 
         [Parameter(Mandatory=$true)]
-        [string]$ActiveSplashImagePath
+        [string]$ActiveSplashImagePath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$BuildMode
     )
 
     if ($ActiveSplashImagePath -ne $GeneratedImagePath) {
+        return
+    }
+
+    if ($BuildMode -eq "Fast") {
+        Write-Host "Fast build: keeping generated versioned splash image for reuse: $GeneratedImagePath" -ForegroundColor Yellow
         return
     }
 
@@ -898,13 +910,33 @@ if ($BuildType -eq "Windowed") {
 $PyInstallerSupportDir = Join-Path $ProjectSourceDir "build\pyinstaller-support"
 $PyInstallerSiteCustomize = Join-Path $PyInstallerSupportDir "sitecustomize.py"
 New-Item -ItemType Directory -Path $PyInstallerSupportDir -Force | Out-Null
-Set-Content -Path $PyInstallerSiteCustomize -Encoding UTF8 -Value @'
+$PyInstallerSiteCustomizeContent = @'
 # Imported by Python startup during the PyInstaller build.
 try:
     import PyQt6  # noqa: F401
 except Exception:
     pass
 '@
+
+$ShouldWritePyInstallerSiteCustomize = $true
+if ($BuildMode -eq "Fast" -and (Test-Path $PyInstallerSiteCustomize)) {
+    try {
+        $ExistingPyInstallerSiteCustomizeContent = Get-Content -Path $PyInstallerSiteCustomize -Raw -Encoding UTF8
+        $NormalizedExistingPyInstallerSiteCustomizeContent = ($ExistingPyInstallerSiteCustomizeContent -replace "`r`n", "`n") -replace "`n+$", ""
+        $NormalizedPyInstallerSiteCustomizeContent = ($PyInstallerSiteCustomizeContent -replace "`r`n", "`n") -replace "`n+$", ""
+
+        if ($NormalizedExistingPyInstallerSiteCustomizeContent -eq $NormalizedPyInstallerSiteCustomizeContent) {
+            $ShouldWritePyInstallerSiteCustomize = $false
+            Write-Host "Fast build: existing PyInstaller sitecustomize.py is unchanged; skipping rewrite." -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Warning "Could not compare existing PyInstaller sitecustomize.py: $($_.Exception.Message). Rewriting it."
+    }
+}
+
+if ($ShouldWritePyInstallerSiteCustomize) {
+    Set-Content -Path $PyInstallerSiteCustomize -Encoding UTF8 -Value $PyInstallerSiteCustomizeContent
+}
 
 # --- Execute PyInstaller ---
 Write-Host "Running PyInstaller..." -ForegroundColor Yellow
@@ -944,7 +976,8 @@ finally {
     Remove-VersionedSplashImage `
         -GeneratedImagePath $VersionedSplashImage `
         -GeneratedImageDir $VersionedSplashDir `
-        -ActiveSplashImagePath $SplashImage
+        -ActiveSplashImagePath $SplashImage `
+        -BuildMode $BuildMode
 }
 
 # --- Restore Original Location ---

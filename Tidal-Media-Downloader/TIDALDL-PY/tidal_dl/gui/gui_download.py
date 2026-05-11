@@ -160,6 +160,11 @@ class DownloadWorker(QObject):
             if self.items_to_download:
                 first_track_item = self.items_to_download[0]
                 final_path = None
+                album_param = (
+                    self.playlist_context
+                    if isinstance(self.playlist_context, Album)
+                    else None
+                )
 
                 # Get artist info for path construction
                 artists = TIDAL_API.getArtistsName(
@@ -181,7 +186,7 @@ class DownloadWorker(QObject):
                     dummy_stream,
                     artist,
                     artists,
-                    album=None,
+                    album=album_param,
                     playlist_context=self.playlist_context,
                     audio_type_folder=audio_type_folder,
                 )

@@ -160,6 +160,7 @@ class MainView(QWidget):
         self.cover_cache = CoverCache()
         self.spotify_api = SpotifyAPI()
         self.player_logic = PlayerLogic(TIDAL_API, self)
+        self._toast_timer: Optional[QTimer] = None
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -274,6 +275,7 @@ class MainView(QWidget):
         display_width = current_screen.availableGeometry().width() if current_screen else 1700
         initial_width = display_width - 100 if display_width < 1800 else 1700
         self.resize(max(self.minimumWidth(), initial_width), 800)
+        self._position_toast()
         self.setWindowTitle("TIDAL-DL")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
@@ -742,6 +744,24 @@ class MainView(QWidget):
         self.stackedLayout = QStackedLayout()
         self.stackedLayout.addWidget(self.mainPage)
 
+        self.toastLabel = QLabel("", self)
+        self.toastLabel.setObjectName("toastNotificationLabel")
+        self.toastLabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.toastLabel.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.toastLabel.setVisible(False)
+        self.toastLabel.setStyleSheet(
+            """
+            QLabel#toastNotificationLabel {
+                background-color: rgba(34, 34, 34, 235);
+                color: #FFFFFF;
+                border: 1px solid rgba(255, 255, 255, 0.18);
+                border-radius: 17px;
+                padding: 8px 18px;
+                font-weight: 700;
+            }
+            """
+        )
+
         main_container_widget = QWidget()
         main_container_widget.setObjectName("mainContainerWidget")
         main_container_widget.setMouseTracking(True)
@@ -874,9 +894,7 @@ class MainView(QWidget):
         self.settingsPage.settingsClosedWithoutSaving.connect(
             self.navigation_handler.show_main_menu
         )
-        self.settingsPage.settingsSavedAndClosed.connect(
-            self.navigation_handler.show_main_menu
-        )
+        self.settingsPage.settingsSavedAndClosed.connect(self._on_settings_saved_and_closed)
         self.settingsPage.playlistDisplaySettingsChanged.connect(self.tree_handler.onPlaylistDisplaySettingsChanged)
         self.settingsPage.playlistDisplaySettingsChanged.connect(self.table_handler.refresh_table_view)
         self.toggleLogButton.clicked.connect(self.toggle_log_console)
@@ -1455,8 +1473,44 @@ class MainView(QWidget):
             y = (target_rect.height() - scaled_pixmap.height()) / 2
             painter.drawPixmap(QPoint(int(x), int(y)), scaled_pixmap)
 
+    def _position_toast(self) -> None:
+        toast = getattr(self, "toastLabel", None)
+        if not isinstance(toast, QLabel):
+            return
+
+        toast.adjustSize()
+        width = max(220, toast.width())
+        height = max(34, toast.height())
+        toast.resize(width, height)
+        x = max(0, (self.width() - width) // 2)
+        y = 58
+        toast.move(x, y)
+        toast.raise_()
+
+    @pyqtSlot(str)
+    def _on_settings_saved_and_closed(self, message: str) -> None:
+        self.navigation_handler.show_main_menu()
+        QTimer.singleShot(120, lambda: self.show_toast(message or "Settings saved"))
+
+    def show_toast(self, message: str, duration_ms: int = 2200) -> None:
+        toast = getattr(self, "toastLabel", None)
+        if not isinstance(toast, QLabel):
+            return
+
+        if self._toast_timer is not None:
+            self._toast_timer.stop()
+
+        toast.setText(message)
+        toast.setVisible(True)
+        self._position_toast()
+        self._toast_timer = QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(toast.hide)
+        self._toast_timer.start(duration_ms)
+
     def resizeEvent(self, a0: Optional[QResizeEvent]):
         self.update()
+        self._position_toast()
         super(MainView, self).resizeEvent(a0)
 
     def event(self, a0: Optional[QEvent]) -> bool:

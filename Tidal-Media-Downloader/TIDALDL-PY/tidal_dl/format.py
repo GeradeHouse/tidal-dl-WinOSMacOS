@@ -80,6 +80,89 @@ def __getDurationStr__(seconds: Optional[Union[int, float, str]]) -> str:
         return ""
 
 
+def _get_artists_name(artists: Any) -> str:
+    """Formats an album or track artist collection as a comma-separated string."""
+    if isinstance(artists, list):
+        return ", ".join(
+            str(getattr(item, "name", ""))
+            for item in artists
+            if getattr(item, "name", None)
+        )
+    artist_name = getattr(artists, "name", None)
+    return str(artist_name) if artist_name else ""
+
+
+def _get_content_flag(data: Any, type: Type, short: bool = True, separator: str = " / ") -> str:
+    """Formats quality/Atmos/explicit flags without importing the TIDAL API singleton."""
+    max_quality = False
+    atmos = False
+    explicit = False
+
+    if type == Type.Album or type == Type.Track:
+        audio_quality = getattr(data, "audioQuality", None)
+        if audio_quality == AudioQuality.HI_RES_LOSSLESS.value:
+            max_quality = True
+        audio_modes = getattr(data, "audioModes", [])
+        if type == Type.Album and isinstance(audio_modes, list) and "DOLBY_ATMOS" in audio_modes:
+            atmos = True
+        if getattr(data, "explicit", False) is True:
+            explicit = True
+
+    if not max_quality and not atmos and not explicit:
+        return ""
+
+    flag_values: list[str] = []
+    if max_quality:
+        flag_values.append("M" if short else "Max")
+    if atmos:
+        flag_values.append("A" if short else "Dolby Atmos")
+    if explicit:
+        flag_values.append("E" if short else "Explicit")
+    return separator.join(flag_values)
+
+
+def _format_album_relative_path(
+    album: Album,
+    artistName: str,
+    albumArtistName: str,
+    flag: str,
+) -> str:
+    if flag:
+        flag = f"[{flag}] "
+    else:
+        flag = ""
+
+    albumName = __fixPath__(album.title)
+    year = __getYear__(getattr(album, 'releaseDate', ''))
+
+    relative_path = SETTINGS.albumFolderFormat or SETTINGS.getDefaultPathFormat(Type.Album)
+
+    relative_path = relative_path.replace(R"{ArtistName}", __fixPath__(artistName))
+    relative_path = relative_path.replace(R"{AlbumArtistName}", __fixPath__(albumArtistName))
+    relative_path = relative_path.replace(R"{Flag}", flag)
+    relative_path = relative_path.replace(R"{AlbumID}", str(getattr(album, 'id', '')))
+    relative_path = relative_path.replace(R"{AlbumYear}", year)
+    relative_path = relative_path.replace(R"{AlbumTitle}", albumName)
+    audio_quality_name = getattr(getattr(album, 'audioQuality', None), 'name', '')
+    relative_path = relative_path.replace(R"{AudioQuality}", audio_quality_name)
+    relative_path = relative_path.replace(R"{DurationSeconds}", str(getattr(album, 'duration', 0)))
+    relative_path = relative_path.replace(R"{Duration}", __getDurationStr__(getattr(album, 'duration', 0)))
+    relative_path = relative_path.replace(R"{NumberOfTracks}", str(getattr(album, 'numberOfTracks', 0)))
+    relative_path = relative_path.replace(R"{NumberOfVideos}", str(getattr(album, 'numberOfVideos', 0)))
+    relative_path = relative_path.replace(R"{NumberOfVolumes}", str(getattr(album, 'numberOfVolumes', 0)))
+    relative_path = relative_path.replace(R"{ReleaseDate}", str(getattr(album, 'releaseDate', '')))
+    record_type_name = getattr(getattr(album, 'type', None), 'name', '')
+    relative_path = relative_path.replace(R"{RecordType}", record_type_name)
+    relative_path = relative_path.replace(R"{None}", "")
+
+    if not artistName.strip():
+        relative_path = relative_path.lstrip('/\\')
+    if year == '' and '[{AlbumYear}]' in relative_path:
+        relative_path = relative_path.replace(' [{AlbumYear}]', '')
+
+    return relative_path.strip()
+
+
 def __getExtension__(stream: StreamUrl) -> str:
     """Determines the file extension based on stream URL and codec."""
     stream_url = str(getattr(stream, 'url', '') or '') if stream else ''
@@ -172,44 +255,11 @@ def getAlbumPath(album: Album, artistName: str, albumArtistName: str, flag: str)
         logger.error("Invalid album object passed to getAlbumPath.")
         return None
 
-    if flag:
-        flag = f"[{flag}] "
-    else:
-        flag = ""
-
-    albumName = __fixPath__(album.title)
-    year = __getYear__(getattr(album, 'releaseDate', ''))
-
-    relative_path = SETTINGS.albumFolderFormat or SETTINGS.getDefaultPathFormat(Type.Album)
-
-    relative_path = relative_path.replace(R"{ArtistName}", __fixPath__(artistName))
-    relative_path = relative_path.replace(R"{AlbumArtistName}", __fixPath__(albumArtistName))
-    relative_path = relative_path.replace(R"{Flag}", flag)
-    relative_path = relative_path.replace(R"{AlbumID}", str(getattr(album, 'id', '')))
-    relative_path = relative_path.replace(R"{AlbumYear}", year)
-    relative_path = relative_path.replace(R"{AlbumTitle}", albumName)
-    audio_quality_name = getattr(getattr(album, 'audioQuality', None), 'name', '')
-    relative_path = relative_path.replace(R"{AudioQuality}", audio_quality_name)
-    relative_path = relative_path.replace(R"{DurationSeconds}", str(getattr(album, 'duration', 0)))
-    relative_path = relative_path.replace(R"{Duration}", __getDurationStr__(getattr(album, 'duration', 0)))
-    relative_path = relative_path.replace(R"{NumberOfTracks}", str(getattr(album, 'numberOfTracks', 0)))
-    relative_path = relative_path.replace(R"{NumberOfVideos}", str(getattr(album, 'numberOfVideos', 0)))
-    relative_path = relative_path.replace(R"{NumberOfVolumes}", str(getattr(album, 'numberOfVolumes', 0)))
-    relative_path = relative_path.replace(R"{ReleaseDate}", str(getattr(album, 'releaseDate', '')))
-    record_type_name = getattr(getattr(album, 'type', None), 'name', '')
-    relative_path = relative_path.replace(R"{RecordType}", record_type_name)
-    relative_path = relative_path.replace(R"{None}", "")
-
-    # Post-process to avoid leading '/' if artist empty and trailing '[]' if year empty
-    if not artistName.strip():
-        relative_path = relative_path.lstrip('/')
-    if year == '' and '[{AlbumYear}]' in relative_path:
-        relative_path = relative_path.replace(' [{AlbumYear}]', '')
-
+    relative_path = _format_album_relative_path(album, artistName, albumArtistName, flag)
     base_path = get_user_download_path(SETTINGS.downloadPath)
     full_path = os.path.join(base_path, relative_path.strip())
 
-    logger.debug(f"getAlbumPath result: artist='{artistName}', year='{year}', path='{full_path}'")
+    logger.debug(f"getAlbumPath result: artist='{artistName}', path='{full_path}'")
 
     return full_path
 
@@ -291,6 +341,9 @@ def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists
         logger.error("Invalid track or stream object passed to getTrackPath.")
         return "Invalid_Track.m4a"
 
+    if album is None and isinstance(playlist_context, Album):
+        album = playlist_context
+
     # Determine track number string
     raw_number_val = getattr(track, 'trackNumberOnPlaylist', getattr(track, 'trackNumber', None)) if playlist_context and SETTINGS.usePlaylistFolder else getattr(track, 'trackNumber', None)
     number_for_format = str(int(raw_number_val)).rjust(2, '0') if raw_number_val and isinstance(raw_number_val, (int, str)) and str(raw_number_val).isdigit() and int(raw_number_val) > 0 else ""
@@ -351,7 +404,15 @@ def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists
     # Determine the subdirectory structure
     sub_folder = ""
     if album:
-        sub_folder = os.path.join("Albums", __fixPath__(album.title))
+        album_artist_name = getattr(getattr(album, "artist", None), "name", "") or artists or artist
+        album_artists_name = _get_artists_name(getattr(album, "artists", None))
+        artist_name_for_album = album_artists_name or artists or artist
+        sub_folder = _format_album_relative_path(
+            album,
+            artist_name_for_album,
+            album_artist_name,
+            _get_content_flag(album, Type.Album, True, ""),
+        )
     elif playlist_context:
         resolved_playlist_path = _resolve_playlist_path_from_context(
             playlist_context, base_path

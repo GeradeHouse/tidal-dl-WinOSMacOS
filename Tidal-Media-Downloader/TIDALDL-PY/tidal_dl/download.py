@@ -1541,7 +1541,7 @@ def downloadTracks(
     # However, keeping the filter as corrected ensures consistency if user specifically requests e.g., LOSSLESS
     # and wants ONLY lossless tracks, even if HIRES is available.
 
-    # Now, for each track that passes the quality filter, call downloadTrack with album forced as None.
+    # Now, for each track that passes the quality filter, call downloadTrack.
     logger.debug(
         f"Proceeding to download {len(tracks)} tracks. MultiThread: {SETTINGS.multiThread}"
     )
@@ -1593,7 +1593,7 @@ def downloadTracks(
             downloadTrack(
                 item,
                 main_view_instance,
-                album=None,
+                album=album,
                 playlist_context=playlist_context,
                 downloadQuality=downloadQuality,
             )
@@ -1607,7 +1607,7 @@ def downloadTracks(
                 downloadTrack,
                 item,
                 main_view_instance,
-                None,
+                album,
                 playlist_context,
                 None,
                 1048576,

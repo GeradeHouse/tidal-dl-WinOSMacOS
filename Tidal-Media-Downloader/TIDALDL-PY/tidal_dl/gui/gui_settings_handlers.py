@@ -496,16 +496,11 @@ def save_settings(self: "SettingsPage"):
                 selected_profile.get("platform", "Unknown"),
             )
 
-        # Show confirmation message to user
-        profile_message = ""
-        if api_profile_changed:
-            profile_message = "\n\nTIDAL API profile changed. Please log in again so the new profile is used."
-        CustomQMessageBox.information(
-            self, "Settings Saved", f"Settings have been saved and applied.{profile_message}"
-        )
-
         # Emit signal to notify MainView to return to main menu
-        self.settingsSavedAndClosed.emit()
+        toast_message = "Settings saved"
+        if api_profile_changed:
+            toast_message = "Settings saved. TIDAL API profile changed; please log in again."
+        self.settingsSavedAndClosed.emit(toast_message)
 
         # Emit signal if Spotify credentials were added or changed
         if spotify_creds_changed:

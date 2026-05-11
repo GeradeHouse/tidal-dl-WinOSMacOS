@@ -1,7 +1,7 @@
 import logging
 import os
 import sys
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.ERROR)  # Set specific level for this module
@@ -25,6 +25,8 @@ __all__ = [
     "getTokenPath",
     "getProfilePath",
     "getSettingsFilePath",
+    "get_user_music_path",
+    "get_default_download_path",
     "get_user_download_path",
     "resource_path",
 ]
@@ -61,6 +63,53 @@ def _create_directory_if_not_exists(path: str) -> bool:
     else:
         logger.debug(f"Directory '{path}' already exists.")
     return True
+
+def _get_windows_music_folder_from_registry() -> Optional[str]:
+    """Return the Windows Known Folder path for Music, including OneDrive redirection."""
+    if sys.platform != "win32":
+        return None
+
+    try:
+        import winreg
+    except ImportError:
+        return None
+
+    registry_locations = [
+        (
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+            "My Music",
+        ),
+        (
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
+            "My Music",
+        ),
+    ]
+
+    for root_key, sub_key, value_name in registry_locations:
+        try:
+            with winreg.OpenKey(root_key, sub_key) as key:
+                value, _value_type = winreg.QueryValueEx(key, value_name)
+        except OSError:
+            continue
+
+        if isinstance(value, str) and value.strip():
+            return os.path.normpath(os.path.expandvars(value.strip()))
+
+    return None
+
+def get_user_music_path() -> str:
+    """Return the user's Music folder, respecting Windows Known Folder redirection."""
+    windows_music_folder = _get_windows_music_folder_from_registry()
+    if windows_music_folder:
+        return windows_music_folder
+
+    return os.path.join(os.path.expanduser("~"), "Music")
+
+def get_default_download_path() -> str:
+    """Return the first-run default download folder used by the app."""
+    return os.path.join(get_user_music_path(), "Tidal-dl", "download")
 
 def __getBaseDirectory__():
     """
@@ -105,8 +154,7 @@ def __getBaseDirectory__():
         else:  # Windows and other OS
             # Windows bundled: Use User Music Directory
             # This prevents Permission Errors when writing to Program Files
-            home_dir = os.path.expanduser("~")
-            music_config_dir = os.path.join(home_dir, "Music", "Tidal-dl")
+            music_config_dir = os.path.join(get_user_music_path(), "Tidal-dl")
             logger.debug(
                 f"Running bundled app on Windows. Using Music config directory: {music_config_dir}"
             )
@@ -157,7 +205,7 @@ def get_user_download_path(path_from_settings: str) -> str:
         str: An absolute path that is safe to use for downloads.
     """
     if not path_from_settings or not isinstance(path_from_settings, str):
-        path_from_settings = "Downloads"  # Fallback to a sensible default
+        path_from_settings = get_default_download_path() if sys.platform == "win32" else "Downloads"
 
     # If the path is already absolute, use it as is.
     if os.path.isabs(path_from_settings):

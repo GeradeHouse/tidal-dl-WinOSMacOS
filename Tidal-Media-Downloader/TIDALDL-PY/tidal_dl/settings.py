@@ -11,12 +11,40 @@
 """
 import base64
 import json
+import sys
 from typing import Optional, Union
 
 import aigpy
 
 from . import enums
 from .lang.language import getLang
+from .paths import get_default_download_path
+
+
+def _get_initial_download_path() -> str:
+    if sys.platform == "win32":
+        return get_default_download_path()
+    return "./Downloads/"
+
+
+def _get_default_path_format(type: enums.Type) -> str:
+    if sys.platform == "win32":
+        if type == enums.Type.Album:
+            return R"{ArtistName}\{AlbumTitle} [{AlbumID}] [{AlbumYear}]"
+        if type == enums.Type.Playlist:
+            return R"Playlists/{PlaylistName}"
+        if type == enums.Type.Track:
+            return R"{ArtistName} - {TrackTitle}"
+
+    if type == enums.Type.Album:
+        return R"{ArtistName}/{Flag} {AlbumTitle} [{AlbumID}] [{AlbumYear}]"
+    if type == enums.Type.Playlist:
+        return R"Playlists/{PlaylistName} [{PlaylistUUID}]"
+    if type == enums.Type.Track:
+        return R"{TrackNumber} - {ArtistName} - {TrackTitle}{ExplicitFlag}"
+    return ""
+
+
 class Settings(aigpy.model.ModelBase):
     checkExist = True
     includeEP = True
@@ -50,12 +78,12 @@ class Settings(aigpy.model.ModelBase):
     downloadStructureMigrationDoNotRemind = False
     downloadStructureMigrationVersion = 1
 
-    downloadPath = "./Downloads/"
+    downloadPath = _get_initial_download_path()
     audioQuality = enums.AudioQuality.LOSSLESS
     usePlaylistFolder = True
-    albumFolderFormat = R"{ArtistName}/{Flag} {AlbumTitle} [{AlbumID}] [{AlbumYear}]"
-    playlistFolderFormat = R"Playlists/{PlaylistName} [{PlaylistUUID}]"  # Changed "Playlist" to "Playlists"
-    trackFileFormat = R"{TrackNumber} - {ArtistName} - {TrackTitle}{ExplicitFlag}"
+    albumFolderFormat = _get_default_path_format(enums.Type.Album)
+    playlistFolderFormat = _get_default_path_format(enums.Type.Playlist)
+    trackFileFormat = _get_default_path_format(enums.Type.Track)
 
     # Spotify Integration Settings
     spotifyClientId = ""
@@ -67,13 +95,7 @@ class Settings(aigpy.model.ModelBase):
     playlistCoverCacheTTL: int = 7  # Type hint for clarity
 
     def getDefaultPathFormat(self, type: enums.Type):
-        if type == enums.Type.Album:
-            return R"{ArtistName}/{Flag} {AlbumTitle} [{AlbumID}] [{AlbumYear}]"
-        elif type == enums.Type.Playlist:
-            return R"Playlists/{PlaylistName} [{PlaylistUUID}]"  # Changed "Playlist" to "Playlists"
-        elif type == enums.Type.Track:
-            return R"{TrackNumber} - {ArtistName} - {TrackTitle}{ExplicitFlag}"
-        return ""
+        return _get_default_path_format(type)
 
     def getAudioQuality(self, value: Union[str, enums.AudioQuality]):
         if isinstance(value, enums.AudioQuality):
@@ -108,6 +130,10 @@ class Settings(aigpy.model.ModelBase):
             self.trackFileFormat = self.getDefaultPathFormat(enums.Type.Track)
         if self.playlistFolderFormat is None:
             self.playlistFolderFormat = self.getDefaultPathFormat(enums.Type.Playlist)
+        if sys.platform == "win32" and self.downloadPath == "./Downloads/":
+            self.downloadPath = get_default_download_path()
+        if sys.platform == "win32" and self.trackFileFormat == R"{TrackNumber} - {ArtistName} - {TrackTitle}":
+            self.trackFileFormat = self.getDefaultPathFormat(enums.Type.Track)
         if self.apiKeyIndex is None:
             self.apiKeyIndex = 0
         if not hasattr(self, "spotifyClientId"):
