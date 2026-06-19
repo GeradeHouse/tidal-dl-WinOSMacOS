@@ -3,10 +3,10 @@
 # - Creates/uses a local venv
 # - Installs local AIGPY (editable)
 # - Installs requirements (filters any AIGPY line)
-# - Uses a package-safe launcher (fixes relative-import crash)
+# - Uses the same root main.py entry point as the Windows build
 # - Collects qt_material data + all PyQt6 submodules
 # - Excludes conflicting libraries from ffpyplayer via a robust custom hook
-# - Produces dist/tidal_dl_gui.app and dist/tidal_dl_gui-macos.zip
+# - Produces dist/tidal-dl-gui.app and dist/tidal-dl-gui-macos.zip
 #
 # FINALIZED STRATEGY:
 # - Bundles a single, correct version of OpenSSL from Homebrew.
@@ -20,16 +20,21 @@ set -Eeuo pipefail
 # --- Robust Homebrew Environment Setup ---
 if [[ -x "/opt/homebrew/bin/brew" ]]; then
   eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [[ -x "/usr/local/bin/brew" ]]; then
+  eval "$(/usr/local/bin/brew shellenv)"
 fi
 
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_NAME="tidal_dl_gui"
+APP_NAME="tidal-dl-gui"
 OPENSSL_PREFIX=""
 
-PKG_ROOT="${SCRIPT_DIR}/Tidal-Media-Downloader/TIDALDL-PY/tidal_dl"
-GUI_MAIN="${PKG_ROOT}/gui/gui_main.py"
+PROJECT_SOURCE_DIR="${SCRIPT_DIR}/Tidal-Media-Downloader"
+PACKAGE_DIR="${PROJECT_SOURCE_DIR}/TIDALDL-PY"
+PKG_ROOT="${PACKAGE_DIR}/tidal_dl"
+MAIN_SCRIPT="${PROJECT_SOURCE_DIR}/main.py"
 ASSETS_DIR="${PKG_ROOT}/assets"
+METADATA_DIR="${PKG_ROOT}/metadata"
 
 ICON_PATH="${ASSETS_DIR}/icons/icon-tidal-dl-gui.icns"
 SPLASH_IMAGE="${ASSETS_DIR}/images/splash.png"
@@ -45,8 +50,10 @@ PY_SYS="${PY_SYS:-$(command -v python || true)}"
 [[ -n "${PY_SYS}" ]] || { echo "Error: python3 not found in PATH."; exit 1; }
 
 # --- Sanity checks ---
-[[ -f "${GUI_MAIN}" ]]   || { echo "Error: GUI entry not found: ${GUI_MAIN}"; exit 1; }
-[[ -d "${ASSETS_DIR}" ]] || { echo "Error: assets dir not found: ${ASSETS_DIR}"; exit 1; }
+[[ -f "${MAIN_SCRIPT}" ]]  || { echo "Error: GUI entry not found: ${MAIN_SCRIPT}"; exit 1; }
+[[ -d "${PACKAGE_DIR}" ]]  || { echo "Error: package dir not found: ${PACKAGE_DIR}"; exit 1; }
+[[ -d "${ASSETS_DIR}" ]]   || { echo "Error: assets dir not found: ${ASSETS_DIR}"; exit 1; }
+[[ -d "${METADATA_DIR}" ]] || { echo "Error: metadata dir not found: ${METADATA_DIR}"; exit 1; }
 
 ICON_OPT=()
 [[ -f "${ICON_PATH}" ]] && ICON_OPT=(--icon "${ICON_PATH}") || echo "Warning: icon not found (${ICON_PATH}); using default."
@@ -69,17 +76,17 @@ if [[ ! -d "${VENV_DIR}" ]]; then
   "${PY_SYS}" -m venv "${VENV_DIR}"
 fi
 PY="${VENV_DIR}/bin/python"
-PIP="${PY} -m pip"
+PIP=( "${PY}" -m pip )
 
 echo "Upgrading pip/wheel/setuptools and installing PyInstaller..."
-${PIP} install --upgrade pip wheel setuptools
+"${PIP[@]}" install --upgrade pip wheel setuptools
 # Use a recent, stable version of PyInstaller.
-${PIP} install "pyinstaller>=6.16,<6.17"
+"${PIP[@]}" install "pyinstaller>=6.16,<6.17"
 
 # --- Local AIGPY (editable) ---
 if [[ -d "${SCRIPT_DIR}/AIGPY" ]]; then
   echo "Installing local AIGPY (editable)..."
-  ${PIP} install -e "${SCRIPT_DIR}/AIGPY"
+  "${PIP[@]}" install -e "${SCRIPT_DIR}/AIGPY"
 else
   echo "Warning: ${SCRIPT_DIR}/AIGPY not found. Skipping local AIGPY install."
 fi
@@ -92,22 +99,12 @@ if [[ -f "${REQ_IN}" ]]; then
   if command -v ggrep >/dev/null 2>&1; then GREP=ggrep; else GREP=grep; fi
   ${GREP} -viE '^[[:space:]]*aigpy([[:space:]/]|==|>=|<=|~=|!=|<|>|$).*' "${REQ_IN}" \
     | ${GREP} -vE '^[[:space:]]*(#|$)' > "${REQ_TMP}"
-  ${PIP} install -r "${REQ_TMP}"
+  "${PIP[@]}" install -r "${REQ_TMP}"
   rm -f "${REQ_TMP}"
 else
   echo "Error: requirements file not found: ${REQ_IN}"
   exit 1
 fi
-
-# --- Package-safe entry wrapper (preserves relative imports) ---
-LAUNCHER="${PKG_ROOT}/gui/__entry_launcher__.py"
-cat > "${LAUNCHER}" <<'PY'
-# -*- coding: utf-8 -*-
-import sys
-from tidal_dl.gui.gui_main import main
-if __name__ == "__main__":
-    sys.exit(main())
-PY
 
 # --- Clean outputs BEFORE creating build artifacts ---
 rm -rf "${DIST_PATH}" "${BUILD_PATH}" "${HOOKS_PATH}"
@@ -155,38 +152,79 @@ PY
 EXTRA_OPTS+=( --runtime-hook "${RTHOOK_QT_LOGGING}" )
 
 # --- Bundle the correct OpenSSL from Homebrew ---
-if command -v brew &>/dev/null; then
-    OPENSSL_PREFIX=$(brew --prefix openssl@3 || true)
-    if [[ -n "$OPENSSL_PREFIX" && -d "$OPENSSL_PREFIX/lib" ]]; then
-        echo "Found Homebrew OpenSSL. Bundling correct libssl and libcrypto."
-        # Use destination '.' and let PyInstaller place dylibs where it wants.
-        # We will robustly move them to Frameworks post-build.
-        EXTRA_OPTS+=( --add-binary "$OPENSSL_PREFIX/lib/libssl.3.dylib:." )
-        EXTRA_OPTS+=( --add-binary "$OPENSSL_PREFIX/lib/libcrypto.3.dylib:." )
-    else
-        echo "Error: Homebrew openssl@3 not found. This is required for the build."
-        exit 1
-    fi
+if ! command -v brew >/dev/null 2>&1; then
+    echo "Error: Homebrew not found. Homebrew openssl@3 is required for the macOS build."
+    exit 1
 fi
+
+OPENSSL_PREFIX="$(brew --prefix openssl@3 || true)"
+if [[ -n "${OPENSSL_PREFIX}" && -d "${OPENSSL_PREFIX}/lib" ]]; then
+    echo "Found Homebrew OpenSSL. Bundling correct libssl and libcrypto."
+    # Use destination '.' and let PyInstaller place dylibs where it wants.
+    # We will robustly move them to Frameworks post-build.
+    EXTRA_OPTS+=( --add-binary "${OPENSSL_PREFIX}/lib/libssl.3.dylib:." )
+    EXTRA_OPTS+=( --add-binary "${OPENSSL_PREFIX}/lib/libcrypto.3.dylib:." )
+else
+    echo "Error: Homebrew openssl@3 not found. This is required for the build."
+    exit 1
+fi
+
+# --- PyInstaller Qt material bootstrap support ---
+PYINSTALLER_SUPPORT_DIR="${BUILD_PATH}/pyinstaller-support"
+PYINSTALLER_SITE_CUSTOMIZE="${PYINSTALLER_SUPPORT_DIR}/sitecustomize.py"
+mkdir -p "${PYINSTALLER_SUPPORT_DIR}"
+cat > "${PYINSTALLER_SITE_CUSTOMIZE}" <<'PY'
+# Imported by Python startup during the PyInstaller build.
+try:
+    import PyQt6  # noqa: F401
+except Exception:
+    pass
+PY
 
 # --- Build ---
 echo "Starting PyInstaller build..."
-"${VENV_DIR}/bin/pyinstaller" --noconfirm \
-  --name "${APP_NAME}" \
-  --onedir \
-  --windowed \
-  ${ICON_OPT[@]+"${ICON_OPT[@]}"} \
-  ${SPLASH_OPT[@]+"${SPLASH_OPT[@]}"} \
-  --distpath "${DIST_PATH}" \
-  --workpath "${BUILD_PATH}" \
-  --clean \
-  --paths "${SCRIPT_DIR}/AIGPY" \
-  --paths "${SCRIPT_DIR}/Tidal-Media-Downloader/TIDALDL-PY" \
-  --add-data "${ASSETS_DIR}:tidal_dl/assets" \
-  --additional-hooks-dir "${HOOKS_PATH}" \
-  --exclude-module tkinter \
-  ${EXTRA_OPTS[@]+"${EXTRA_OPTS[@]}"} \
-  "${LAUNCHER}"
+PYINSTALLER_ARGS=(
+  --noconfirm
+  --name "${APP_NAME}"
+  --onedir
+  --windowed
+  "${ICON_OPT[@]}"
+  "${SPLASH_OPT[@]}"
+  --distpath "${DIST_PATH}"
+  --workpath "${BUILD_PATH}"
+  --clean
+  --paths "${SCRIPT_DIR}/AIGPY"
+  --paths "${PACKAGE_DIR}"
+  --add-data "${ASSETS_DIR}:tidal_dl/assets"
+  --add-data "${METADATA_DIR}:tidal_dl/metadata"
+  --additional-hooks-dir "${HOOKS_PATH}"
+  --exclude-module PyQt5
+  --exclude-module PySide2
+  --exclude-module torch
+  --exclude-module torchvision
+  --exclude-module tensorflow
+  --exclude-module tkinter
+  --exclude-module matplotlib
+  --hidden-import aigpy
+  "${EXTRA_OPTS[@]}"
+  "${MAIN_SCRIPT}"
+)
+
+PYINSTALLER_BOOTSTRAP='import sys; import PyQt6; from PyInstaller.__main__ import run; run(sys.argv[1:])'
+OLD_PYTHONPATH="${PYTHONPATH-}"
+if [[ -n "${OLD_PYTHONPATH}" ]]; then
+  export PYTHONPATH="${PYINSTALLER_SUPPORT_DIR}:${OLD_PYTHONPATH}"
+else
+  export PYTHONPATH="${PYINSTALLER_SUPPORT_DIR}"
+fi
+
+"${PY}" -c "${PYINSTALLER_BOOTSTRAP}" "${PYINSTALLER_ARGS[@]}"
+
+if [[ -n "${OLD_PYTHONPATH}" ]]; then
+  export PYTHONPATH="${OLD_PYTHONPATH}"
+else
+  unset PYTHONPATH
+fi
 
 echo "PyInstaller finished."
 
@@ -293,10 +331,12 @@ if [[ -n "$OPENSSL_PREFIX" && -d "$OPENSSL_PREFIX/lib" ]]; then
         
         # Also rewrite the specific, hardcoded path in case any other library uses it
         install_name_tool -change "$HARCODED_CRYPTO_PATH" "@rpath/$CRYPTO_BASENAME" "$BINFILE" 2>/dev/null || true
-        
+
         # Rewrite ffpyplayer's vendored paths (in case any binary still references them)
-        install_name_tool -change "@loader_path/../__dot__dylibs/libssl.3.dylib"   "@rpath/$SSL_BASENAME"    "$BINFILE" 2>/dev/null || true
-        install_name_tool -change "@loader_path/../__dot__dylibs/libcrypto.3.dylib" "@rpath/$CRYPTO_BASENAME" "$BINFILE" 2>/dev/null || true
+        install_name_tool -change "@loader_path/../__dot__dylibs/libssl.3.dylib"     "@rpath/$SSL_BASENAME"    "$BINFILE" 2>/dev/null || true
+        install_name_tool -change "@loader_path/../__dot__dylibs/libcrypto.3.dylib"  "@rpath/$CRYPTO_BASENAME" "$BINFILE" 2>/dev/null || true
+        install_name_tool -change "@loader_path/./__dot__dylibs/libssl.3.dylib"      "@rpath/$SSL_BASENAME"    "$BINFILE" 2>/dev/null || true
+        install_name_tool -change "@loader_path/./__dot__dylibs/libcrypto.3.dylib"   "@rpath/$CRYPTO_BASENAME" "$BINFILE" 2>/dev/null || true
     fi
   done
   echo "[SUCCESS] Recursive patching complete."
@@ -320,8 +360,15 @@ echo "--- [Post-build Step 4: Complete] ---"
 echo "--- [Final Sanity Check: Verifying Linkage] ---"
 echo "--- 1. All OpenSSL libraries found in bundle (should only be two in Frameworks):"
 find "$APP_BUNDLE/Contents" -name 'libssl*.dylib' -o -name 'libcrypto*.dylib'
-echo "--- 2. Python _ssl.so Linkage (should point to @rpath):"
-otool -L "$APP_BUNDLE/Contents/Frameworks/python3.11/lib-dynload/_ssl.cpython-311-darwin.so" | grep -iE 'ssl|crypto'
+
+SSL_EXTENSION="$(find "$APP_BUNDLE/Contents/Frameworks" -path '*/lib-dynload/_ssl*.so' -print -quit)"
+if [[ -n "$SSL_EXTENSION" ]]; then
+  echo "--- 2. Python _ssl extension linkage (should point to @rpath):"
+  otool -L "$SSL_EXTENSION" | grep -iE 'ssl|crypto'
+else
+  echo "[WARNING] Python _ssl extension not found under Contents/Frameworks; skipping _ssl linkage check."
+fi
+
 echo "--- 3. Bundled libssl.3.dylib Linkage (should point to @rpath):"
 otool -L "$FRAMEWORKS_DIR/libssl.3.dylib" | grep -i 'crypto'
 echo "--- [Final Sanity Check: Complete] ---"
