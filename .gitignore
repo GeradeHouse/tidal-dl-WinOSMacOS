@@ -40,6 +40,7 @@ pip-wheel-metadata/
 
 .env
 .venv/
+.venv-macos/
 venv/
 env/
 
@@ -81,14 +82,15 @@ Tidal-Media-Downloader/dist/
 Tidal-Media-Downloader/download/
 Tidal-Media-Downloader/cache/
 
-# compiled / binary / logs
-Tidal-Media-Downloader/**/bin/
+# generated compiled artifacts / logs
 Tidal-Media-Downloader/**/obj/
 Tidal-Media-Downloader/*.exe
-Tidal-Media-Downloader/*.dll
 Tidal-Media-Downloader/*.pdb
 Tidal-Media-Downloader/*.log
-Tidal-Media-Downloader/Dll/
+
+# Keep source/vendor binary payloads trackable for reproducible clones.
+# Do not ignore Tidal-Media-Downloader/**/bin/, Tidal-Media-Downloader/**/*.dll,
+# or Tidal-Media-Downloader/Dll/ here.
 
 # Visual Studio extras
 Tidal-Media-Downloader/*.suo
@@ -102,7 +104,6 @@ Tidal-Media-Downloader/.vs/
 ###############################################################################
 Tidal-Media-Downloader/TIDALDL-PY/build/
 Tidal-Media-Downloader/TIDALDL-PY/dist/
-Tidal-Media-Downloader/TIDALDL-PY/exe/
 Tidal-Media-Downloader/TIDALDL-PY/*.egg-info/
 Tidal-Media-Downloader/TIDALDL-PY/tidal_dl.egg-info/
 
@@ -119,6 +120,7 @@ Tidal-Media-Downloader/TIDALDL-PY/downloadd/
 Tidal-Media-Downloader/TIDALDL-PY/test/*.json
 
 # pyinstaller / spec files
+Tidal-Media-Downloader/*.spec
 Tidal-Media-Downloader/TIDALDL-PY/*.spec
 
 # old/extra dirs you actually showed
@@ -162,7 +164,6 @@ cover_cache.pkl
 spotify_to_tidal_links.json
 dist-installer/
 TidalDL_Installer_v*.exe
-generate-file-listing.ps1
 
 
 generate-folded-project-context/*

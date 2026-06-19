@@ -29,6 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="tidal-dl-gui"
 OPENSSL_PREFIX=""
 
+AIGPY_DIR="${SCRIPT_DIR}/AIGPY"
 PROJECT_SOURCE_DIR="${SCRIPT_DIR}/Tidal-Media-Downloader"
 PACKAGE_DIR="${PROJECT_SOURCE_DIR}/TIDALDL-PY"
 PKG_ROOT="${PACKAGE_DIR}/tidal_dl"
@@ -43,7 +44,7 @@ DIST_PATH="${SCRIPT_DIR}/dist"
 BUILD_PATH="${SCRIPT_DIR}/build"
 HOOKS_PATH="${SCRIPT_DIR}/hooks"
 
-VENV_DIR="${SCRIPT_DIR}/.venv"
+VENV_DIR="${SCRIPT_DIR}/.venv-macos"
 PY_SYS="$(command -v python3.11 || true)"
 PY_SYS="${PY_SYS:-$(command -v python3 || true)}"
 PY_SYS="${PY_SYS:-$(command -v python || true)}"
@@ -54,6 +55,7 @@ PY_SYS="${PY_SYS:-$(command -v python || true)}"
 [[ -d "${PACKAGE_DIR}" ]]  || { echo "Error: package dir not found: ${PACKAGE_DIR}"; exit 1; }
 [[ -d "${ASSETS_DIR}" ]]   || { echo "Error: assets dir not found: ${ASSETS_DIR}"; exit 1; }
 [[ -d "${METADATA_DIR}" ]] || { echo "Error: metadata dir not found: ${METADATA_DIR}"; exit 1; }
+[[ -f "${AIGPY_DIR}/aigpy/__init__.py" ]] || { echo "Error: AIGPY submodule/package not populated: ${AIGPY_DIR}/aigpy/__init__.py"; exit 1; }
 
 ICON_OPT=()
 [[ -f "${ICON_PATH}" ]] && ICON_OPT=(--icon "${ICON_PATH}") || echo "Warning: icon not found (${ICON_PATH}); using default."
@@ -84,11 +86,11 @@ echo "Upgrading pip/wheel/setuptools and installing PyInstaller..."
 "${PIP[@]}" install "pyinstaller>=6.16,<6.17"
 
 # --- Local AIGPY (editable) ---
-if [[ -d "${SCRIPT_DIR}/AIGPY" ]]; then
+if [[ -d "${AIGPY_DIR}" ]]; then
   echo "Installing local AIGPY (editable)..."
-  "${PIP[@]}" install -e "${SCRIPT_DIR}/AIGPY"
+  "${PIP[@]}" install -e "${AIGPY_DIR}"
 else
-  echo "Warning: ${SCRIPT_DIR}/AIGPY not found. Skipping local AIGPY install."
+  echo "Warning: ${AIGPY_DIR} not found. Skipping local AIGPY install."
 fi
 
 # --- Requirements (filter out AIGPY just in case) ---
@@ -193,7 +195,7 @@ PYINSTALLER_ARGS=(
   --distpath "${DIST_PATH}"
   --workpath "${BUILD_PATH}"
   --clean
-  --paths "${SCRIPT_DIR}/AIGPY"
+  --paths "${AIGPY_DIR}"
   --paths "${PACKAGE_DIR}"
   --add-data "${ASSETS_DIR}:tidal_dl/assets"
   --add-data "${METADATA_DIR}:tidal_dl/metadata"
@@ -253,6 +255,7 @@ if [[ -n "$OPENSSL_PREFIX" && -d "$OPENSSL_PREFIX/lib" ]]; then
     echo "[DEBUG] Source Homebrew SSL: $SSL_SRC"
     echo "[DEBUG] Source Homebrew Crypto: $CRYPTO_SRC"
     echo "[DEBUG] Target directory: $FRAMEWORKS_DIR"
+    mkdir -p "$FRAMEWORKS_DIR"
 
     if [[ ! -f "$SSL_SRC" || ! -f "$CRYPTO_SRC" ]]; then
         echo "[ERROR] CRITICAL: Homebrew OpenSSL dylibs not found at source location. Build failed."
@@ -294,8 +297,12 @@ if [[ -n "$OPENSSL_PREFIX" && -d "$OPENSSL_PREFIX/lib" ]]; then
   echo "[DEBUG] Target path for all references will be '@rpath/...'"
 
   # Add an @rpath entry to the main executable.
-  echo "[ACTION] Adding @rpath to main executable..."
-  install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+  echo "[ACTION] Ensuring @rpath exists on main executable..."
+  if otool -l "$APP_BUNDLE/Contents/MacOS/$APP_NAME" | grep -q "@executable_path/../Frameworks"; then
+    echo "[DEBUG] @rpath already present on main executable."
+  else
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+  fi
 
   # Fix the 'id' of the bundled dylibs themselves.
   echo "[ACTION] Setting install name for bundled $SSL_BASENAME..."

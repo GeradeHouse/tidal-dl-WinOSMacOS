@@ -4,10 +4,12 @@
 ; -------------------------------------------------------------------------
 ; PATH CONFIGURATION
 ; -------------------------------------------------------------------------
-; We define the root path to make the rest of the script cleaner.
-#define ProjectRoot "C:\PythonProjects\tidal-dl-WinOSMacOS"
-#define DistDir     ProjectRoot + "\Tidal-Media-Downloader\dist\tidal-dl-gui"
-#define AssetsDir   ProjectRoot + "\Tidal-Media-Downloader\TIDALDL-PY\tidal_dl\assets"
+; Default to the folder containing this installer script.
+#ifndef ProjectRoot
+  #define ProjectRoot SourcePath
+#endif
+#define DistDir     AddBackslash(ProjectRoot) + "Tidal-Media-Downloader\dist\tidal-dl-gui"
+#define AssetsDir   AddBackslash(ProjectRoot) + "Tidal-Media-Downloader\TIDALDL-PY\tidal_dl\assets"
 
 #define MyAppName "Tidal-DL GUI"
 ; Load the version from the external file

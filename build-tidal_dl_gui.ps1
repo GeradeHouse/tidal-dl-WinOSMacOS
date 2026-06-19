@@ -141,6 +141,8 @@ if ($Help) {
 $ScriptDir = $PSScriptRoot # Directory where this script is located
 $ProjectSourceDir = Join-Path $ScriptDir "Tidal-Media-Downloader" # Path to the folder containing main.py
 $PackageDir = Join-Path $ProjectSourceDir "TIDALDL-PY" # Path to the main Python package
+$AigpyDir = Join-Path $ScriptDir "AIGPY"
+$AigpyPackageInit = Join-Path $AigpyDir "aigpy\__init__.py"
 
 function Get-AppVersionFromIss {
     param(
@@ -269,27 +271,26 @@ if (-not (Test-Path $PyInstallerPath)) {
 }
 
 # --- Check and Install AIGPY ---
+if (-not (Test-Path $AigpyPackageInit)) {
+    Write-Error "AIGPY submodule/package not populated at '$AigpyPackageInit'."
+    exit 1
+}
+
 if ($BuildMode -eq "Full") {
-    Write-Host "Checking if AIGPY is installed..." -ForegroundColor Yellow
+    Write-Host "Installing local AIGPY (editable)..." -ForegroundColor Yellow
     try {
-        & ".venv\Scripts\python.exe" -c "import aigpy" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "AIGPY is already installed." -ForegroundColor Green
-        } else {
-            Write-Host "AIGPY not found. Installing AIGPY..." -ForegroundColor Yellow
-            & ".venv\Scripts\pip.exe" install -e "AIGPY"
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error "Failed to install AIGPY."
-                exit 1
-            }
-            Write-Host "AIGPY installed successfully." -ForegroundColor Green
+        & $PythonPath -m pip install -e $AigpyDir
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to install local AIGPY."
+            exit 1
         }
+        Write-Host "Local AIGPY installed successfully." -ForegroundColor Green
     } catch {
-        Write-Error "Error checking/installing AIGPY: $($_.Exception.Message)"
+        Write-Error "Error installing local AIGPY: $($_.Exception.Message)"
         exit 1
     }
 } else {
-    Write-Host "Fast build: skipping AIGPY import/install check (assuming venv is already set up)." -ForegroundColor Yellow
+    Write-Host "Fast build: skipping local AIGPY reinstall (assuming venv is already set up)." -ForegroundColor Yellow
 }
 
 # --- Check and Install Requirements ---
@@ -910,7 +911,7 @@ $pyinstallerArgs = @(
     $MainScript,
     "-n", $AppName,
     "-p", "TIDALDL-PY", # Add package directory to PyInstaller's path search
-    "-p", "..\AIGPY",   # Add the directory containing the aigpy package
+    "-p", $AigpyDir,   # Add the directory containing the aigpy package
     "--exclude-module", "PyQt5",
     "--exclude-module", "PySide2",
     # --- ADDED EXCLUDES for ML Libraries ---
