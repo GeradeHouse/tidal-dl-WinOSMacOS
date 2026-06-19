@@ -125,8 +125,16 @@ class PlayerLogic(QObject):
             return
 
         try:
-            logger.info("PlayerLogic: Requesting stream URL for track_id=%s quality=%s", track_id, AudioQuality.HIGH)
-            stream_url_info = self.tidal_api.getStreamUrl(id=str(track_id), quality=AudioQuality.HIGH)
+            preview_quality = AudioQuality.LOW
+            logger.info(
+                "PlayerLogic: Requesting AAC preview stream URL for track_id=%s quality=%s",
+                track_id,
+                preview_quality,
+            )
+            stream_url_info = self.tidal_api.getStreamUrl(
+                id=str(track_id),
+                quality=preview_quality,
+            )
             if not stream_url_info or not stream_url_info.url:
                 logger.error("PlayerLogic: Could not obtain stream URL for track_id: %s", track_id)
                 return

@@ -1,6 +1,8 @@
 # tidal_dl/gui/gui_main.py
 
+import html
 import logging
+import os
 import sys
 import threading
 import time
@@ -35,6 +37,7 @@ from PyQt6.QtCore import (
     QEvent,
     QRectF,
     QTimer,
+    QUrl,
 )
 from PyQt6.QtGui import (
     QPixmap,
@@ -74,6 +77,7 @@ from .gui_navigation import NavigationHandler
 from .gui_search import SearchBarWidget, KeywordSearchResultsController
 from .gui_playlist_tree import PlaylistTreeWidget
 from .gui_utils import enableGui, EmittingStream, append_text_to_output
+from .gui_quality_menu import DOWNLOAD_QUALITY_MENU_ITEMS
 from .gui_custom_dialog import CustomQMessageBox, ModernDarkProgressDialog
 from .gui_resize_handler import ResizeHandler
 from .gui_event_handlers import MainViewEventHandlers
@@ -284,9 +288,11 @@ class MainView(QWidget):
         try:
             if SETTINGS:
                 audio_quality_enum = getattr(
-                    SETTINGS, "audioQuality", AudioQuality.HIGH
+                    SETTINGS, "audioQuality", AudioQuality.LOSSLESS
                 )
                 audio_idx = self.c_combTQuality.findData(audio_quality_enum)
+                if audio_idx == -1:
+                    audio_idx = self.c_combTQuality.findData(AudioQuality.LOSSLESS)
                 if audio_idx != -1:
                     self.c_combTQuality.setCurrentIndex(audio_idx)
         except Exception as e:
@@ -300,8 +306,9 @@ class MainView(QWidget):
         app = QApplication.instance()
         if app:
             app.aboutToQuit.connect(self.cover_cache._save_cache)
+            app.aboutToQuit.connect(self._flushDeferredLinkingPersistence)
             logger_gui.debug(
-                "Connected app aboutToQuit signal to cover_cache._save_cache."
+                "Connected app aboutToQuit signal to cover cache and linking persistence flush handlers."
             )
 
         QTimer.singleShot(1500, lambda: self.start_download_structure_reorganization())
@@ -372,8 +379,14 @@ class MainView(QWidget):
             if context is None:
                 context = getattr(self, "s_playlist_obj", None)
             if isinstance(context, dict):
-                data = context.get("data") if isinstance(context.get("data"), dict) else context
-                return str(data.get("name") or data.get("title") or data.get("id") or "dict-context")
+                raw_data = context.get("data")
+                data = raw_data if isinstance(raw_data, dict) else context
+                return str(
+                    data.get("name")
+                    or data.get("title")
+                    or data.get("id")
+                    or "dict-context"
+                )
 
             return str(
                 getattr(context, "title", None)
@@ -474,7 +487,7 @@ class MainView(QWidget):
         )
 
         self.c_combTQuality = QComboBox()
-        for item_enum_val in AudioQuality:
+        for _, item_enum_val in DOWNLOAD_QUALITY_MENU_ITEMS:
             self.c_combTQuality.addItem(
                 Printf.map_quality(item_enum_val), item_enum_val
             )
@@ -1264,6 +1277,10 @@ class MainView(QWidget):
             self._save_settings_safely()
             return
 
+        download_root = os.path.normpath(get_user_download_path(SETTINGS.downloadPath))
+        download_root_link = QUrl.fromLocalFile(download_root).toString()
+        escaped_download_root = html.escape(download_root)
+
         accepted, do_not_remind = CustomQMessageBox.question_with_checkbox(
             self,
             "Download Folder Structure Changed",
@@ -1273,10 +1290,13 @@ class MainView(QWidget):
                 f"m4a, and mp4. Matching .lrc lyric files will be moved with "
                 f"their audio files when possible.\n\n{plan_count} legacy audio/lyrics "
                 "file(s) can be moved into the new structure.\n\n"
-                f"Download root:\n{get_user_download_path(SETTINGS.downloadPath)}"
+                "Download root:<br>"
+                f'<a href="{download_root_link}" style="color: #66ccff; '
+                f'text-decoration: underline;">{escaped_download_root}</a>'
             ),
             checkbox_text="Do not remind again",
             checkbox_checked=False,
+            rich_text=True,
         )
         if not accepted:
             if do_not_remind:
@@ -1645,8 +1665,17 @@ class MainView(QWidget):
             self.linking_gui_handler.onStopLinkingClicked
         )
         self.c_btnLinkTracks.setEnabled(True)
+        linking_max_workers_raw = getattr(SETTINGS, "linkingMaxWorkers", 2)
+        try:
+            linking_max_workers = int(linking_max_workers_raw)
+        except (TypeError, ValueError):
+            linking_max_workers = 2
+
         self.linking_worker = LinkingWorker(
-            TIDAL_API, tracks_to_link_data, self.linking_stop_event
+            TIDAL_API,
+            tracks_to_link_data,
+            self.linking_stop_event,
+            linking_max_workers,
         )
         self.linking_thread = QThread(self)
         self.linking_worker.moveToThread(self.linking_thread)
@@ -1737,6 +1766,8 @@ class MainView(QWidget):
             if not self.linking_thread.wait(3000):
                 logger_gui.warning("Linking thread did not terminate in time. Forcing termination.")
                 self.linking_thread.terminate() # Use as a last resort
+
+        self._flushDeferredLinkingPersistence()
 
         logger_gui.info("All background tasks signaled to stop. Proceeding with shutdown.")
         

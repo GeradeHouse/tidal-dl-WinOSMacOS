@@ -74,6 +74,7 @@ class Settings(aigpy.model.ModelBase):
     debugOpenApiProviderLabel = False
     enableOpenApiBatchQualityFetching = True
     openApiQualityBatchSize = 20
+    linkingMaxWorkers = 2
     downloadStructureMigrationDone = False
     downloadStructureMigrationDoNotRemind = False
     downloadStructureMigrationVersion = 1
@@ -105,7 +106,7 @@ class Settings(aigpy.model.ModelBase):
         for item in enums.AudioQuality:
             if isinstance(value, str) and item.name.lower() == value.lower():
                 return item
-        return enums.AudioQuality.HIGH
+        return enums.AudioQuality.LOSSLESS
 
     def read(self, path: str):
         self._path_ = path
@@ -171,6 +172,13 @@ class Settings(aigpy.model.ModelBase):
             or self.openApiQualityBatchSize > 20
         ):
             self.openApiQualityBatchSize = 20
+        if (
+            not hasattr(self, "linkingMaxWorkers")
+            or not isinstance(self.linkingMaxWorkers, int)
+            or self.linkingMaxWorkers < 1
+            or self.linkingMaxWorkers > 5
+        ):
+            self.linkingMaxWorkers = 2
         if not hasattr(self, "downloadStructureMigrationDone"):
             self.downloadStructureMigrationDone = False
         if not hasattr(self, "downloadStructureMigrationDoNotRemind"):
@@ -249,6 +257,7 @@ class Settings(aigpy.model.ModelBase):
         data["debugOpenApiProviderLabel"] = self.debugOpenApiProviderLabel
         data["enableOpenApiBatchQualityFetching"] = self.enableOpenApiBatchQualityFetching
         data["openApiQualityBatchSize"] = self.openApiQualityBatchSize
+        data["linkingMaxWorkers"] = self.linkingMaxWorkers
         data["downloadStructureMigrationDone"] = self.downloadStructureMigrationDone
         data["downloadStructureMigrationDoNotRemind"] = self.downloadStructureMigrationDoNotRemind
         data["downloadStructureMigrationVersion"] = self.downloadStructureMigrationVersion

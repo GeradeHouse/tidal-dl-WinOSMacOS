@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QProgressBar,
+    QMenu,
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import (
@@ -28,6 +29,7 @@ from PyQt6.QtGui import (
     QFont,
     QColor,
     QPalette,
+    QTextDocumentFragment,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,7 @@ class ModernDarkDialog(QDialog):
         show_in_folder_func: Optional[Callable] = None,
         checkbox_text: Optional[str] = None,
         checkbox_checked: bool = False,
+        rich_text: bool = True,
     ):
         super().__init__(parent)
 
@@ -77,7 +80,9 @@ class ModernDarkDialog(QDialog):
         self.show_in_folder_func = show_in_folder_func
         self.checkbox_text = checkbox_text
         self.checkbox_checked = checkbox_checked
+        self.rich_text = rich_text
         self.checkbox: Optional[QCheckBox] = None
+        self.informative_text_label: Optional[QLabel] = None
 
         self._init_ui()
 
@@ -165,18 +170,28 @@ class ModernDarkDialog(QDialog):
         text_layout = QVBoxLayout()
         self.main_message_label = QLabel(self.main_message, self)
         self.main_message_label.setFont(QFont("Segoe UI Variable", 12, QFont.Weight.Bold))
-        self.main_message_label.setStyleSheet("color: #F0F0F0; background-color: transparent;")
+        self.main_message_label.setStyleSheet(self._get_text_label_style("#F0F0F0"))
         self.main_message_label.setWordWrap(True)
         text_layout.addWidget(self.main_message_label)
 
         if self.informative_text:
             self.informative_text_label = QLabel(self.informative_text, self)
             self.informative_text_label.setFont(QFont("Segoe UI Variable", 10))
-            self.informative_text_label.setStyleSheet("color: #C0C0C0; background-color: transparent;")
+            self.informative_text_label.setStyleSheet(
+                self._get_text_label_style("#C0C0C0", include_context_menu=True)
+            )
             self.informative_text_label.setWordWrap(True)
-            self.informative_text_label.setTextFormat(Qt.TextFormat.RichText)
+            self.informative_text_label.setTextFormat(
+                Qt.TextFormat.RichText if self.rich_text else Qt.TextFormat.PlainText
+            )
             self.informative_text_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
             self.informative_text_label.setOpenExternalLinks(True)
+            self.informative_text_label.setContextMenuPolicy(
+                Qt.ContextMenuPolicy.CustomContextMenu
+            )
+            self.informative_text_label.customContextMenuRequested.connect(
+                self._show_informative_text_context_menu
+            )
             text_layout.addWidget(self.informative_text_label)
 
         if self.checkbox_text:
@@ -240,6 +255,88 @@ class ModernDarkDialog(QDialog):
 
         overall_content_layout.addWidget(bottom_widget)
         self.setFixedSize(470, 320 if self.checkbox_text else 280)
+
+    def _get_text_label_style(
+        self, color: str, include_context_menu: bool = False
+    ) -> str:
+        """Returns stylesheet for dialog text labels and their optional context menu."""
+        label_style = f"""
+            QLabel {{
+                color: {color};
+                background-color: transparent;
+            }}
+        """
+        if not include_context_menu:
+            return label_style
+
+        return label_style + self._get_context_menu_style()
+
+    def _get_context_menu_style(self) -> str:
+        """Returns stylesheet for dialog text context menus."""
+        return """
+            QMenu {
+                background-color: #2d2d31;
+                color: #ffffff;
+                border: 1px solid #555555;
+                padding: 4px;
+            }
+            QMenu::item {
+                background-color: transparent;
+                color: #ffffff;
+                padding: 5px 28px 5px 26px;
+            }
+            QMenu::item:selected {
+                background-color: #3f3f46;
+                color: #ffffff;
+            }
+            QMenu::item:disabled {
+                color: #9a9a9f;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #4a4a4f;
+                margin: 4px 6px;
+            }
+        """
+
+    @staticmethod
+    def _to_plain_label_text(text: str) -> str:
+        """Converts possible rich text from a QLabel into clipboard-friendly plain text."""
+        if "<" in text and ">" in text:
+            return QTextDocumentFragment.fromHtml(text).toPlainText()
+        return text
+
+    def _copy_informative_text(self, label: QLabel) -> None:
+        selected_text = label.selectedText() if label.hasSelectedText() else ""
+        text = selected_text or self._to_plain_label_text(label.text())
+        text = text.replace("\u2029", "\n")
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            clipboard.setText(text)
+
+    def _select_all_informative_text(self, label: QLabel) -> None:
+        label.setFocus(Qt.FocusReason.OtherFocusReason)
+        label.setSelection(0, len(label.text()))
+
+    def _show_informative_text_context_menu(self, pos) -> None:
+        label = self.informative_text_label
+        if label is None:
+            return
+
+        menu = QMenu(label)
+        menu.setStyleSheet(self._get_context_menu_style())
+
+        copy_action = menu.addAction("Copy\tCtrl+C")
+        if copy_action:
+            copy_action.triggered.connect(lambda: self._copy_informative_text(label))
+
+        select_all_action = menu.addAction("Select All\tCtrl+A")
+        if select_all_action:
+            select_all_action.triggered.connect(
+                lambda: self._select_all_informative_text(label)
+            )
+
+        menu.exec(label.mapToGlobal(pos))
 
     def _get_checkbox_style(self) -> str:
         """Returns the stylesheet for dialog checkboxes."""
@@ -533,6 +630,7 @@ class CustomQMessageBox:
         checkbox_text: str = "",
         checkbox_checked: bool = False,
         icon_path: Optional[str] = None,
+        rich_text: bool = True,
     ) -> Tuple[bool, bool]:
         """
         Displays a dark themed Yes/No question dialog with an optional checkbox.
@@ -548,6 +646,7 @@ class CustomQMessageBox:
             buttons=["Yes", "No"],
             checkbox_text=checkbox_text,
             checkbox_checked=checkbox_checked,
+            rich_text=rich_text,
         )
         result = dlg.exec()
         return result == QDialog.DialogCode.Accepted, dlg.is_checkbox_checked()

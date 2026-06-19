@@ -207,14 +207,38 @@ def get_user_download_path(path_from_settings: str) -> str:
     if not path_from_settings or not isinstance(path_from_settings, str):
         path_from_settings = get_default_download_path() if sys.platform == "win32" else "Downloads"
 
+    path_from_settings = os.path.expandvars(os.path.expanduser(path_from_settings.strip()))
+
+    if sys.platform == "win32":
+        home_dir = os.path.normpath(os.path.expanduser("~"))
+        normalized_setting_path = os.path.normpath(path_from_settings)
+        relative_default = path_from_settings.replace("\\", "/")
+        if os.path.isabs(normalized_setting_path):
+            try:
+                relative_default = os.path.relpath(normalized_setting_path, home_dir).replace(
+                    "\\", "/"
+                )
+            except ValueError:
+                relative_default = ""
+        while relative_default.startswith("./"):
+            relative_default = relative_default[2:]
+        relative_default = relative_default.strip("/").lower()
+        if relative_default in {"download", "downloads"}:
+            default_path = os.path.normpath(get_default_download_path())
+            logger.debug(
+                f"Windows legacy/default relative download path '{path_from_settings}' "
+                f"resolved to '{default_path}'."
+            )
+            return default_path
+
     # If the path is already absolute, use it as is.
     if os.path.isabs(path_from_settings):
         logger.debug(f"Download path '{path_from_settings}' is absolute. Using directly.")
-        return path_from_settings
+        return os.path.normpath(path_from_settings)
 
     # If the path is relative, resolve it against the user's home directory.
     home_dir = os.path.expanduser("~")
-    resolved_path = os.path.join(home_dir, path_from_settings)
+    resolved_path = os.path.normpath(os.path.join(home_dir, path_from_settings))
     logger.debug(
         f"Download path '{path_from_settings}' is relative. Resolved against home "
         f"directory to '{resolved_path}'."

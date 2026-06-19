@@ -620,12 +620,16 @@ function New-VersionedSplashImage {
     $graphics = $null
     $fontCollection = $null
     $format = $null
+    $backgroundBrush = $null
+    $edgePen = $null
     $shadowPath = $null
     $textPath = $null
     $shadowBrush = $null
     $shadowPen = $null
     $outlinePen = $null
-    $glowPen = $null
+    $outerGlowPen = $null
+    $middleGlowPen = $null
+    $innerGlowPen = $null
     $textBrush = $null
 
     try {
@@ -633,14 +637,29 @@ function New-VersionedSplashImage {
         $bitmap = New-Object -TypeName System.Drawing.Bitmap -ArgumentList @(
             $source.Width,
             $source.Height,
-            [System.Drawing.Imaging.PixelFormat]::Format32bppArgb
+            [System.Drawing.Imaging.PixelFormat]::Format24bppRgb
         )
         $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
         $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
         $graphics.CompositingQuality = [System.Drawing.Drawing2D.CompositingQuality]::HighQuality
         $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-        $graphics.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+        $graphics.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
+
+        # Keep the generated splash fully opaque. Semi-transparent edge pixels can reveal
+        # the PyInstaller/Tk splash window background as a thin purple line on Windows.
+        $backgroundBrush = New-Object -TypeName System.Drawing.SolidBrush -ArgumentList @(
+            [System.Drawing.Color]::FromArgb(255, 12, 13, 13)
+        )
+        $graphics.FillRectangle($backgroundBrush, 0, 0, $source.Width, $source.Height)
         $graphics.DrawImage($source, 0, 0, $source.Width, $source.Height)
+
+        # Seal the outermost image pixels with the splash background color so the edge
+        # remains dark even if the source PNG contains antialiased/transparent border pixels.
+        $edgePen = New-Object -TypeName System.Drawing.Pen -ArgumentList @(
+            [System.Drawing.Color]::FromArgb(255, 12, 13, 13),
+            [single]1
+        )
+        $graphics.DrawRectangle($edgePen, 0, 0, $source.Width - 1, $source.Height - 1)
 
         $fontCollection = New-Object System.Drawing.Text.PrivateFontCollection
         $fontFamily = $null
@@ -669,7 +688,7 @@ function New-VersionedSplashImage {
         $format.LineAlignment = [System.Drawing.StringAlignment]::Center
 
         $versionText = "v$Version"
-        $fontSize = [single]([Math]::Max(22, [Math]::Round($source.Width / 22)))
+        $fontSize = [single]([Math]::Max(23, [Math]::Round($source.Width / 21)))
         $textHeight = [single]([Math]::Max(34, [Math]::Round($source.Height / 15)))
         $textY = [single]($source.Height - 80)
         $layoutRect = New-Object -TypeName System.Drawing.RectangleF -ArgumentList @(
@@ -688,44 +707,60 @@ function New-VersionedSplashImage {
         $shadowPath = New-Object System.Drawing.Drawing2D.GraphicsPath
         $shadowPath.AddString($versionText, $fontFamily, [int]$fontStyle, $fontSize, $shadowRect, $format)
         $shadowBrush = New-Object -TypeName System.Drawing.SolidBrush -ArgumentList @(
-            [System.Drawing.Color]::FromArgb(180, 0, 0, 0)
+            [System.Drawing.Color]::FromArgb(170, 0, 0, 0)
         )
         $shadowPen = New-Object -TypeName System.Drawing.Pen -ArgumentList @(
-            [System.Drawing.Color]::FromArgb(190, 0, 0, 0),
-            [single]7
+            [System.Drawing.Color]::FromArgb(175, 0, 0, 0),
+            [single]6
         )
+        $shadowPen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
         $graphics.DrawPath($shadowPen, $shadowPath)
         $graphics.FillPath($shadowBrush, $shadowPath)
 
         $textPath = New-Object System.Drawing.Drawing2D.GraphicsPath
         $textPath.AddString($versionText, $fontFamily, [int]$fontStyle, $fontSize, $layoutRect, $format)
         $outlinePen = New-Object -TypeName System.Drawing.Pen -ArgumentList @(
-            [System.Drawing.Color]::FromArgb(230, 0, 0, 0),
-            [single]4
+            [System.Drawing.Color]::FromArgb(220, 15, 13, 5),
+            [single]3
         )
-        $glowPen = New-Object -TypeName System.Drawing.Pen -ArgumentList @(
-            [System.Drawing.Color]::FromArgb(120, 0, 220, 220),
+        $outlinePen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+        $outerGlowPen = New-Object -TypeName System.Drawing.Pen -ArgumentList @(
+            [System.Drawing.Color]::FromArgb(70, 248, 216, 59),
+            [single]10
+        )
+        $middleGlowPen = New-Object -TypeName System.Drawing.Pen -ArgumentList @(
+            [System.Drawing.Color]::FromArgb(115, 248, 216, 59),
+            [single]6
+        )
+        $innerGlowPen = New-Object -TypeName System.Drawing.Pen -ArgumentList @(
+            [System.Drawing.Color]::FromArgb(180, 248, 216, 59),
             [single]2
         )
-        $textBrush = New-Object -TypeName System.Drawing.Drawing2D.LinearGradientBrush -ArgumentList @(
-            $layoutRect,
-            [System.Drawing.Color]::FromArgb(255, 255, 255, 255),
-            [System.Drawing.Color]::FromArgb(255, 116, 246, 246),
-            [System.Drawing.Drawing2D.LinearGradientMode]::Vertical
+        $outerGlowPen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+        $middleGlowPen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+        $innerGlowPen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+        $textBrush = New-Object -TypeName System.Drawing.SolidBrush -ArgumentList @(
+            [System.Drawing.Color]::FromArgb(255, 248, 216, 59)
         )
 
+        $graphics.DrawPath($outerGlowPen, $textPath)
+        $graphics.DrawPath($middleGlowPen, $textPath)
         $graphics.DrawPath($outlinePen, $textPath)
-        $graphics.DrawPath($glowPen, $textPath)
+        $graphics.DrawPath($innerGlowPen, $textPath)
         $graphics.FillPath($textBrush, $textPath)
         $bitmap.Save($OutputImagePath, [System.Drawing.Imaging.ImageFormat]::Png)
     } finally {
         if ($textBrush) { $textBrush.Dispose() }
-        if ($glowPen) { $glowPen.Dispose() }
+        if ($innerGlowPen) { $innerGlowPen.Dispose() }
+        if ($middleGlowPen) { $middleGlowPen.Dispose() }
+        if ($outerGlowPen) { $outerGlowPen.Dispose() }
         if ($outlinePen) { $outlinePen.Dispose() }
         if ($shadowPen) { $shadowPen.Dispose() }
         if ($shadowBrush) { $shadowBrush.Dispose() }
         if ($textPath) { $textPath.Dispose() }
         if ($shadowPath) { $shadowPath.Dispose() }
+        if ($edgePen) { $edgePen.Dispose() }
+        if ($backgroundBrush) { $backgroundBrush.Dispose() }
         if ($format) { $format.Dispose() }
         if ($fontCollection) { $fontCollection.Dispose() }
         if ($graphics) { $graphics.Dispose() }

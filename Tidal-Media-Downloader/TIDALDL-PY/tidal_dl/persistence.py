@@ -84,6 +84,8 @@ LINKS_FILE_BASENAME = "spotify_to_tidal_links.json"
 LINKS_TEMP_SUFFIX = ".tmp"
 LINKS_BACKUP_SUFFIX = ".bak"
 LINKS_CORRUPT_SUFFIX = ".corrupt"
+DEFERRED_SAVE_CHECKPOINT_MUTATION_COUNT = 25
+DEFERRED_SAVE_CHECKPOINT_SECONDS = 20.0
 
 # ########## CLASS DEFINITIONS ##########
 
@@ -115,6 +117,8 @@ class LinkPersistenceManager:
         self._deferred_save_depth = 0
         self._deferred_save_pending = False
         self._deferred_save_reason: Optional[str] = None
+        self._deferred_save_mutations_since_flush = 0
+        self._deferred_save_last_flush_monotonic = time.monotonic()
 
     # --- Private Helper Methods ---
 
@@ -567,7 +571,7 @@ class LinkPersistenceManager:
             self.links_data = loaded_data
             return loaded_data
 
-    def save_links(self) -> bool:
+    def save_links(self, *, create_backup: bool = True) -> bool:
         """
         Saves a stable snapshot of the in-memory links data to the JSON file.
 
@@ -607,7 +611,10 @@ class LinkPersistenceManager:
         with self._disk_write_lock:
             for attempt in range(max_retries):
                 try:
-                    if self._write_links_data_atomic(snapshot_to_save, create_backup=True):
+                    if self._write_links_data_atomic(
+                        snapshot_to_save,
+                        create_backup=create_backup,
+                    ):
                         with self._io_lock:
                             self._load_failed_due_to_unresolved_corruption = False
                         return True
@@ -660,6 +667,9 @@ class LinkPersistenceManager:
         with self._io_lock:
             self._deferred_save_depth += 1
             self._deferred_save_reason = str(reason or "bulk")
+            if self._deferred_save_depth == 1:
+                self._deferred_save_mutations_since_flush = 0
+                self._deferred_save_last_flush_monotonic = time.monotonic()
             logger.debug(
                 "Deferred persistence save started | reason=%s depth=%d",
                 self._deferred_save_reason,
@@ -682,10 +692,16 @@ class LinkPersistenceManager:
                 return True
 
             self._deferred_save_depth -= 1
-            if self._deferred_save_depth == 0 and self._deferred_save_pending:
-                self._deferred_save_pending = False
-                self._deferred_save_reason = None
-                should_flush = True
+            if self._deferred_save_depth == 0:
+                if self._deferred_save_pending:
+                    self._deferred_save_pending = False
+                    self._deferred_save_reason = None
+                    self._deferred_save_mutations_since_flush = 0
+                    self._deferred_save_last_flush_monotonic = time.monotonic()
+                    should_flush = True
+                else:
+                    self._deferred_save_reason = None
+                    self._deferred_save_mutations_since_flush = 0
 
         if not should_flush:
             return True
@@ -704,16 +720,53 @@ class LinkPersistenceManager:
     def _save_or_defer(self) -> bool:
         """
         Saves immediately unless a bulk/deferred-save scope is active.
+        Deferred scopes also write periodic crash-recovery checkpoints.
         """
+        should_checkpoint = False
+        checkpoint_reason = "bulk"
+
         with self._io_lock:
             if self._deferred_save_depth > 0:
                 self._deferred_save_pending = True
-                logger.debug(
-                    "Persistence save deferred | reason=%s depth=%d",
-                    self._deferred_save_reason,
-                    self._deferred_save_depth,
+                self._deferred_save_mutations_since_flush += 1
+                checkpoint_reason = self._deferred_save_reason or "bulk"
+                elapsed_since_checkpoint = (
+                    time.monotonic() - self._deferred_save_last_flush_monotonic
                 )
-                return True
+                should_checkpoint = (
+                    self._deferred_save_mutations_since_flush
+                    >= DEFERRED_SAVE_CHECKPOINT_MUTATION_COUNT
+                    or elapsed_since_checkpoint >= DEFERRED_SAVE_CHECKPOINT_SECONDS
+                )
+
+                if not should_checkpoint:
+                    logger.debug(
+                        "Persistence save deferred | reason=%s depth=%d mutations_since_checkpoint=%d",
+                        self._deferred_save_reason,
+                        self._deferred_save_depth,
+                        self._deferred_save_mutations_since_flush,
+                    )
+                    return True
+
+                self._deferred_save_pending = False
+                self._deferred_save_mutations_since_flush = 0
+                self._deferred_save_last_flush_monotonic = time.monotonic()
+
+        if should_checkpoint:
+            start = time.perf_counter()
+            result = self.save_links(create_backup=False)
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            logger.info(
+                "Deferred persistence checkpoint saved | reason=%s elapsed_ms=%.1f result=%s",
+                checkpoint_reason,
+                elapsed_ms,
+                result,
+            )
+            if not result:
+                with self._io_lock:
+                    if self._deferred_save_depth > 0:
+                        self._deferred_save_pending = True
+            return result
 
         return self.save_links()
 

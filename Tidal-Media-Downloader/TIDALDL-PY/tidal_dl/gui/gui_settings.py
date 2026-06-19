@@ -131,6 +131,7 @@ class SettingsPage(QtWidgets.QWidget):
         self.chkSaveCovers: Optional[QCheckBox] = None
         self.chkMultiThread: Optional[QCheckBox] = None
         self.chkDownloadDelay: Optional[QCheckBox] = None
+        self.spinLinkingMaxWorkers: Optional[QSpinBox] = None
         self.chkUsePlaylistFolder: Optional[QCheckBox] = None
         self.albumFolderFormatEdit: Optional[QLineEdit] = None
         self.playlistFolderFormatEdit: Optional[QLineEdit] = None

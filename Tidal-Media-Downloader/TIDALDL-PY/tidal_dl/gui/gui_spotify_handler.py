@@ -161,7 +161,7 @@ class SpotifyGuiHandler(QObject):
         table_handler = getattr(self.main_view, "table_handler", None)
         if not table_handler or not hasattr(table_handler, "get_spotify_track_payloads_for_rows"):
             return []
-        if rows is None:
+        if rows is None or isinstance(rows, bool):
             table_widget = getattr(self.main_view, "tableWidget", None)
             rows = table_widget.getSelectedRows() if table_widget else []
         return table_handler.get_spotify_track_payloads_for_rows(list(rows))
@@ -170,7 +170,7 @@ class SpotifyGuiHandler(QObject):
         table_handler = getattr(self.main_view, "table_handler", None)
         if not table_handler or not hasattr(table_handler, "get_table_track_payloads_for_rows"):
             return []
-        if rows is None:
+        if rows is None or isinstance(rows, bool):
             table_widget = getattr(self.main_view, "tableWidget", None)
             rows = table_widget.getSelectedRows() if table_widget else []
         return table_handler.get_table_track_payloads_for_rows(list(rows))

@@ -33,6 +33,7 @@ from ..model import StreamUrl
 from ..settings import SETTINGS
 from .gui_utils import show_in_folder
 from .gui_custom_dialog import ModernDarkDialog, CustomQMessageBox
+from .gui_quality_menu import DOWNLOAD_QUALITY_MENU_ITEMS
 from ..paths import get_user_download_path, resource_path
 
 if TYPE_CHECKING:
@@ -414,13 +415,7 @@ class DownloadHandler(QObject):
         if not downloadMenu:
             return
 
-        dlQualities = [
-            ("AAC (Low)", AudioQuality.LOW),
-            ("MP3 (Constant Bitrate)", AudioQuality.MP3),
-            ("FLAC (CD Standard)", AudioQuality.LOSSLESS),
-            ("FLAC (Max / HiRes)", AudioQuality.HI_RES_LOSSLESS),
-            ("Highest Available", AudioQuality.HIGHEST),
-        ]
+        dlQualities = DOWNLOAD_QUALITY_MENU_ITEMS
 
         for text, qual_enum in dlQualities:
             action: Optional[QAction] = downloadMenu.addAction(text)

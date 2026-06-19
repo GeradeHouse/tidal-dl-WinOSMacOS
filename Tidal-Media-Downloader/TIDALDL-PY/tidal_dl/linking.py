@@ -1,11 +1,12 @@
 # tidal_dl/linking.py
 
+import concurrent.futures
 import logging
 import re
 import threading
 import unicodedata
 import difflib  # Added for similarity checking
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
 
 import aigpy
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
@@ -44,7 +45,16 @@ def normalize_title(title: Optional[str]) -> str:
     normalized = title.lower()
     # Remove content within brackets/parentheses (e.g., (Remix), [Live])
     normalized = re.sub(r"[\(\[].*?[\)\]]", "", normalized)
-    # Remove common suffixes like - Edit, - Remix, - Live, - Version, etc.
+    # Remove common suffixes like - In the Radio Mix, - 7" Radio Edit, - Edit, - Remix, etc.
+    version_suffix_pattern = (
+        r"\s*[-–—]\s*"
+        r"(?:\d+\s*(?:\"|″|inch|inches|in)\s*)?"
+        r"(?:(?:in|on|the|a|an)\s+){0,4}"
+        r"(?:radio\s+edit|radio\s+version|radio\s+mix|single\s+edit|"
+        r"extended\s+mix|instrumental|edit|version|mix|live)"
+        r"\b.*$"
+    )
+    normalized = re.sub(version_suffix_pattern, "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(
         r"\s-\s(edit|remix|live|version|mix|radio edit|extended mix|instrumental)\b",
         "",
@@ -154,10 +164,93 @@ def _track_diag_summary(track: Optional[Track]) -> Dict[str, Any]:
     }
 
 
+def _metadata_compare_key(value: Optional[Any]) -> str:
+    if value is None:
+        return ""
+
+    normalized = unicodedata.normalize("NFKC", str(value))
+    normalized = normalized.replace("\u00a0", " ")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized.casefold()
+
+
+def _duration_second_options(
+    value: Optional[Union[int, float, str]],
+    preferred_unit: str,
+) -> List[float]:
+    if value is None:
+        return []
+
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return []
+
+    if numeric_value <= 0:
+        return []
+
+    options: List[float] = []
+
+    def add_option(seconds: float) -> None:
+        if seconds <= 0 or seconds > 86400:
+            return
+        if not any(abs(seconds - existing) < 0.001 for existing in options):
+            options.append(seconds)
+
+    if preferred_unit == "milliseconds":
+        add_option(numeric_value / 1000.0)
+        add_option(numeric_value)
+    else:
+        add_option(numeric_value)
+        add_option(numeric_value / 1000.0)
+
+    return options
+
+
+def _best_duration_comparison(
+    spotify_duration_ms: Optional[Union[int, float, str]],
+    tidal_duration: Optional[Union[int, float, str]],
+) -> Optional[Tuple[float, float, float]]:
+    spotify_options = _duration_second_options(
+        spotify_duration_ms,
+        preferred_unit="milliseconds",
+    )
+    tidal_options = _duration_second_options(
+        tidal_duration,
+        preferred_unit="seconds",
+    )
+
+    if not spotify_options or not tidal_options:
+        return None
+
+    best_result: Optional[Tuple[float, float, float]] = None
+    for spotify_seconds in spotify_options:
+        for tidal_seconds in tidal_options:
+            duration_diff = abs(tidal_seconds - spotify_seconds)
+            if best_result is None or duration_diff < best_result[0]:
+                best_result = (duration_diff, spotify_seconds, tidal_seconds)
+
+    return best_result
+
+
 TITLE_SIMILARITY_REVIEW_THRESHOLD = 0.72
 MIN_TITLE_TOKEN_OVERLAP = 0.60
-MAX_REVIEW_CANDIDATE_SCORE = 4
+MAX_AUTO_LINK_CANDIDATE_SCORE = 4
+MAX_RETURNED_REVIEW_CANDIDATE_SCORE = 12
+MAX_REVIEW_CANDIDATE_SCORE = MAX_AUTO_LINK_CANDIDATE_SCORE
 EMIT_LINKING_METADATA_DIAG = False
+
+MAX_METADATA_EXTRA_QUERIES = 10
+METADATA_EXTRA_QUERY_PAGE_OFFSETS = (0,)
+MAX_COMPACT_DIAG_QUERY_SAMPLE = 6
+MAX_COMPACT_DIAG_REJECTED_SAMPLE = 5
+
+TEXT_HARD_REJECT_SIGNAL_THRESHOLD = 0.25
+TITLE_EXCELLENT_SIGNAL_THRESHOLD = 0.90
+TITLE_REVIEW_SIGNAL_THRESHOLD = 0.50
+ARTIST_EXCELLENT_SIGNAL_THRESHOLD = 0.78
+ARTIST_REVIEW_SIGNAL_THRESHOLD = 0.55
+TOKEN_OVERLAP_BONUS_WEIGHT = 0.08
 
 _TITLE_TOKEN_STOPWORDS = {
     "a",
@@ -193,6 +286,166 @@ def _title_token_overlap_ratio(
         return 0.0
 
     return len(spotify_tokens & tidal_tokens) / len(spotify_tokens)
+
+
+def _similarity_tokens(text: Optional[str]) -> set[str]:
+    normalized = normalize_title(text)
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized.lower())
+    return {
+        token
+        for token in normalized.split()
+        if token and token not in _TITLE_TOKEN_STOPWORDS
+    }
+
+
+def _symmetric_token_overlap_ratio(left: Optional[str], right: Optional[str]) -> float:
+    left_tokens = _similarity_tokens(left)
+    right_tokens = _similarity_tokens(right)
+
+    if not left_tokens or not right_tokens:
+        return 0.0
+
+    return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens))
+
+
+def _similarity_signal(left: Optional[str], right: Optional[str]) -> float:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+
+    if not left_text or not right_text:
+        return 1.0
+
+    left_norm = normalize_title(left_text)
+    right_norm = normalize_title(right_text)
+    left_fuzzy = fuzzy_normalize(left_text)
+    right_fuzzy = fuzzy_normalize(right_text)
+
+    if left_fuzzy and right_fuzzy:
+        if left_fuzzy == right_fuzzy or left_fuzzy in right_fuzzy or right_fuzzy in left_fuzzy:
+            return 1.0
+
+    character_ratio = difflib.SequenceMatcher(None, left_norm, right_norm).ratio()
+    fuzzy_ratio = difflib.SequenceMatcher(None, left_fuzzy, right_fuzzy).ratio()
+    token_overlap = _symmetric_token_overlap_ratio(left_text, right_text)
+
+    return min(
+        1.0,
+        max(character_ratio, fuzzy_ratio, token_overlap)
+        + (token_overlap * TOKEN_OVERLAP_BONUS_WEIGHT),
+    )
+
+
+def _best_similarity_signal(
+    source_values: List[str],
+    target_values: List[str],
+) -> float:
+    source_clean = [str(value or "").strip() for value in source_values if str(value or "").strip()]
+    target_clean = [str(value or "").strip() for value in target_values if str(value or "").strip()]
+
+    if not source_clean or not target_clean:
+        return 1.0
+
+    return max(
+        _similarity_signal(source_value, target_value)
+        for source_value in source_clean
+        for target_value in target_clean
+    )
+
+
+def _metadata_query_text(text: Optional[str]) -> str:
+    value = str(text or "").strip().lower()
+    value = re.sub(r"[’`]", "'", value)
+    value = re.sub(r"[\"“”″]", " ", value)
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _strip_trailing_version_descriptor(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+
+    version_descriptor = (
+        r"(?:\d+\s*(?:\"|″|inch|inches|in)\s*)?"
+        r"(?:(?:in|on|the|a|an)\s+){0,4}"
+        r"(?:radio\s+edit|radio\s+version|radio\s+mix|single\s+edit|"
+        r"extended\s+mix|instrumental|edit|version|mix|live)"
+        r"\b.*"
+    )
+    value = re.sub(
+        rf"\s*[-–—]\s*{version_descriptor}\s*$",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        rf"\s*[\[(]\s*{version_descriptor}\s*[\])]\s*$",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return value.strip()
+
+
+def _remove_format_size_from_title(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+
+    value = re.sub(
+        r"\b\d+\s*(?:\"|″|inch|inches|in)\s+",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return value.strip()
+
+
+def _clean_title_query_variants(title: Optional[str]) -> List[str]:
+    raw_title = str(title or "").strip()
+    if not raw_title:
+        return []
+
+    candidates = [
+        _strip_trailing_version_descriptor(raw_title),
+        _remove_format_size_from_title(raw_title),
+        raw_title,
+        normalize_title(raw_title),
+    ]
+
+    variants: List[str] = []
+    seen: Set[str] = set()
+    for candidate in candidates:
+        query_text = _metadata_query_text(candidate)
+        if not query_text or query_text in seen:
+            continue
+        seen.add(query_text)
+        variants.append(query_text)
+
+    return variants
+
+
+def _title_penalty_from_signal(signal: float) -> int:
+    if signal >= TITLE_EXCELLENT_SIGNAL_THRESHOLD:
+        return 0
+    if signal >= TITLE_REVIEW_SIGNAL_THRESHOLD:
+        return 1
+    return 3
+
+
+def _artist_penalty_from_signal(signal: float) -> int:
+    if signal >= ARTIST_EXCELLENT_SIGNAL_THRESHOLD:
+        return 0
+    if signal >= ARTIST_REVIEW_SIGNAL_THRESHOLD:
+        return 2
+    return 4
+
+
+def _should_hard_reject_candidate(title_signal: float, artist_signal: float) -> bool:
+    return (
+        title_signal < TEXT_HARD_REJECT_SIGNAL_THRESHOLD
+        and artist_signal < TEXT_HARD_REJECT_SIGNAL_THRESHOLD
+    )
 
 
 def _titles_are_review_compatible(
@@ -305,8 +558,16 @@ def searchLinkTrack(
                             f"Found potential match via ISRC: Tidal ID {track.id} ('{track.title}')"
                         )
                         # Basic duration check if available
-                        if duration_ms is not None and track.duration:
-                            duration_diff = abs(track.duration - (duration_ms / 1000))
+                        duration_comparison = _best_duration_comparison(
+                            duration_ms,
+                            getattr(track, "duration", None),
+                        )
+                        if duration_comparison is not None:
+                            (
+                                duration_diff,
+                                spotify_duration_s,
+                                tidal_duration_s,
+                            ) = duration_comparison
                             if duration_diff <= 5:  # Allow 5s difference
                                 debug_buffer.append(
                                     f"ISRC match confirmed by duration ({duration_diff:.2f}s diff)."
@@ -319,7 +580,9 @@ def searchLinkTrack(
                             else:
                                 # Log duration mismatch to buffer, but don't necessarily skip yet
                                 debug_buffer.append(
-                                    f"ISRC match {track.id} duration mismatch ({duration_diff:.2f}s diff). Spotify: {duration_ms/1000}s, Tidal: {track.duration}s."
+                                    f"ISRC match {track.id} duration mismatch ({duration_diff:.2f}s diff). "
+                                    f"Spotify: {spotify_duration_s:.2f}s, Tidal: {tidal_duration_s:.2f}s. "
+                                    f"Raw Spotify duration_ms: {duration_ms}, raw Tidal duration: {getattr(track, 'duration', None)}."
                                 )
                         else:
                             debug_buffer.append(
@@ -491,27 +754,55 @@ def searchLinkTrack(
                         f"Extra metadata query '{source_query}' added {len(added_summaries)} unique candidate sample(s)."
                     )
 
-            base_title_query = normalize_title(title)
+            title_query_variants = _clean_title_query_variants(title)
+            base_title_query = (
+                title_query_variants[0]
+                if title_query_variants
+                else _metadata_query_text(normalize_title(title))
+            )
             short_primary_artist = (
                 primary_artist.split()[0].strip() if primary_artist else ""
             )
             spotify_title_has_version_marker = bool(_version_marker_categories(title))
 
             extra_queries: List[str] = []
+            extra_query_seen: Set[str] = set()
 
             def _append_extra_query(candidate_query: str) -> None:
+                if len(extra_queries) >= MAX_METADATA_EXTRA_QUERIES:
+                    return
+
                 cleaned_query = " ".join(str(candidate_query or "").strip().split())
-                if cleaned_query:
+                normalized_query = cleaned_query.lower()
+                if cleaned_query and normalized_query not in extra_query_seen:
+                    extra_query_seen.add(normalized_query)
                     extra_queries.append(cleaned_query)
 
-            _append_extra_query(f"{title} {primary_artist}")
-            _append_extra_query(f"{base_title_query} {primary_artist}")
-            _append_extra_query(f"{base_title_query} {short_primary_artist}")
-            _append_extra_query(base_title_query)
-            _append_extra_query(f"{base_title_query} {album}")
+            def _append_title_artist_query_variants(title_query: str) -> None:
+                if not title_query:
+                    return
 
-            if base_title_query and primary_artist and album:
-                _append_extra_query(f"{base_title_query} {primary_artist} {album}")
+                _append_extra_query(title_query)
+
+                if primary_artist:
+                    _append_extra_query(f"{title_query} {primary_artist}")
+                    _append_extra_query(f"{primary_artist} {title_query}")
+
+                if short_primary_artist and short_primary_artist.lower() != primary_artist.lower():
+                    _append_extra_query(f"{title_query} {short_primary_artist}")
+                    _append_extra_query(f"{short_primary_artist} {title_query}")
+
+                if album:
+                    _append_extra_query(f"{title_query} {album}")
+
+                if primary_artist and album:
+                    _append_extra_query(f"{title_query} {primary_artist} {album}")
+                    _append_extra_query(f"{primary_artist} {title_query} {album}")
+
+            _append_extra_query(f"{title} {primary_artist}")
+
+            for title_query in title_query_variants:
+                _append_title_artist_query_variants(title_query)
 
             if base_title_query and primary_artist and not spotify_title_has_version_marker:
                 # Many electronic releases expose the desired source track as
@@ -528,7 +819,7 @@ def searchLinkTrack(
                     continue
                 normalized_seen_queries.add(normalized_extra_query)
 
-                for page_offset in (0, 25, 50):
+                for page_offset in METADATA_EXTRA_QUERY_PAGE_OFFSETS:
                     paged_query_label = f"{extra_query} offset={page_offset}"
                     search_queries_attempted.append(paged_query_label)
 
@@ -565,9 +856,9 @@ def searchLinkTrack(
             if (
                 search_result
                 and search_result.tracks
-                and isinstance(search_result.tracks.items, list)
+                and isinstance(getattr(search_result.tracks, "items", None), list)
             ):
-                search_result.tracks.items = items_for_len
+                setattr(search_result.tracks, "items", items_for_len)
 
             num_items_found = len(items_for_len)
 
@@ -813,7 +1104,6 @@ def searchLinkTrack(
 
             # If we reach here, num_items_found > 0, continue processing
 
-            spotify_duration_s = duration_ms / 1000 if duration_ms is not None else None
             min_score = float("inf")  # Reset min_score for metadata search
             best_match = None  # Reset best_match for metadata search
             candidates: List[Dict[str, Any]] = (
@@ -831,117 +1121,95 @@ def searchLinkTrack(
                 items_list: List[Track] = search_result.tracks.items
                 for item in items_list:
                     track: Track = item
-                    
-                    # --- Candidate Filtering Logic ---
-                    # 1. Artist Overlap Check
-                    # We require at least one artist to match loosely (substring or high similarity)
-                    # This filters out covers/karaoke by different artists.
+
+                    # --- Candidate Scoring Logic ---
                     spotify_artists_fuzzy = [fuzzy_normalize(a) for a in artists]
-                    tidal_artists_fuzzy = [
-                        fuzzy_normalize(a.name)
-                        for a in cast(List[Artist], track.artists)
+                    raw_tidal_artists = cast(
+                        List[Artist],
+                        getattr(track, "artists", []) or [],
+                    )
+                    tidal_artist_names = [
+                        str(a.name)
+                        for a in raw_tidal_artists
                         if hasattr(a, "name") and a.name
                     ]
-                    
-                    artist_match_found = False
-                    if not spotify_artists_fuzzy:
-                        # Fallback if no artists provided (unlikely)
-                        artist_match_found = True 
-                    else:
-                        for s_art in spotify_artists_fuzzy:
-                            for t_art in tidal_artists_fuzzy:
-                                # Check for substring match
-                                if s_art in t_art or t_art in s_art:
-                                    artist_match_found = True
-                                    break
-                                # Check for high similarity (e.g. P!nk vs Pink)
-                                if difflib.SequenceMatcher(None, s_art, t_art).ratio() > 0.8:
-                                    artist_match_found = True
-                                    break
-                            if artist_match_found:
-                                break
-                    
-                    if not artist_match_found:
-                        if len(rejected_candidates) < 30:
-                            rejected_candidates.append(
-                                {
-                                    "reason": "artist_filter",
-                                    "track": _track_diag_summary(track),
-                                    "spotify_artists_fuzzy": spotify_artists_fuzzy,
-                                    "tidal_artists_fuzzy": tidal_artists_fuzzy,
-                                }
-                            )
-                        continue
+                    tidal_artists_fuzzy = [
+                        fuzzy_normalize(artist_name)
+                        for artist_name in tidal_artist_names
+                    ]
 
-                    # 2. Title Compatibility Check
-                    # Require both character similarity and real title-token overlap.
-                    # This prevents unrelated titles like "Release the Freak" and
-                    # "Feed The Streets" from surviving only because they share
-                    # a few common letters.
                     s_title_norm = normalize_title(title)
                     t_title_norm = normalize_title(track.title)
-                    (
-                        title_match_found,
-                        title_similarity_ratio,
-                        title_token_overlap,
-                    ) = _titles_are_review_compatible(title, track.title)
+                    title_similarity_signal = _similarity_signal(title, track.title)
+                    artist_similarity_signal = _best_similarity_signal(
+                        artists,
+                        tidal_artist_names,
+                    )
+                    title_token_overlap = _symmetric_token_overlap_ratio(
+                        title,
+                        getattr(track, "title", None),
+                    )
 
-                    if not title_match_found:
+                    if _should_hard_reject_candidate(
+                        title_similarity_signal,
+                        artist_similarity_signal,
+                    ):
                         if len(rejected_candidates) < 30:
                             rejected_candidates.append(
                                 {
-                                    "reason": "title_filter",
+                                    "reason": "very_low_title_and_artist_similarity",
                                     "track": _track_diag_summary(track),
                                     "spotify_title_norm": s_title_norm,
                                     "tidal_title_norm": t_title_norm,
-                                    "similarity_ratio": title_similarity_ratio,
-                                    "token_overlap": title_token_overlap,
+                                    "spotify_artists_fuzzy": spotify_artists_fuzzy,
+                                    "tidal_artists_fuzzy": tidal_artists_fuzzy,
+                                    "title_similarity": round(title_similarity_signal, 3),
+                                    "artist_similarity": round(artist_similarity_signal, 3),
+                                    "title_token_overlap": round(title_token_overlap, 3),
                                 }
                             )
                         continue
-                    # ---------------------------------
 
-                    # --- Start of block to be indented ---
                     score = 0  # Lower is better, initialize score for this track
                     mismatch_reasons: List[str] = []  # Reasons for score penalties
-
-                    # --- Title Scoring (using fuzzy normalization) ---
+ 
+                    # --- Title Scoring ---
                     spotify_title_fuzzy = fuzzy_normalize(title)
                     tidal_title_fuzzy = fuzzy_normalize(track.title)
-
-                    title_score = 0
-                    if spotify_title_fuzzy != tidal_title_fuzzy:
-                        title_score = 1
-                        score += 1  # Penalize if normalized titles don't match
+ 
+                    title_score = _title_penalty_from_signal(title_similarity_signal)
+                    if title_score:
+                        score += title_score
                         mismatch_reasons.append("Title Differs")
-                        # Buffer this detail
                         debug_buffer.append(
-                            f"    - Fuzzy title mismatch: Spotify='{spotify_title_fuzzy}', Tidal='{tidal_title_fuzzy}'"
+                            f"    - Title similarity penalty: Spotify='{title}', Tidal='{getattr(track, 'title', None)}', Signal={title_similarity_signal:.3f}, TokenOverlap={title_token_overlap:.3f}, Penalty={title_score}"
                         )
                     # --- End Title Scoring ---
-
-                    # Score based on primary artist match
-                    artist_score = 0
-                    primary_artist_fuzzy = fuzzy_normalize(primary_artist)
-                    # Re-calculate tidal_artists_fuzzy for scoring context if needed, or reuse
-                    # tidal_artists_fuzzy was calculated above for filtering
-                    
-                    if primary_artist_fuzzy not in tidal_artists_fuzzy:
-                        # Try partial match if exact match fails
-                        if not any(primary_artist_fuzzy in ta for ta in tidal_artists_fuzzy):
-                            artist_score = 1
-                            score += 1  # Penalize artist mismatch
-                            mismatch_reasons.append("Artist Mismatch")
-                            debug_buffer.append(
-                                f"    - Primary artist mismatch: Spotify='{primary_artist_fuzzy}', Tidal Artists='{tidal_artists_fuzzy}'"
-                            )
+ 
+                    # --- Artist Scoring ---
+                    artist_score = _artist_penalty_from_signal(artist_similarity_signal)
+                    if artist_score:
+                        score += artist_score
+                        mismatch_reasons.append("Artist Mismatch")
+                        debug_buffer.append(
+                            f"    - Artist similarity penalty: SpotifyArtists={artists}, TidalArtists={tidal_artist_names}, Signal={artist_similarity_signal:.3f}, Penalty={artist_score}"
+                        )
+                    # --- End Artist Scoring ---
 
                     # Score based on duration difference
                     duration_score = 0
                     duration_diff = float("inf")
                     tidal_duration = getattr(track, "duration", None)
-                    if spotify_duration_s is not None and tidal_duration is not None:
-                        duration_diff = abs(tidal_duration - spotify_duration_s)
+                    duration_comparison = _best_duration_comparison(
+                        duration_ms,
+                        tidal_duration,
+                    )
+                    if duration_comparison is not None:
+                        (
+                            duration_diff,
+                            spotify_duration_s,
+                            tidal_duration_s,
+                        ) = duration_comparison
                         if duration_diff > 30:  # Penalize duration difference > 30s more
                             duration_score = 2
                             score += 2
@@ -952,14 +1220,18 @@ def searchLinkTrack(
                             mismatch_reasons.append("Duration > 10s")
                         if duration_score > 0:
                             debug_buffer.append(
-                                f"    - Duration mismatch penalty: Diff={duration_diff:.2f}s, Penalty={duration_score}"
+                                f"    - Duration mismatch penalty: Diff={duration_diff:.2f}s "
+                                f"(Spotify={spotify_duration_s:.2f}s, Tidal={tidal_duration_s:.2f}s), "
+                                f"Penalty={duration_score}. Raw Spotify duration_ms={duration_ms}, "
+                                f"raw Tidal duration={tidal_duration}"
                             )
                     else:
                         duration_score = 1
                         score += 1  # Penalize if duration can't be compared
                         mismatch_reasons.append("Duration Incomparable")
                         debug_buffer.append(
-                            f"    - Duration mismatch penalty: Cannot compare durations (Spotify: {spotify_duration_s}, Tidal: {tidal_duration})"
+                            f"    - Duration mismatch penalty: Cannot compare durations "
+                            f"(Spotify raw duration_ms: {duration_ms}, Tidal raw duration: {tidal_duration})"
                         )
 
                     # Score based on mix/version mismatch.
@@ -989,10 +1261,12 @@ def searchLinkTrack(
                     tidal_album_title = getattr(
                         getattr(track, "album", None), "title", None
                     )
+                    spotify_album_key = _metadata_compare_key(album)
+                    tidal_album_key = _metadata_compare_key(tidal_album_title)
                     if (
-                        tidal_album_title
-                        and album
-                        and tidal_album_title.lower() != album.lower()
+                        tidal_album_key
+                        and spotify_album_key
+                        and tidal_album_key != spotify_album_key
                     ):
                         if not core_match:
                             score += 1  # Penalize album mismatch
@@ -1008,7 +1282,9 @@ def searchLinkTrack(
                     # --- Calculate final score including ISRC penalty BEFORE comparing ---
                     isrc_penalty = 0  # Default penalty to 0
                     tidal_isrc = getattr(track, "isrc", None)
-                    if isrc and tidal_isrc and isrc.lower() != tidal_isrc.lower():
+                    spotify_isrc_key = _metadata_compare_key(isrc)
+                    tidal_isrc_key = _metadata_compare_key(tidal_isrc)
+                    if spotify_isrc_key and tidal_isrc_key and spotify_isrc_key != tidal_isrc_key:
                         if not core_match:
                             isrc_penalty = 2  # Define penalty value
                             mismatch_reasons.append("ISRC Mismatch")
@@ -1025,14 +1301,29 @@ def searchLinkTrack(
                     # 'score' here holds the score from title, artist, album, duration checks
                     final_score_for_this_track = score + isrc_penalty
 
-                    if final_score_for_this_track > MAX_REVIEW_CANDIDATE_SCORE:
+                    candidate_data: Dict[str, Any] = {
+                        "tidal_track": track,
+                        "score": final_score_for_this_track,
+                        "mismatch_reasons": mismatch_reasons,
+                        "title_similarity": round(title_similarity_signal, 3),
+                        "artist_similarity": round(artist_similarity_signal, 3),
+                        "title_token_overlap": round(title_token_overlap, 3),
+                        "duration_diff": (
+                            duration_diff if duration_diff != float("inf") else None
+                        ),
+                    }
+
+                    if final_score_for_this_track > MAX_RETURNED_REVIEW_CANDIDATE_SCORE:
                         if len(rejected_candidates) < 30:
                             rejected_candidates.append(
                                 {
-                                    "reason": "score_ceiling",
+                                    "reason": "review_score_ceiling",
                                     "track": _track_diag_summary(track),
                                     "score": final_score_for_this_track,
                                     "mismatch_reasons": mismatch_reasons,
+                                    "title_similarity": round(title_similarity_signal, 3),
+                                    "artist_similarity": round(artist_similarity_signal, 3),
+                                    "title_token_overlap": round(title_token_overlap, 3),
                                     "duration_diff": (
                                         duration_diff
                                         if duration_diff != float("inf")
@@ -1041,21 +1332,20 @@ def searchLinkTrack(
                                 }
                             )
                         debug_buffer.append(
-                            f"  - Rejecting Tidal ID {track.id} ('{track.title}') because FinalScore={final_score_for_this_track} exceeds MAX_REVIEW_CANDIDATE_SCORE={MAX_REVIEW_CANDIDATE_SCORE}"
+                            f"  - Rejecting Tidal ID {track.id} ('{track.title}') because FinalScore={final_score_for_this_track} exceeds MAX_RETURNED_REVIEW_CANDIDATE_SCORE={MAX_RETURNED_REVIEW_CANDIDATE_SCORE}"
                         )
                         continue
 
-                    # Store candidate details
-                    candidate_data: Dict[str, Any] = {
-                        "tidal_track": track,
-                        "score": final_score_for_this_track,
-                        "mismatch_reasons": mismatch_reasons,
-                    }
                     candidates.append(candidate_data)
-                    # Buffer the check details *before* the comparison, showing the final score
                     debug_buffer.append(
-                        f"  - Checking Tidal ID {track.id} ('{track.title}'): BaseScore={score}, ISRCPenalty={isrc_penalty}, FinalScore={final_score_for_this_track}, DurationDiff={duration_diff:.2f}s"
+                        f"  - Checking Tidal ID {track.id} ('{track.title}'): BaseScore={score}, ISRCPenalty={isrc_penalty}, FinalScore={final_score_for_this_track}, TitleSignal={title_similarity_signal:.3f}, ArtistSignal={artist_similarity_signal:.3f}, DurationDiff={duration_diff:.2f}s"
                     )
+
+                    if final_score_for_this_track > MAX_AUTO_LINK_CANDIDATE_SCORE:
+                        debug_buffer.append(
+                            f"    - Keeping Tidal ID {track.id} as review-only candidate because FinalScore={final_score_for_this_track} exceeds MAX_AUTO_LINK_CANDIDATE_SCORE={MAX_AUTO_LINK_CANDIDATE_SCORE}"
+                        )
+                        continue
 
                     # --- Update best match only if the FINAL score is lower ---
                     if final_score_for_this_track < min_score:
@@ -1108,6 +1398,11 @@ def searchLinkTrack(
             if min_score != float("inf"):
                 best_score_for_diag = min_score
 
+            no_match_with_candidates = (
+                best_match is None
+                and (num_items_found > 0 or len(rejected_candidates) > 0)
+            )
+
             should_emit_matching_diag = EMIT_LINKING_METADATA_DIAG and (
                 best_score_for_diag is None
                 or best_score_for_diag >= 2
@@ -1115,12 +1410,43 @@ def searchLinkTrack(
                 or len(rejected_candidates) > 0
             )
 
+            if no_match_with_candidates:
+                compact_rejected = [
+                    {
+                        "reason": candidate.get("reason"),
+                        "score": candidate.get("score"),
+                        "track": candidate.get("track"),
+                        "title_similarity": candidate.get("title_similarity"),
+                        "artist_similarity": candidate.get("artist_similarity"),
+                        "duration_diff": candidate.get("duration_diff"),
+                    }
+                    for candidate in rejected_candidates[:MAX_COMPACT_DIAG_REJECTED_SAMPLE]
+                ]
+
+                logger.warning(
+                    "LINKING_NO_MATCH title=%r artists=%r album=%r raw_candidate_count=%r "
+                    "scored_candidate_count=%r returned_candidate_count=%r queries_sample=%r "
+                    "rejected_sample=%r",
+                    title,
+                    artists,
+                    album,
+                    num_items_found,
+                    len(candidates),
+                    len(candidates_to_return) if candidates_to_return else 0,
+                    search_queries_attempted[:MAX_COMPACT_DIAG_QUERY_SAMPLE],
+                    compact_rejected,
+                )
+
             if should_emit_matching_diag:
                 top_scored_candidates = [
                     {
                         "track": _track_diag_summary(candidate.get("tidal_track")),
                         "score": candidate.get("score"),
                         "mismatch_reasons": candidate.get("mismatch_reasons"),
+                        "title_similarity": candidate.get("title_similarity"),
+                        "artist_similarity": candidate.get("artist_similarity"),
+                        "title_token_overlap": candidate.get("title_token_overlap"),
+                        "duration_diff": candidate.get("duration_diff"),
                     }
                     for candidate in processed_candidates[:10]
                 ]
@@ -1130,12 +1456,16 @@ def searchLinkTrack(
                         "track": _track_diag_summary(candidate.get("tidal_track")),
                         "score": candidate.get("score"),
                         "mismatch_reasons": candidate.get("mismatch_reasons"),
+                        "title_similarity": candidate.get("title_similarity"),
+                        "artist_similarity": candidate.get("artist_similarity"),
+                        "title_token_overlap": candidate.get("title_token_overlap"),
+                        "duration_diff": candidate.get("duration_diff"),
                     }
                     for candidate in (candidates_to_return or [])[:10]
                 ]
 
                 logger.warning(
-                    "LINKING_METADATA_DIAG title=%r artists=%r album=%r isrc=%r duration_ms=%r "
+                    "LINKING_METADATA_DIAG_FULL title=%r artists=%r album=%r isrc=%r duration_ms=%r "
                     "best_id=%r best_title=%r best_score=%r raw_candidate_count=%r "
                     "scored_candidate_count=%r returned_candidate_count=%r "
                     "queries=%r search_results=%r rejected_candidates_sample=%r "
@@ -1228,7 +1558,7 @@ def searchLinkTrack(
             else:
                 # No best_match found at all (or best_match.id is None)
                 if best_match is None:  # Explicitly check if best_match itself is None
-                    logger.warning(
+                    logger.info(
                         f"No metadata match found for '{title}' by '{primary_artist}'."
                     )
                 else:  # best_match exists but best_match.id is None
@@ -1294,106 +1624,213 @@ class LinkingWorker(QObject):
         api: TidalAPI,
         tracks_to_link: List[Tuple[int, Dict[str, Any]]],
         stop_event: threading.Event,
-    ):  # Add stop_event parameter
+        max_workers: int = 1,
+    ):
         super().__init__()
         self.api = api
-        self.tracks_to_link = (
-            tracks_to_link  # List of tuples: (row_index, spotify_metadata_dict)
-        )
-        self._is_running = True  # Keep this for potential immediate stop before loop
-        self.stop_event = stop_event  # Store the event
+        self.tracks_to_link = tracks_to_link
+        self._is_running = True
+        self.stop_event = stop_event
 
-    # Corrected run method signature and indentation
-    @pyqtSlot()  # Added decorator for clarity, though not strictly needed for QThread.started connection
+        try:
+            parsed_max_workers = int(max_workers)
+        except (TypeError, ValueError):
+            parsed_max_workers = 1
+        self.max_workers = max(1, min(parsed_max_workers, 5))
+
+    def _extract_linking_metadata(
+        self,
+        row_index: int,
+        spotify_data: Dict[str, Any],
+    ) -> Tuple[str, List[str], Optional[str], Optional[str], Optional[int]]:
+        title_raw = spotify_data.get("name")
+        title = str(title_raw).strip() if title_raw else None
+
+        artists_data = spotify_data.get("artists", [])
+        artists: List[str] = []
+        if isinstance(artists_data, list) and artists_data:
+            if isinstance(artists_data[0], str):
+                artists = [
+                    str(artist).strip()
+                    for artist in artists_data
+                    if str(artist).strip()
+                ]
+            elif isinstance(artists_data[0], dict):
+                artists = [
+                    str(artist.get("name", "")).strip()
+                    for artist in artists_data
+                    if str(artist.get("name", "")).strip()
+                ]
+
+        album_data: Optional[Union[str, Dict[str, str]]] = spotify_data.get("album")
+        album: Optional[str] = None
+        if isinstance(album_data, str):
+            album = album_data
+        elif isinstance(album_data, dict):
+            album = album_data.get("name")
+
+        isrc: Optional[str] = spotify_data.get("isrc")
+        if not isrc and isinstance(spotify_data.get("external_ids"), dict):
+            isrc = spotify_data.get("external_ids", {}).get("isrc")
+
+        duration_ms: Optional[int] = None
+        duration_raw = spotify_data.get("duration_ms")
+        if duration_raw is not None:
+            try:
+                duration_ms = int(duration_raw)
+            except (TypeError, ValueError):
+                duration_ms = None
+
+        if not title or not artists or not album:
+            raise ValueError(
+                f"Missing essential metadata after extraction: Title={title}, Artists={artists}, Album={album}. Original data: {spotify_data}"
+            )
+
+        return title, artists, album, isrc, duration_ms
+
+    def _link_single_track(
+        self,
+        row_index: int,
+        spotify_data: Dict[str, Any],
+    ) -> Tuple[
+        int,
+        Optional[Track],
+        Optional[List[Dict[str, Any]]],
+        Optional[int],
+        Dict[str, Any],
+    ]:
+        title, artists, album, isrc, duration_ms = self._extract_linking_metadata(
+            row_index,
+            spotify_data,
+        )
+        best_match, candidates, score = searchLinkTrack(
+            self.api,
+            title,
+            artists,
+            album,
+            isrc,
+            duration_ms,
+        )
+        return row_index, best_match, candidates, score, spotify_data
+
+    def _emit_finished_result(
+        self,
+        row_index: int,
+        best_match: Optional[Track],
+        candidates: Optional[List[Dict[str, Any]]],
+        score: Optional[int],
+        spotify_data: Dict[str, Any],
+    ) -> None:
+        logger.debug(
+            f"[LinkingWorker Row {row_index}] Emitting 'finished'. BestMatchID='{getattr(best_match, 'id', 'N/A')}', Candidates (alternatives) type: {type(candidates)}, len: {len(candidates) if candidates else 0}, Score={score}"
+        )
+        if candidates:
+            logger.debug(
+                f"[LinkingWorker Row {row_index}] First alternative candidate details before emit: TID='{getattr(candidates[0].get('tidal_track'), 'id', 'N/A')}', Title='{getattr(candidates[0].get('tidal_track'), 'title', 'N/A')}'"
+            )
+        self.finished.emit(row_index, best_match, candidates, score, spotify_data)
+
+    def _run_single_track_sequentially(
+        self,
+        row_index: int,
+        spotify_data: Dict[str, Any],
+    ) -> None:
+        self.started.emit(row_index, spotify_data)
+        try:
+            (
+                finished_row_index,
+                best_match,
+                candidates,
+                score,
+                finished_spotify_data,
+            ) = self._link_single_track(row_index, spotify_data)
+            self._emit_finished_result(
+                finished_row_index,
+                best_match,
+                candidates,
+                score,
+                finished_spotify_data,
+            )
+        except Exception as e:
+            logger.error(
+                f"Error linking track at row {row_index}: {e}",
+                exc_info=True,
+            )
+            self.error.emit(row_index, str(e), spotify_data)
+
+    def _run_parallel(self, worker_count: int) -> None:
+        logger.info(
+            "LinkingWorker: using %s simultaneous linking worker(s).",
+            worker_count,
+        )
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="tidal-link",
+        )
+        futures: Dict[Any, Tuple[int, Dict[str, Any]]] = {}
+
+        try:
+            for row_index, spotify_data in self.tracks_to_link:
+                if self.stop_event.is_set() or not self._is_running:
+                    logger.info("LinkingWorker: Stop detected before submitting remaining tracks.")
+                    break
+                self.started.emit(row_index, spotify_data)
+                future = executor.submit(self._link_single_track, row_index, spotify_data)
+                futures[future] = (row_index, spotify_data)
+
+            for future in concurrent.futures.as_completed(list(futures.keys())):
+                row_index, spotify_data = futures[future]
+                if self.stop_event.is_set() or not self._is_running:
+                    logger.info("LinkingWorker: Stop detected while collecting linked tracks.")
+                    break
+
+                try:
+                    (
+                        finished_row_index,
+                        best_match,
+                        candidates,
+                        score,
+                        finished_spotify_data,
+                    ) = future.result()
+                    self._emit_finished_result(
+                        finished_row_index,
+                        best_match,
+                        candidates,
+                        score,
+                        finished_spotify_data,
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Error linking track at row {row_index}: {e}",
+                        exc_info=True,
+                    )
+                    self.error.emit(row_index, str(e), spotify_data)
+        finally:
+            for future in futures:
+                if not future.done():
+                    future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    @pyqtSlot()
     def run(self):
         logger.debug(f"LinkingWorker started for {len(self.tracks_to_link)} tracks.")
-        for row_index, spotify_data in self.tracks_to_link:
-            # Check stop event FIRST
-            if self.stop_event.is_set():
-                logger.info("LinkingWorker: Stop event detected, breaking loop.")
-                break  # Exit the loop gracefully
-            # Check _is_running (optional, for immediate stop)
-            if not self._is_running:
-                logger.info("LinkingWorker stopping early (_is_running is False).")
-                break
-            try:
-                # Emit started with spotify_data
-                self.started.emit(row_index, spotify_data)
 
-                # --- Extract data robustly from potentially simplified structure ---
-                title: Optional[str] = spotify_data.get("name")
-
-                artists_data: List[Dict[str, str]] = spotify_data.get("artists", [])
-                artists: List[str] = []
-                # Handle artists being a list of strings OR list of dicts
-                if artists_data and isinstance(artists_data[0], str):
-                    artists = cast(
-                        List[str], artists_data
-                    )  # It's already a list of strings
-                elif artists_data and isinstance(artists_data[0], dict):
-                    artists = [
-                        artist.get("name", "")
-                        for artist in artists_data
-                        if artist.get("name")
-                    ]  # Extract names
-                else:
-                    artists = []  # Empty or unknown format
-
-                album_data: Optional[Union[str, Dict[str, str]]] = spotify_data.get(
-                    "album"
-                )
-                album: Optional[str] = None
-                # Handle album being a string OR a dict
-                if isinstance(album_data, str):
-                    album = album_data  # It's already the name
-                elif isinstance(album_data, dict):
-                    album = album_data.get("name")  # Extract name from dict
-                else:
-                    album = None
-
-                # Handle ISRC potentially being top-level or nested
-                isrc: Optional[str] = spotify_data.get(
-                    "isrc"
-                )  # Check top-level first (as seen in logs)
-                if not isrc and isinstance(spotify_data.get("external_ids"), dict):
-                    isrc = spotify_data.get("external_ids", {}).get(
-                        "isrc"
-                    )  # Check nested as fallback
-
-                duration_ms: Optional[int] = spotify_data.get("duration_ms")
-                # --- End data extraction ---
-
-                if not title or not artists or not album:
-                    logger.error(
-                        f"Row {row_index}: Missing essential metadata after extraction: Title={title}, Artists={artists}, Album={album}. Original data: {spotify_data}"
-                    )
-                    self.error.emit(
-                        row_index, "Missing essential metadata (title, artists, album)", spotify_data
-                    )
-                    continue  # Skip this track
-
-                # Call the linking function from linking.py (already in this module)
-                best_match, candidates, score = searchLinkTrack(
-                    self.api, title, artists, album, isrc, duration_ms
-                )
-                # ADD THESE LOGS
-                logger.debug(
-                    f"[LinkingWorker Row {row_index}] Emitting 'finished'. BestMatchID='{getattr(best_match, 'id', 'N/A')}', Candidates (alternatives) type: {type(candidates)}, len: {len(candidates) if candidates else 0}, Score={score}"
-                )
-                if candidates:
-                    logger.debug(
-                        f"[LinkingWorker Row {row_index}] First alternative candidate details before emit: TID='{getattr(candidates[0].get('tidal_track'),'id','N/A')}', Title='{getattr(candidates[0].get('tidal_track'),'title','N/A')}'"
-                    )
-                self.finished.emit(row_index, best_match, candidates, score, spotify_data)
-
-            except Exception as e:
-                logger.error(
-                    f"Error linking track at row {row_index}: {e}", exc_info=True
-                )
-                self.error.emit(row_index, str(e), spotify_data)
-        # Emit allTasksFinished signal AFTER the loop completes
-        logger.debug("LinkingWorker loop finished. Emitting allTasksFinished.")
-        self.allTasksFinished.emit()
+        try:
+            worker_count = max(1, min(self.max_workers, len(self.tracks_to_link)))
+            if worker_count <= 1:
+                for row_index, spotify_data in self.tracks_to_link:
+                    if self.stop_event.is_set():
+                        logger.info("LinkingWorker: Stop event detected, breaking loop.")
+                        break
+                    if not self._is_running:
+                        logger.info("LinkingWorker stopping early (_is_running is False).")
+                        break
+                    self._run_single_track_sequentially(row_index, spotify_data)
+            else:
+                self._run_parallel(worker_count)
+        finally:
+            logger.debug("LinkingWorker loop finished. Emitting allTasksFinished.")
+            self.allTasksFinished.emit()
 
     # Corrected stop method signature and indentation
     def stop(self):

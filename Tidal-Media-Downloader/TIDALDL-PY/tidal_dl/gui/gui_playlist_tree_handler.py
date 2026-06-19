@@ -19,7 +19,7 @@ from functools import partial
 import threading
 import datetime
 import time
-from typing import TYPE_CHECKING, List, Dict, Optional, Any, Set, cast
+from typing import TYPE_CHECKING, List, Dict, Optional, Any, Set, Iterator, cast
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtCore import (
@@ -62,6 +62,7 @@ from tidal_dl.settings import SETTINGS
 from tidal_dl.gui.gui_playlist_tree import PlaylistTreeWidget
 from tidal_dl.gui.gui_linking_handler import LinkingGuiHandler
 from tidal_dl.gui.gui_playlist_item_widget import PlaylistItemProgressWidget
+from tidal_dl.gui.gui_quality_menu import DOWNLOAD_QUALITY_MENU_ITEMS
 
 if TYPE_CHECKING:
     from tidal_dl.gui.gui_main import MainView
@@ -492,7 +493,7 @@ class PlaylistTreeHandler(QObject):
         if not mime_data or not mime_data.hasFormat(TABLE_TRACKS_DRAG_MIME):
             return []
         try:
-            raw_payload = bytes(mime_data.data(TABLE_TRACKS_DRAG_MIME)).decode("utf-8")
+            raw_payload = mime_data.data(TABLE_TRACKS_DRAG_MIME).data().decode("utf-8")
             payload = json.loads(raw_payload)
             rows = payload.get("rows", [])
             return [int(row) for row in rows if isinstance(row, int) or str(row).isdigit()]
@@ -500,9 +501,11 @@ class PlaylistTreeHandler(QObject):
             logger.warning("Could not parse table-track drag payload.", exc_info=True)
             return []
 
-    def eventFilter(self, watched: QObject, event: Optional[QEvent]) -> bool:
-        if event is None:
-            return super().eventFilter(watched, event)
+    def eventFilter(self, a0: Optional[QObject], a1: Optional[QEvent]) -> bool:
+        watched = a0
+        event = a1
+        if watched is None or event is None:
+            return False
 
         try:
             viewport = self.tree_widget.viewport()
@@ -523,27 +526,24 @@ class PlaylistTreeHandler(QObject):
                 self._clear_spotify_playlist_drop_target()
                 return True
 
+            if not isinstance(event, (QtGui.QDragEnterEvent, QtGui.QDragMoveEvent, QtGui.QDropEvent)):
+                self._clear_spotify_playlist_drop_target()
+                return True
+
             rows = self._drag_rows_from_table_mime(event)
             if not rows:
                 self._clear_spotify_playlist_drop_target()
-                if isinstance(event, (QtGui.QDragEnterEvent, QtGui.QDragMoveEvent, QtGui.QDropEvent)):
-                    event.ignore()
+                event.ignore()
                 return True
 
             try:
-                pos = (
-                    event.position().toPoint()
-                    if hasattr(event, "position")
-                    else event.pos()
-                    if hasattr(event, "pos")
-                    else QPoint()
-                )
+                drag_event = cast(Any, event)
+                pos = drag_event.position().toPoint()
                 target_item = self.tree_widget.itemAt(pos)
                 playlist_data = self._spotify_playlist_payload_for_drop_item(target_item)
             except RuntimeError:
                 self._clear_spotify_playlist_drop_target()
-                if isinstance(event, (QtGui.QDragEnterEvent, QtGui.QDragMoveEvent, QtGui.QDropEvent)):
-                    event.ignore()
+                event.ignore()
                 return True
 
             if isinstance(event, (QtGui.QDragEnterEvent, QtGui.QDragMoveEvent)):
@@ -978,14 +978,16 @@ class PlaylistTreeHandler(QObject):
             if viewport is not None:
                 viewport.update()
 
-    def _iter_spotify_folder_items(self):
+    def _iter_spotify_folder_items(self) -> Iterator[QTreeWidgetItem]:
         if not self.spotify_root_item:
             return
 
         iterator = QtWidgets.QTreeWidgetItemIterator(self.spotify_root_item)
-        while iterator.value():
+        while True:
             item = iterator.value()
-            data = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+            if item is None:
+                break
+            data = item.data(0, Qt.ItemDataRole.UserRole)
             if isinstance(data, dict) and data.get("is_folder"):
                 yield item
             iterator += 1
@@ -1609,14 +1611,7 @@ class PlaylistTreeHandler(QObject):
                                 non_completed_only=True,
                             )
 
-                        dlQualities = [
-                            ("AAC (Low)", AudioQuality.LOW),
-                            ("FLAC (High / CD Standard)", AudioQuality.HIGH),
-                            ("MP3 (High - 320k)", AudioQuality.MP3),
-                            ("FLAC (Lossless CD)", AudioQuality.LOSSLESS),
-                            ("FLAC (Max / HiRes)", AudioQuality.HI_RES_LOSSLESS),
-                            ("Highest Available Quality", AudioQuality.HIGHEST),
-                        ]
+                        dlQualities = DOWNLOAD_QUALITY_MENU_ITEMS
                         for text, quality_enum in dlQualities:
                             action = download_menu.addAction(text)
                             if action:
@@ -1679,7 +1674,9 @@ class PlaylistTreeHandler(QObject):
                     add_selected_action = menu.addAction("Add Selected Table Tracks to This Playlist")
                     if add_selected_action:
                         add_selected_action.setEnabled(can_modify_items)
-                        add_selected_action.triggered.connect(partial(spotify_handler.addSelectedRowsToSpotifyPlaylist, first_playlist_data))
+                        add_selected_action.triggered.connect(
+                            lambda _checked=False, playlist_data=first_playlist_data: spotify_handler.addSelectedRowsToSpotifyPlaylist(playlist_data)
+                        )
 
                     clear_action = menu.addAction("Clear Spotify Playlist Tracks")
                     if clear_action:
@@ -1737,14 +1734,7 @@ class PlaylistTreeHandler(QObject):
                             non_completed_only=True,
                         )
 
-                    dlQualities = [
-                        ("AAC (Low)", AudioQuality.LOW),
-                        ("FLAC (High / CD Standard)", AudioQuality.HIGH),
-                        ("MP3 (High - 320k)", AudioQuality.MP3),
-                        ("FLAC (Lossless CD)", AudioQuality.LOSSLESS),
-                        ("FLAC (Max / HiRes)", AudioQuality.HI_RES_LOSSLESS),
-                        ("Highest Available Quality", AudioQuality.HIGHEST),
-                    ]
+                    dlQualities = DOWNLOAD_QUALITY_MENU_ITEMS
                     for text, quality_enum in dlQualities:
                         action = download_menu.addAction(text)
                         if action:

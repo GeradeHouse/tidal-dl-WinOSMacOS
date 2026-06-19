@@ -81,6 +81,7 @@ def load_initial_settings(self: "SettingsPage"):
     assert self.chkUseCamelotKeyNotation is not None
     assert self.cache_path_lineEdit is not None
     assert self.cache_ttl_spinBox is not None
+    assert self.spinLinkingMaxWorkers is not None
 
     try:
         # Account/API - Load API key index with fallback to 0 if not set
@@ -148,6 +149,9 @@ def load_initial_settings(self: "SettingsPage"):
         self.chkSaveCovers.setChecked(bool(getattr(SETTINGS, "saveCovers", False)))
         self.chkMultiThread.setChecked(bool(getattr(SETTINGS, "multiThread", False)))
         self.chkDownloadDelay.setChecked(bool(getattr(SETTINGS, "downloadDelay", False)))
+        linking_workers_raw = getattr(SETTINGS, "linkingMaxWorkers", 2)
+        linking_workers = linking_workers_raw if isinstance(linking_workers_raw, int) else 2
+        self.spinLinkingMaxWorkers.setValue(max(1, min(linking_workers, 5)))
         self.chkUsePlaylistFolder.setChecked(
             bool(getattr(SETTINGS, "usePlaylistFolder", False))
         )
@@ -163,14 +167,19 @@ def load_initial_settings(self: "SettingsPage"):
         self.chkShowPlaylistIcons.setChecked(bool(getattr(SETTINGS, "showPlaylistIcons", True)))
         self.spinPlaylistIconSize.setValue(getattr(SETTINGS, "playlistIconSize", 35))
         self.spinPlaylistIconSize.setEnabled(self.chkShowPlaylistIcons.isChecked())
-        if hasattr(self, "chkDebugOpenApiProviderLabel"):
-            self.chkDebugOpenApiProviderLabel.setChecked(
+
+        debug_open_api_provider_label = self.chkDebugOpenApiProviderLabel
+        if debug_open_api_provider_label is not None:
+            debug_open_api_provider_label.setChecked(
                 bool(getattr(SETTINGS, "debugOpenApiProviderLabel", False))
             )
-        if hasattr(self, "btnRestructureDownloads"):
-            self.btnRestructureDownloads.clicked.connect(
+
+        restructure_downloads_button = self.btnRestructureDownloads
+        if restructure_downloads_button is not None:
+            restructure_downloads_button.clicked.connect(
                 self._trigger_download_structure_reorganization
             )
+
         self.chkUseCamelotKeyNotation.setChecked(
             bool(getattr(SETTINGS, "useCamelotKeyNotation", False))
         )
@@ -368,6 +377,7 @@ def save_settings(self: "SettingsPage"):
     assert self.chkUseCamelotKeyNotation is not None
     assert self.cache_path_lineEdit is not None
     assert self.cache_ttl_spinBox is not None
+    assert self.spinLinkingMaxWorkers is not None
 
     try:
         # Store current Spotify credentials before updating
@@ -407,6 +417,7 @@ def save_settings(self: "SettingsPage"):
         SETTINGS.saveCovers = self.chkSaveCovers.isChecked()
         SETTINGS.multiThread = self.chkMultiThread.isChecked()
         SETTINGS.downloadDelay = self.chkDownloadDelay.isChecked()
+        SETTINGS.linkingMaxWorkers = self.spinLinkingMaxWorkers.value()
         SETTINGS.usePlaylistFolder = self.chkUsePlaylistFolder.isChecked()
 
         # --- UI & App Behavior Settings ---
@@ -428,8 +439,11 @@ def save_settings(self: "SettingsPage"):
 
         SETTINGS.saveAlbumInfo = self.chkSaveAlbumInfo.isChecked()
         SETTINGS.showPlaylistIcons = self.chkShowPlaylistIcons.isChecked()
-        if hasattr(self, "chkDebugOpenApiProviderLabel"):
-            SETTINGS.debugOpenApiProviderLabel = self.chkDebugOpenApiProviderLabel.isChecked()
+
+        debug_open_api_provider_label = self.chkDebugOpenApiProviderLabel
+        if debug_open_api_provider_label is not None:
+            SETTINGS.debugOpenApiProviderLabel = debug_open_api_provider_label.isChecked()
+
         SETTINGS.playlistIconSize = self.spinPlaylistIconSize.value()
         SETTINGS.useCamelotKeyNotation = self.chkUseCamelotKeyNotation.isChecked()
         key_notation_changed = (

@@ -511,7 +511,7 @@ class TaskQueueManager(QObject):
             )
 
         if isinstance(track_obj, Track):
-            track_obj.id = fallback_id
+            setattr(track_obj, "id", fallback_id)
             logger.debug(
                 "Using deserialized persisted track with injected fallback ID | playlist_id=%s spotify_id=%s tidal_track_id=%s",
                 playlist_id,
@@ -717,10 +717,21 @@ class TaskQueueManager(QObject):
                                     spotify_id,
                                 )
                         else:
-                            # It exists but has NO details (e.g. "Not Found" or "Manual Review" with no selection)
-                            # SKIP this track. Do NOT add to unlinked_tracks_for_worker.
-                            skipped_not_found_or_none_match += 1
-                            logger.debug(f"Skipping track {spotify_id} (Marked as Not Found/None Match in persistence).")
+                            # Retry stale false negatives. Improved matching logic can repair
+                            # previous Not Found rows during explicit playlist download actions.
+                            if link_status == "not_found":
+                                unlinked_tracks_for_worker.append((i, meta))
+                                logger.info(
+                                    "Retrying previously not_found Spotify track during queued download | playlist_id=%s spotify_id=%s",
+                                    playlist_id,
+                                    spotify_id,
+                                )
+                            else:
+                                # It exists but has NO details and is not a retryable Not Found row.
+                                skipped_not_found_or_none_match += 1
+                                logger.debug(
+                                    f"Skipping track {spotify_id} (Marked as unresolved/None Match in persistence)."
+                                )
                     else:
                         # Not in persistence at all -> Needs linking
                         unlinked_tracks_for_worker.append((i, meta))

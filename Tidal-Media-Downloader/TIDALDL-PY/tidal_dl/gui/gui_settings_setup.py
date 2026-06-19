@@ -186,6 +186,7 @@ def initialize_controls(self: "SettingsPage"):
     self.chkSaveCovers = QCheckBox()
     self.chkMultiThread = QCheckBox()
     self.chkDownloadDelay = QCheckBox()
+    self.spinLinkingMaxWorkers = QSpinBox()
     self.chkUsePlaylistFolder = QCheckBox()
 
     # Path Format Controls
@@ -418,6 +419,7 @@ def create_download_options_section(self: "SettingsPage"):
     assert self.chkSaveCovers is not None
     assert self.chkMultiThread is not None
     assert self.chkDownloadDelay is not None
+    assert self.spinLinkingMaxWorkers is not None
     assert self.chkUsePlaylistFolder is not None
     assert self.mainLayout is not None
 
@@ -428,10 +430,17 @@ def create_download_options_section(self: "SettingsPage"):
     dl_options_layout.setSpacing(10)
     dl_options_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
+    self.spinLinkingMaxWorkers.setRange(1, 5)
+    self.spinLinkingMaxWorkers.setSuffix(" track(s)")
+    self.spinLinkingMaxWorkers.setToolTip(
+        "Maximum number of Spotify tracks linked to TIDAL at the same time. Use 1 for sequential linking; higher values can increase API load."
+    )
+
     dl_options_layout.addRow("Verify File Existence:", self.chkCheckExist)
     dl_options_layout.addRow("Include Singles & EPs:", self.chkIncludeEP)
     dl_options_layout.addRow("Save Covers:", self.chkSaveCovers)
     dl_options_layout.addRow("Multi-Thread Download:", self.chkMultiThread)
+    dl_options_layout.addRow("Simultaneous Linking:", self.spinLinkingMaxWorkers)
     dl_options_layout.addRow("Use Download Delay:", self.chkDownloadDelay)
     dl_options_layout.addRow("Use Playlist Folder:", self.chkUsePlaylistFolder)
 
