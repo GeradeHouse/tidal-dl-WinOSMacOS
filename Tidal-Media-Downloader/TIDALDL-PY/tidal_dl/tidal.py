@@ -202,9 +202,16 @@ class TidalAPI(object):
             api_profile = "unknown"
 
         redacted_params = dict(params or {})
-        for sensitive_key in ("access_token", "token", "client_secret", "refresh_token"):
-            if sensitive_key in redacted_params:
+        sensitive_param_keys = {"access_token", "token", "client_secret", "refresh_token"}
+        for sensitive_key in list(redacted_params):
+            if str(sensitive_key).lower() in sensitive_param_keys:
                 redacted_params[sensitive_key] = "<redacted>"
+
+        request_url = re.sub(
+            r"(?i)(access_token|accessToken|token|client_secret|clientSecret|refresh_token|refreshToken)=([^&\s]+)",
+            r"\1=<redacted>",
+            request_url,
+        )
 
         logger.error(
             "TIDAL_401_DIAG path=%s urlpre=%s status=%s request_url=%s optional_hint=%s "
@@ -614,9 +621,23 @@ class TidalAPI(object):
                 response.raise_for_status()  # Raises HTTPError for other 4xx/5xx responses
                 return result
             except requests.exceptions.HTTPError as e:
-                logger.error(f"__post__ HTTP error for URL: {e.request.url}")
-                logger.error(f"Status Code: {e.response.status_code}")
-                logger.error(f"Response Body: {e.response.text}")
+                request_url = getattr(getattr(e, "request", None), "url", "")
+                response = getattr(e, "response", None)
+                status_code = getattr(response, "status_code", "unknown")
+                response_text = str(getattr(response, "text", "") or "")
+                request_url = re.sub(
+                    r"(?i)(access_token|accessToken|token|client_secret|clientSecret|refresh_token|refreshToken)=([^&\s]+)",
+                    r"\1=<redacted>",
+                    request_url,
+                )
+                response_text = re.sub(
+                    r"(?i)(access_token|accessToken|refresh_token|refreshToken|client_secret|clientSecret|client_id|clientId|deviceCode|userCode)\"?\s*[:=]\s*\"?([^\"&\s,}]+)",
+                    r"\1=<redacted>",
+                    response_text,
+                )
+                logger.error("__post__ HTTP error for URL: %s", request_url)
+                logger.error("Status Code: %s", status_code)
+                logger.error("Response Body: %s", response_text[:500])
                 if index == 2:
                     raise e
                 time.sleep(1)
@@ -667,7 +688,9 @@ class TidalAPI(object):
     def getDeviceCode(self) -> str:
         if not self.apiKey or "clientId" not in self.apiKey:
             raise RuntimeError("TIDAL API key not set yet. Load/select an apiKey before calling this method.")
-        logger.debug("Using client_id: %s", self.apiKey.get("clientId"))
+        client_id = str(self.apiKey.get("clientId") or "")
+        redacted_client_id = f"{client_id[:4]}...<redacted>" if len(client_id) > 4 else "<redacted>"
+        logger.debug("Using client_id: %s", redacted_client_id)
         data: Dict[str, str] = {
             "client_id": self.apiKey["clientId"],
             "scope": self._scope,

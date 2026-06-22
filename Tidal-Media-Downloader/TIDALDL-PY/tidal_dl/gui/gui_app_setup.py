@@ -13,6 +13,7 @@ import os
 import sys
 import time
 import traceback
+import re
 from typing import TYPE_CHECKING, Any, Optional, cast
 
 from PyQt6.QtWidgets import QApplication
@@ -32,6 +33,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)  # Set specific level for this module
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Redacts common token/secret values before writing diagnostics or dialogs."""
+    if not text:
+        return text
+    redacted = re.sub(
+        r"(?i)(access[_-]?token|accessToken|refresh[_-]?token|refreshToken|client[_-]?secret|clientSecret|client[_-]?id|clientId|authorization|password|api[_-]?key|apiKey|token)\"?\s*[:=]\s*\"?([^\"&\s,}]+)",
+        r"\1=<redacted>",
+        text,
+    )
+    redacted = re.sub(
+        r"(?i)(Bearer\s+)[A-Za-z0-9._~+\-/]+=*",
+        r"\1<redacted>",
+        redacted,
+    )
+    redacted = re.sub(
+        r"(?i)((?:access_token|accessToken|refresh_token|refreshToken|client_secret|clientSecret|client_id|clientId|api_key|apiKey|token)=)([^&\s]+)",
+        r"\1<redacted>",
+        redacted,
+    )
+    return redacted
 
 # Set up GUI logging with INFO level for this module
 def _setup_gui_logging():
@@ -64,15 +87,18 @@ def global_exception_handler(exctype: Any, value: Any, tb: Any) -> None:
     Custom global exception handler to catch and log all unhandled exceptions.
     """
     # Format the traceback
-    traceback_details = "".join(traceback.format_exception(exctype, value, tb))
+    traceback_details = redact_sensitive_text(
+        "".join(traceback.format_exception(exctype, value, tb))
+    )
+    safe_value = redact_sensitive_text(str(value))
 
     # Log the critical error
-    log_message = f"Unhandled exception caught by global handler:\nType: {exctype.__name__}\nValue: {value}\nTraceback:\n{traceback_details}"
+    log_message = f"Unhandled exception caught by global handler:\nType: {exctype.__name__}\nValue: {safe_value}\nTraceback:\n{traceback_details}"
     logger.critical(log_message)
 
     # Prepare user-friendly messages
     error_title = "A critical error occurred:"
-    error_text = f"<b>{exctype.__name__}:</b> {value}"
+    error_text = f"<b>{exctype.__name__}:</b> {safe_value}"
     informative_text = "The application might need to close. Please check the console output or 'gui_error.log' for details."
 
     # Show the dialog

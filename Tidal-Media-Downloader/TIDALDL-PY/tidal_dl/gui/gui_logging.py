@@ -90,7 +90,16 @@ class GUILoggingManager:
         """
         with self._lock:
             self._gui_handler = gui_handler
-            
+
+        try:
+            from tidal_dl.logging_config import SensitiveDataRedactionFilter
+
+            if not any(isinstance(f, SensitiveDataRedactionFilter) for f in gui_handler.filters):
+                gui_handler.addFilter(SensitiveDataRedactionFilter())
+        except Exception:
+            # Never let logging hardening prevent the GUI log pane from initializing.
+            pass
+
         # Add a custom filter to the GUI handler
         class ModuleLevelFilter(logging.Filter):
             def __init__(self, gui_manager: GUILoggingManager):

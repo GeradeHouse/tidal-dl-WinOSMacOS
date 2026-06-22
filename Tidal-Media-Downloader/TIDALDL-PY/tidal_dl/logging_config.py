@@ -44,6 +44,7 @@ Note: The `SuppressUrllib3DebugFilter` contains specific rules to target common
 
 # --- IMPORTS ---
 import logging
+import re
 
 # Monkey patch StreamHandler.emit to handle None stream (fixes PyInstaller issues)
 original_emit = logging.StreamHandler.emit
@@ -65,6 +66,29 @@ COLOR_RED = "\033[91m"
 COLOR_RESET = "\033[0m"
 
 # --- CUSTOM FORMATTERS ---
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Redacts common API credential and token values from diagnostic text."""
+    if not text:
+        return text
+
+    redacted = re.sub(
+        r"(?i)(access[_-]?token|accessToken|refresh[_-]?token|refreshToken|client[_-]?secret|clientSecret|client[_-]?id|clientId|authorization|password|api[_-]?key|apiKey|token)\"?\s*[:=]\s*\"?([^\"&\s,}]+)",
+        r"\1=<redacted>",
+        str(text),
+    )
+    redacted = re.sub(
+        r"(?i)(Bearer\s+)[A-Za-z0-9._~+\-/]+=*",
+        r"\1<redacted>",
+        redacted,
+    )
+    redacted = re.sub(
+        r"(?i)((?:access_token|accessToken|refresh_token|refreshToken|client_secret|clientSecret|client_id|clientId|api_key|apiKey|token)=)([^&\s]+)",
+        r"\1<redacted>",
+        redacted,
+    )
+    return redacted
 
 
 class ColorFormatter(logging.Formatter):
@@ -90,7 +114,7 @@ class ColorFormatter(logging.Formatter):
 
         # Use a standard formatter temporarily to apply the format string
         formatter = logging.Formatter(log_fmt)
-        log_message = formatter.format(record)
+        log_message = redact_sensitive_text(formatter.format(record))
 
         # Apply red color only to ERROR level messages for emphasis
         if record.levelno == logging.ERROR:
@@ -121,6 +145,28 @@ class SuppressEmptyResponseFilter(logging.Filter):
         """
         # Suppress the record if its message matches exactly
         return record.getMessage() != "Empty response returned from API."
+
+
+class SensitiveDataRedactionFilter(logging.Filter):
+    """Redacts secrets from log records before they reach console, GUI, or file handlers."""
+
+    _exception_formatter = logging.Formatter()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = redact_sensitive_text(record.getMessage())
+            record.msg = message
+            record.args = ()
+
+            if record.exc_info:
+                record.exc_text = redact_sensitive_text(
+                    self._exception_formatter.formatException(record.exc_info)
+                )
+            if record.stack_info:
+                record.stack_info = redact_sensitive_text(str(record.stack_info))
+        except Exception:
+            pass
+        return True
 
 
 class SuppressUrllib3DebugFilter(logging.Filter):
@@ -381,7 +427,7 @@ def setup_logging():
             if isinstance(handler.formatter, ColorFormatter):
                 is_basic_handler = False  # It uses our formatter
             if any(
-                isinstance(f, (SuppressEmptyResponseFilter, SuppressUrllib3DebugFilter))
+                isinstance(f, (SuppressEmptyResponseFilter, SuppressUrllib3DebugFilter, SensitiveDataRedactionFilter))
                 for f in handler.filters
             ):
                 is_basic_handler = False  # It uses one of our filters
@@ -413,6 +459,7 @@ def setup_logging():
 
     # --- Instantiate Filters ---
     # Create filter instances once, to be potentially added to multiple handlers.
+    redaction_filter = SensitiveDataRedactionFilter()
     empty_response_filter = SuppressEmptyResponseFilter()
     urllib3_filter = SuppressUrllib3DebugFilter()
     linking_filter = SuppressConfidentLinkingFilter()
@@ -448,6 +495,7 @@ def setup_logging():
             # This makes the handler respect the level of each individual logger.
 
             # Add filters to the NEW handler (Re-enabled)
+            console_handler.addFilter(redaction_filter)
             console_handler.addFilter(empty_response_filter)
             console_handler.addFilter(urllib3_filter)
             console_handler.addFilter(linking_filter)
@@ -496,16 +544,8 @@ def setup_logging():
         # We check by type to avoid adding duplicates.
         # Add any missing filters to this handler.
         # Option for temporarily commenting out filter additions for debugging API responses
-        # if not has_empty_filter:
-        #     handler.addFilter(empty_response_filter)
-        #     logger.debug(f"Added SuppressEmptyResponseFilter to handler {handler}")
-        # if not has_urllib3_filter:
-        #     handler.addFilter(urllib3_filter)
-        #     logger.debug(f"Added SuppressUrllib3DebugFilter to handler {handler}")
-        # if not has_linking_filter:
-        #     handler.addFilter(linking_filter)
-        #     logger.debug(f"Added SuppressConfidentLinkingFilter to handler {handler}")
-        pass  # Add pass to maintain block structure if all filters are commented out
+        if not any(isinstance(f, SensitiveDataRedactionFilter) for f in handler.filters):
+            handler.addFilter(redaction_filter)
 
 
 # --- END OF FILE logging_config.py ---

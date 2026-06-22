@@ -42,6 +42,15 @@ def _setup_gui_logging():
 _setup_gui_logging()
 
 
+def _redact_client_id(value: object, visible_prefix: int = 4) -> str:
+    text = str(value or "")
+    if not text:
+        return "<empty>"
+    if len(text) <= visible_prefix:
+        return "<redacted>"
+    return f"{text[:visible_prefix]}...<redacted>"
+
+
 def initialize_and_login():
     """
     Initializes settings, logging, and attempts to log in using stored configuration.
@@ -77,7 +86,7 @@ def initialize_and_login():
     
     logger.debug(
         f"Initially using API key: index={SETTINGS.apiKeyIndex}, platform={selected.get('platform')}, "
-        f"formats={selected.get('formats')}, clientId={selected.get('clientId')}"
+        f"formats={selected.get('formats')}, clientId={_redact_client_id(selected.get('clientId'))}"
     )
 
     if not loginByConfig():

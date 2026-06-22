@@ -94,6 +94,16 @@ SPOTIFY_MUTATION_BATCH_SIZE = 100
 SPOTIFY_INVALID_CLIENT = "SPOTIFY_INVALID_CLIENT"
 
 
+def _redact_secret(value: Any, visible_prefix: int = 4) -> str:
+    """Returns a safe representation of a secret for logs."""
+    text = str(value or "")
+    if not text:
+        return "<empty>"
+    if len(text) <= visible_prefix:
+        return "<redacted>"
+    return f"{text[:visible_prefix]}...<redacted>"
+
+
 class SpotifyAPI:
     """
     Manages connection and data retrieval from Spotify API.
@@ -248,16 +258,12 @@ class SpotifyAPI:
                 SETTINGS, "spotifyRedirectUri", "http://127.0.0.1:8888/callback"
             )
 
-            # --- START: Added detailed credential logging ---
             logger.debug("Attempting to load Spotify credentials from SETTINGS object.")
-            # Log the full values to the debug log for thorough inspection
             logger.debug(
-                f"SETTINGS.spotifyClientId is: '{getattr(SETTINGS, 'spotifyClientId', 'Not Found')}'"
+                "Spotify credentials loaded from settings: client_id=%s client_secret=%s",
+                _redact_secret(client_id),
+                _redact_secret(client_secret),
             )
-            logger.debug(
-                f"SETTINGS.spotifyClientSecret is: '{getattr(SETTINGS, 'spotifyClientSecret', 'Not Found')}'"
-            )
-            # --- END: Added detailed credential logging ---
 
             if not client_id or not client_secret:
                 # Changed from error to info, as this is expected if user hasn't configured Spotify
@@ -271,12 +277,8 @@ class SpotifyAPI:
                 # Return specific indicator instead of None
                 return "CREDENTIALS_MISSING"
 
-            logger.debug(
-                f"Spotify Client ID loaded: {client_id[:4]}..."
-            )  # Log partial ID for privacy
-            logger.debug(
-                f"Spotify Client Secret loaded: {client_secret[:4]}..."
-            )  # Log partial secret for privacy
+            logger.debug("Spotify Client ID loaded: %s", _redact_secret(client_id))
+            logger.debug("Spotify Client Secret loaded: %s", _redact_secret(client_secret))
             logger.debug(f"Spotify Redirect URI: {redirect_uri}")
             logger.debug(f"Spotify Scopes: {SPOTIFY_SCOPES}")
 
