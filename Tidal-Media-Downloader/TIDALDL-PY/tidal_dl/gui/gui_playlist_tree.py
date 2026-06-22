@@ -17,7 +17,7 @@ import time
 from typing import Optional
 
 from PyQt6 import QtWidgets, QtGui
-from PyQt6.QtCore import Qt, QSize, QModelIndex
+from PyQt6.QtCore import Qt, QSize, QModelIndex, QTimer
 from PyQt6 import QtCore
 from PyQt6.QtWidgets import (
     QTreeWidgetItem,
@@ -213,6 +213,8 @@ class PlaylistTreeWidget(LeftPanelWidget):
         )
 
         self.spotify_connect_button = QPushButton(" Connect to Spotify")
+        self.spotify_connect_button.setObjectName("spotifyConnectButton")
+        self.spotify_connect_button.setProperty("attention", False)
         spotify_icon_path = paths.resource_path(
             "assets/icons/Spotify_Primary_Logo_RGB_White.png"
         )
@@ -224,11 +226,68 @@ class PlaylistTreeWidget(LeftPanelWidget):
         else:
             logger.warning(f"Spotify connect icon not found at: {spotify_icon_path}")
 
-        self.spotify_connect_button.setStyleSheet(
-            "QPushButton { text-align: left; border: none; background: transparent; padding: 4px; color: white; }"
-            "QPushButton:hover { background-color: rgba(255, 255, 255, 0.1); }"
+        self._spotify_connect_base_style = """
+            QPushButton#spotifyConnectButton {
+                text-align: left;
+                border: 1px solid transparent;
+                border-radius: 8px;
+                background: transparent;
+                padding: 6px 8px;
+                color: white;
+                font-weight: 600;
+            }
+            QPushButton#spotifyConnectButton:hover {
+                background-color: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.18);
+            }
+        """
+        self._spotify_connect_attention_style = """
+            QPushButton#spotifyConnectButton {
+                text-align: left;
+                border: 1px solid rgba(255, 190, 80, 0.75);
+                border-radius: 8px;
+                background: rgba(255, 190, 80, 0.18);
+                padding: 6px 8px;
+                color: #fff5df;
+                font-weight: 700;
+            }
+            QPushButton#spotifyConnectButton:hover {
+                background-color: rgba(255, 190, 80, 0.28);
+                border: 1px solid rgba(255, 210, 120, 0.95);
+            }
+        """
+        self._spotify_connect_attention_timer = QTimer(self)
+        self._spotify_connect_attention_timer.setInterval(700)
+        self._spotify_connect_attention_timer.timeout.connect(
+            self._pulse_spotify_connect_attention
         )
+        self.spotify_connect_button.setStyleSheet(self._spotify_connect_base_style)
         self.spotify_connect_button.setVisible(False)
+
+    def set_spotify_connect_attention(self, enabled: bool, reason: str = "") -> None:
+        """Highlights the Spotify connect button when the user must repair Spotify credentials."""
+        self.spotify_connect_button.setProperty("attention", bool(enabled))
+        self.spotify_connect_button.setToolTip(reason if enabled else "")
+        self.spotify_connect_button.setStyleSheet(
+            self._spotify_connect_attention_style if enabled else self._spotify_connect_base_style
+        )
+        if enabled:
+            if not self._spotify_connect_attention_timer.isActive():
+                self._spotify_connect_attention_timer.start()
+        else:
+            self._spotify_connect_attention_timer.stop()
+            self.spotify_connect_button.setGraphicsEffect(None)
+
+    def _pulse_spotify_connect_attention(self) -> None:
+        if not self.spotify_connect_button.property("attention"):
+            self._spotify_connect_attention_timer.stop()
+            self.spotify_connect_button.setGraphicsEffect(None)
+            return
+
+        if self.spotify_connect_button.styleSheet() == self._spotify_connect_attention_style:
+            self.spotify_connect_button.setStyleSheet(self._spotify_connect_base_style)
+        else:
+            self.spotify_connect_button.setStyleSheet(self._spotify_connect_attention_style)
 
     def _init_layout(self):
         """Sets up the layout for this panel."""

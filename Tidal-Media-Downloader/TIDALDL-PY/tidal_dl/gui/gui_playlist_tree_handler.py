@@ -1168,7 +1168,7 @@ class PlaylistTreeHandler(QObject):
             self.update_spotify_root_item(logged_in=False, error=True)
 
     def update_spotify_root_item(
-        self, logged_in: Optional[bool], error: bool = False
+        self, logged_in: Optional[bool], error: bool = False, attention: bool = False
     ) -> None:
         def _do_update():
             connect_button = self.spotify_connect_button
@@ -1181,20 +1181,31 @@ class PlaylistTreeHandler(QObject):
                     self.spotify_root_item.setHidden(False)
                     if connect_button:
                         connect_button.setVisible(False)
+                        with contextlib.suppress(Exception):
+                            self.main_view.playlist_tree_widget.set_spotify_connect_attention(False)
                 elif logged_in is None:
                     self.spotify_root_item.setText(0, "Spotify (Loading...)")
                     self.spotify_root_item.setHidden(False)
                     if connect_button:
                         connect_button.setVisible(False)
+                        with contextlib.suppress(Exception):
+                            self.main_view.playlist_tree_widget.set_spotify_connect_attention(False)
                 elif logged_in:
                     self.spotify_root_item.setHidden(False)
                     if connect_button:
                         connect_button.setVisible(False)
+                        with contextlib.suppress(Exception):
+                            self.main_view.playlist_tree_widget.set_spotify_connect_attention(False)
                     self.spotify_root_item.setExpanded(True)
                 else:
                     self.spotify_root_item.setHidden(True)
                     if connect_button:
                         connect_button.setVisible(True)
+                        with contextlib.suppress(Exception):
+                            self.main_view.playlist_tree_widget.set_spotify_connect_attention(
+                                attention,
+                                "Spotify credentials need attention. Click to reconnect or open Settings.",
+                            )
 
             except Exception as ui_update_error:
                 logger.error(

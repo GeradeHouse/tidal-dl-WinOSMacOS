@@ -107,6 +107,8 @@ class SettingsPage(QtWidgets.QWidget):
         self.btnAccount: Optional[QPushButton] = None
         self.chk_tidal_start_collapsed: Optional[QCheckBox] = None
         self.cmbApiKeyIndex: Optional[QComboBox] = None
+        self.tidalClientSecretInput: Optional[QLineEdit] = None
+        self.tidalClientSecretVisibilityButton: Optional[QPushButton] = None
         
         # --- NEW: Manual Token Widgets ---
         self.accessTokenInput: Optional[QLineEdit] = None
@@ -119,6 +121,7 @@ class SettingsPage(QtWidgets.QWidget):
         self.downloadPathEdit: Optional[QLineEdit] = None
         self.spotifyClientIdInput: Optional[QLineEdit] = None
         self.spotifyClientSecretInput: Optional[QLineEdit] = None
+        self.spotifyClientSecretVisibilityButton: Optional[QPushButton] = None
         self.chkAutoSpotifyLogin: Optional[QCheckBox] = None
         self.chkSpotifyUsePlaylistFolders: Optional[QCheckBox] = None
         self.cache_path_label: Optional[QLabel] = None

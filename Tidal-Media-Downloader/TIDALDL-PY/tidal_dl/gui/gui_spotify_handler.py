@@ -10,7 +10,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, Qt
 from PyQt6.QtGui import QPixmap, QIcon, QFont
 from PyQt6.QtWidgets import QTreeWidgetItem
 
-from ..spotify import SpotifyAPI
+from ..spotify import SpotifyAPI, SPOTIFY_INVALID_CLIENT
 from ..printf import Printf
 from ..tidal import Type, Track, TIDAL_API
 from .gui_utils import format_duration_ms
@@ -83,6 +83,50 @@ class SpotifyGuiHandler(QObject):
         label.raise_()
         if timeout_ms > 0:
             QtCore.QTimer.singleShot(timeout_ms, lambda: label.setVisible(False) if label.text() == message else None)
+
+    def _open_spotify_settings(self) -> None:
+        if self.main_view.navigation_handler:
+            self.main_view.navigation_handler.show_settings()
+
+        QtWidgets.QApplication.processEvents()
+
+        if self.main_view.settingsPage:
+            self.main_view.settingsPage.expandSpotifySection()
+
+    def _handle_spotify_credentials_problem(
+        self,
+        title: str,
+        main_message: str,
+        informative_text: str,
+        show_dialog: bool,
+    ) -> None:
+        self.main_view.tree_handler.update_spotify_root_item(
+            logged_in=False,
+            attention=True,
+        )
+        self._show_spotify_status(
+            "Spotify credentials need attention. Click 'Connect to Spotify' or open Settings.",
+            "warning",
+            timeout_ms=0,
+        )
+
+        if not show_dialog:
+            return
+
+        try:
+            info_icon_path = paths.resource_path("assets/icons/info_icon.png")
+        except Exception:
+            info_icon_path = None
+
+        open_settings = CustomQMessageBox.question(
+            parent=self.main_view,
+            title=title,
+            main_message=main_message,
+            informative_text=f"{informative_text}\n\nOpen Spotify settings now?",
+            icon_path=info_icon_path,
+        )
+        if open_settings:
+            self._open_spotify_settings()
 
     def _prompt_text(self, title: str, label: str, default_text: str = "") -> Optional[str]:
         dialog = QtWidgets.QDialog(self.main_view)
@@ -1148,40 +1192,24 @@ class SpotifyGuiHandler(QObject):
             f"SpotifyGuiHandler.onSpotifyLoginFinished called with auth_result: {auth_result}"
         )
 
-        if isinstance(auth_result, str) and "CREDENTIALS_MISSING" in auth_result.upper():
-            was_user_triggered = getattr(
-                self.main_view.auth_handler,
-                "_last_spotify_trigger_was_interactive",
-                False,
-            )
+        auth_result_text = auth_result.upper() if isinstance(auth_result, str) else ""
+        was_user_triggered = getattr(
+            self.main_view.auth_handler,
+            "_last_spotify_trigger_was_interactive",
+            False,
+        )
+
+        if isinstance(auth_result, str) and "CREDENTIALS_MISSING" in auth_result_text:
             if was_user_triggered:
                 logger.info(
                     "Spotify Client ID and Secret are missing. Please configure them in Settings."
                 )
-                if self.main_view.navigation_handler:
-                    self.main_view.navigation_handler.show_settings()
-
-                QtWidgets.QApplication.processEvents()
-
-                if self.main_view.settingsPage:
-                    self.main_view.settingsPage.expandSpotifySection()
-
-                try:
-                    info_icon_path = paths.resource_path("assets/icons/info_icon.png")
-                except Exception:
-                    info_icon_path = None
-
-                informative_text_for_dialog = (
+                self._handle_spotify_credentials_problem(
+                    "Spotify Credentials Missing",
+                    "Please enter Spotify Client ID and Secret in the 'Spotify Account Settings' section.",
                     "After entering them, click 'Save' at the bottom of the settings page, then try connecting to Spotify again. "
-                    "For setup help, click 'How to get Spotify Client ID and Secret?' in the settings."
-                )
-                
-                CustomQMessageBox.warning(
-                    parent=self.main_view,
-                    title="Spotify Credentials Missing",
-                    main_message="Please enter Spotify Client ID and Secret in the 'Spotify Account Settings' section.",
-                    informative_text=informative_text_for_dialog,
-                    icon_path=info_icon_path
+                    "For setup help, click 'How to get Spotify Client ID and Secret?' in the settings.",
+                    show_dialog=True,
                 )
 
                 if hasattr(
@@ -1194,8 +1222,25 @@ class SpotifyGuiHandler(QObject):
                 Printf.warning(
                     "Spotify auto-login failed: Credentials missing. Configure in Settings to enable Spotify features."
                 )
+                self._handle_spotify_credentials_problem(
+                    "Spotify Credentials Missing",
+                    "Spotify Client ID and Secret are missing.",
+                    "Open Settings and enter the current Spotify Client ID and Secret to enable Spotify playlists.",
+                    show_dialog=False,
+                )
 
-            self.main_view.tree_handler.update_spotify_root_item(logged_in=False)
+            return
+
+        if auth_result == SPOTIFY_INVALID_CLIENT or "INVALID_CLIENT" in auth_result_text:
+            logger.warning("Spotify login failed because the configured Spotify client is invalid.")
+            self._handle_spotify_credentials_problem(
+                "Spotify Credentials Invalid",
+                "The configured Spotify API key is no longer valid.",
+                "Spotify rejected the saved Client ID or Secret. Update the Spotify credentials in Settings, save them, then connect again.",
+                show_dialog=was_user_triggered,
+            )
+            if hasattr(self.main_view.auth_handler, "_last_spotify_trigger_was_interactive"):
+                self.main_view.auth_handler._last_spotify_trigger_was_interactive = False
             return
 
         self.main_view.tree_handler.update_spotify_root_item(

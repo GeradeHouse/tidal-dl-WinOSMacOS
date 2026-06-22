@@ -1092,13 +1092,23 @@ class KeywordSearchResultsController(QObject):
             for list_widget, target_item, target_generation in targets:
                 if target_generation != self._keyword_cover_generation:
                     continue
-                if list_widget.row(target_item) < 0:
-                    continue
-                if not pixmap.isNull():
-                    display_pixmap = self._prepare_keyword_icon_pixmap(
-                        list_widget, target_item, pixmap
+                try:
+                    if sip.isdeleted(list_widget) or sip.isdeleted(target_item):
+                        continue
+                    if list_widget.row(target_item) < 0:
+                        continue
+                    if not pixmap.isNull():
+                        display_pixmap = self._prepare_keyword_icon_pixmap(
+                            list_widget, target_item, pixmap
+                        )
+                        if not sip.isdeleted(target_item):
+                            target_item.setIcon(QIcon(display_pixmap))
+                except RuntimeError as exc:
+                    logger.debug(
+                        "Skipping stale keyword cover target after Qt object deletion: %s",
+                        exc,
                     )
-                    target_item.setIcon(QIcon(display_pixmap))
+                    continue
 
         def _on_error(_signal_key: str, _error: str, req_key=request_key) -> None:
             self._keyword_cover_subscribers.pop(req_key, None)

@@ -39,6 +39,76 @@ from tidal_dl.apiKey import getItems
 ATMOS_TV_PLATFORM_NAME = "Atmos TV (Tidal-Web-Downloader)"
 
 
+def _password_toggle_button_style() -> str:
+    return """
+        QPushButton {
+            background-color: #333333;
+            color: #ffffff;
+            border: 1px solid #555555;
+            border-radius: 3px;
+            padding: 4px 10px;
+            min-width: 132px;
+            font-weight: 600;
+        }
+        QPushButton:hover {
+            background-color: #3f3f3f;
+            border: 1px solid #777777;
+        }
+        QPushButton:checked {
+            background-color: #2f3f46;
+            border: 1px solid #66ccff;
+        }
+    """
+
+
+def _create_password_visibility_toggle(
+    password_input: QLineEdit,
+) -> QPushButton:
+    """Creates an eye-icon button with explicit Show/Hide Password text."""
+    button = QPushButton("👁  Show Password")
+    button.setCheckable(True)
+    button.setStyleSheet(_password_toggle_button_style())
+    button.setToolTip("Show password")
+    button.setAccessibleName("Show Password")
+
+    def _set_visible(visible: bool) -> None:
+        password_input.setEchoMode(
+            QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
+        )
+        button.setText("◉  Hide Password" if visible else "👁  Show Password")
+        button.setToolTip("Hide password" if visible else "Show password")
+        button.setAccessibleName("Hide Password" if visible else "Show Password")
+
+    button.toggled.connect(_set_visible)
+    return button
+
+
+def _create_password_input_row(
+    password_input: QLineEdit,
+    toggle_button: QPushButton,
+) -> QHBoxLayout:
+    row_layout = QHBoxLayout()
+    row_layout.setContentsMargins(0, 0, 0, 0)
+    row_layout.setSpacing(8)
+    row_layout.addWidget(password_input, 1)
+    row_layout.addWidget(toggle_button, 0)
+    return row_layout
+
+
+def _sync_tidal_client_secret_display(self: "SettingsPage") -> None:
+    if self.tidalClientSecretInput is None or self.cmbApiKeyIndex is None:
+        return
+
+    selected_api_key_index = self.cmbApiKeyIndex.currentData()
+    if not isinstance(selected_api_key_index, int):
+        selected_api_key_index = 0
+    self.tidalClientSecretInput.setText(
+        str(getItems()[selected_api_key_index].get("clientSecret", ""))
+        if 0 <= selected_api_key_index < len(getItems())
+        else ""
+    )
+
+
 def _api_key_profile_label(entry: dict[str, Any]) -> str:
     platform = str(entry.get("platform", "Unknown"))
     formats = str(entry.get("formats", "")).strip()
@@ -148,6 +218,12 @@ def initialize_controls(self: "SettingsPage"):
     self.cmbApiKeyIndex = QtWidgets.QComboBox()
     self.cmbApiKeyIndex.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents)
     self.cmbApiKeyIndex.setMinimumContentsLength(48)
+    self.tidalClientSecretInput = QLineEdit()
+    self.tidalClientSecretInput.setReadOnly(True)
+    self.tidalClientSecretInput.setEchoMode(QLineEdit.EchoMode.Password)
+    self.tidalClientSecretVisibilityButton = _create_password_visibility_toggle(
+        self.tidalClientSecretInput
+    )
 
     # --- NEW: Manual Token Controls ---
     self.accessTokenInput = QLineEdit()
@@ -167,6 +243,9 @@ def initialize_controls(self: "SettingsPage"):
     self.spotifyClientIdInput = QLineEdit()
     self.spotifyClientSecretInput = QLineEdit()
     self.spotifyClientSecretInput.setEchoMode(QLineEdit.EchoMode.Password)
+    self.spotifyClientSecretVisibilityButton = _create_password_visibility_toggle(
+        self.spotifyClientSecretInput
+    )
     self.chkAutoSpotifyLogin = QtWidgets.QCheckBox()
     self.chkSpotifyUsePlaylistFolders = QtWidgets.QCheckBox()
 
@@ -218,6 +297,8 @@ def create_tidal_section(self: "SettingsPage"):
     """
     assert self.btnAccount is not None
     assert self.cmbApiKeyIndex is not None
+    assert self.tidalClientSecretInput is not None
+    assert self.tidalClientSecretVisibilityButton is not None
     assert self.chk_tidal_start_collapsed is not None
     assert self.accessTokenInput is not None
     assert self.btnBrowseToken is not None
@@ -241,6 +322,15 @@ def create_tidal_section(self: "SettingsPage"):
         self.cmbApiKeyIndex.addItem(label, idx)
         self.cmbApiKeyIndex.setItemData(idx, label, Qt.ItemDataRole.ToolTipRole)
     account_layout.addRow("API Key Profile:", self.cmbApiKeyIndex)
+    tidal_secret_layout = _create_password_input_row(
+        self.tidalClientSecretInput,
+        self.tidalClientSecretVisibilityButton,
+    )
+    account_layout.addRow("TIDAL Client Secret:", tidal_secret_layout)
+    self.cmbApiKeyIndex.currentIndexChanged.connect(
+        lambda _index: _sync_tidal_client_secret_display(self)
+    )
+    _sync_tidal_client_secret_display(self)
     account_layout.addRow("Start with Tidal playlists collapsed:", self.chk_tidal_start_collapsed)
 
     # --- NEW: Manual Token Entry Layout ---
@@ -271,6 +361,7 @@ def create_spotify_section(self: "SettingsPage"):
     """
     assert self.spotifyClientIdInput is not None
     assert self.spotifyClientSecretInput is not None
+    assert self.spotifyClientSecretVisibilityButton is not None
     assert self.chkAutoSpotifyLogin is not None
     assert self.chkSpotifyUsePlaylistFolders is not None
     assert self.mainLayout is not None
@@ -283,7 +374,11 @@ def create_spotify_section(self: "SettingsPage"):
     spotify_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
     spotify_layout.addRow("Spotify Client ID:", self.spotifyClientIdInput)
-    spotify_layout.addRow("Spotify Client Secret:", self.spotifyClientSecretInput)
+    spotify_secret_layout = _create_password_input_row(
+        self.spotifyClientSecretInput,
+        self.spotifyClientSecretVisibilityButton,
+    )
+    spotify_layout.addRow("Spotify Client Secret:", spotify_secret_layout)
     spotify_layout.addRow("Automatically login on startup:", self.chkAutoSpotifyLogin)
     spotify_layout.addRow("Use Folders for Playlist Names ('Folder - Name'):", self.chkSpotifyUsePlaylistFolders)
 

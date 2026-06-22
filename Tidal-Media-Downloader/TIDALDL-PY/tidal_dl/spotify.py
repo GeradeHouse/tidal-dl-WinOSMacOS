@@ -91,6 +91,7 @@ SPOTIFY_REQUIRED_SCOPES = (
 )
 SPOTIFY_SCOPES = " ".join(SPOTIFY_REQUIRED_SCOPES)
 SPOTIFY_MUTATION_BATCH_SIZE = 100
+SPOTIFY_INVALID_CLIENT = "SPOTIFY_INVALID_CLIENT"
 
 
 class SpotifyAPI:
@@ -446,6 +447,7 @@ class SpotifyAPI:
             # --- Exception Handling (Retry Logic) ---
             except spotipy.SpotifyOauthError as e:
                 error_message = str(e).lower()
+                is_invalid_client = "invalid_client" in error_message
                 is_server_error = (
                     "502" in error_message
                     or "503" in error_message
@@ -470,6 +472,9 @@ class SpotifyAPI:
                     logger.error(f"Spotify authentication error: {e}")
                     self.auth_manager = None  # Reset on definitive failure
                     self.sp = None
+                    if is_invalid_client:
+                        self._clear_cached_token()
+                        return SPOTIFY_INVALID_CLIENT
                     return False  # Failed
 
             except requests.exceptions.RequestException as req_e:
