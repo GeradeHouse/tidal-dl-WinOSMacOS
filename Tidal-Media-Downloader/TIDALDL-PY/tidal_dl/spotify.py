@@ -484,6 +484,10 @@ class SpotifyAPI:
             logger.error("Spotify auth manager is None after initialization attempt.")
             return False
         auth_manager = cast(Any, self.auth_manager)
+        get_access_token = getattr(auth_manager, "get_access_token", None)
+        if not callable(get_access_token):
+            logger.error("Spotify auth manager does not expose get_access_token.")
+            return False
 
         token_info = None
         max_retries = 2  # Reduce retries slightly, maybe 2 is enough
@@ -502,7 +506,7 @@ class SpotifyAPI:
                     logger.debug(
                         "Calling auth_manager.get_access_token(check_cache=True) for silent check."
                     )
-                    token_info = auth_manager.get_access_token(check_cache=True)
+                    token_info = get_access_token(check_cache=True)
                     if not token_info:
                         logger.warning(
                             "Silent authentication failed (cache/refresh unsuccessful or requires interaction)."
@@ -514,7 +518,7 @@ class SpotifyAPI:
                     logger.debug(
                         "Calling auth_manager.get_access_token(check_cache=False) for interactive check."
                     )
-                    token_info = auth_manager.get_access_token(check_cache=False)
+                    token_info = get_access_token(check_cache=False)
                     if not token_info:
                         # This means the interactive flow (browser) was likely cancelled or failed.
                         logger.warning(
@@ -545,11 +549,13 @@ class SpotifyAPI:
                             return "CREDENTIALS_MISSING"
                         if not init_result:
                             return False
-                        auth_manager = self.auth_manager
-                        if auth_manager is None:
+                        auth_manager = cast(Any, self.auth_manager)
+                        get_access_token = getattr(auth_manager, "get_access_token", None)
+                        if not callable(get_access_token):
+                            logger.error("Spotify auth manager does not expose get_access_token after reinitialization.")
                             return False
 
-                        token_info = auth_manager.get_access_token(check_cache=False)
+                        token_info = get_access_token(check_cache=False)
                         if not token_info or not self._token_has_required_scopes(token_info):
                             logger.error("Spotify reauthorization did not grant the required playlist scopes.")
                             return "SPOTIFY_SCOPE_UPGRADE_REQUIRED"

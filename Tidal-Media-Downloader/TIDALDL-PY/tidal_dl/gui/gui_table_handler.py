@@ -1531,9 +1531,9 @@ class TableHandler(QObject):
                 thread_pool.start(worker)
             return
         if isinstance(context, dict) and context.get("type") == "tidal":
-            playlist_data = context.get("data")
-            playlist_id = str(playlist_data.get("uuid") or playlist_data.get("id") or "") if isinstance(playlist_data, dict) else str(getattr(playlist_data, "uuid", "") or getattr(playlist_data, "id", ""))
-            playlist_title = str(playlist_data.get("title") or playlist_data.get("name") or "") if isinstance(playlist_data, dict) else str(getattr(playlist_data, "title", "") or getattr(playlist_data, "name", ""))
+            tidal_playlist_data_raw = context.get("data")
+            playlist_id = str(tidal_playlist_data_raw.get("uuid") or tidal_playlist_data_raw.get("id") or "") if isinstance(tidal_playlist_data_raw, dict) else str(getattr(tidal_playlist_data_raw, "uuid", "") or getattr(tidal_playlist_data_raw, "id", ""))
+            playlist_title = str(tidal_playlist_data_raw.get("title") or tidal_playlist_data_raw.get("name") or "") if isinstance(tidal_playlist_data_raw, dict) else str(getattr(tidal_playlist_data_raw, "title", "") or getattr(tidal_playlist_data_raw, "name", ""))
             if not playlist_id:
                 return
             cache_key = f"tidal_playlist_{playlist_id}"
