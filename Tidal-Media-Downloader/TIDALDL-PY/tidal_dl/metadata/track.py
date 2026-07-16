@@ -49,6 +49,10 @@ class TrackMetadata:
     source_track_id: str | None = None  # Platform-specific track ID
     source_album_id: str | None = None  # Platform-specific album ID
     source_artist_id: str | None = None # Platform-specific artist ID
+    spotify_key: str | None = None
+    tidal_key: str | None = None
+    key_source: str | None = None
+    spotify_track_id: str | None = None
     # Additional Deezer tags
     bpm: int | None = None
     replaygain_track_gain: str | None = None  # ReplayGain format: "+/-X.XX dB"
@@ -151,6 +155,8 @@ class TrackMetadata:
             source_artist_id=artist_id,
             bpm=bpm,
             replaygain_track_gain=replaygain_track_gain,
+            tidal_key=key,
+            key_source="tidal" if key else None,
             media_type=media_type,
         )
 

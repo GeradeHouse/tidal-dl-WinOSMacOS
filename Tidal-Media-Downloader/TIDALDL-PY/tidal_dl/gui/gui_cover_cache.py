@@ -10,6 +10,7 @@
 """
 
 import logging
+import tempfile
 import pickle
 import re
 import threading
@@ -91,8 +92,23 @@ class CoverCache:
                         cache = pickle.load(f)
                         logger.debug(f"[CoverCache] Loaded {len(cache)} items from disk.")
                         return cache
-                except (pickle.UnpicklingError, EOFError, FileNotFoundError) as e:
-                    logger.warning(f"[CoverCache] Failed to load cache file: {e}. Creating a new cache.")
+                except (
+                    pickle.UnpicklingError,
+                    EOFError,
+                    FileNotFoundError,
+                    ValueError,
+                    TypeError,
+                    AttributeError,
+                ) as e:
+                    logger.warning(
+                        f"[CoverCache] Invalid cache file: {e}. Deleting it and creating a new cache."
+                    )
+                    try:
+                        self.cache_path.unlink(missing_ok=True)
+                    except OSError as delete_error:
+                        logger.warning(
+                            f"[CoverCache] Could not delete invalid cache file: {delete_error}"
+                        )
                     return {}
             logger.debug("[CoverCache] No cache file found. Starting with an empty cache.")
             return {}
@@ -102,17 +118,32 @@ class CoverCache:
             cache_copy = self.cache.copy()
         
         logger.debug(f"[CoverCache] Saving {len(cache_copy)} items to {self.cache_path}")
+        temp_path = None
         try:
             # Ensure directory exists (just in case)
             os.makedirs(self.cache_path.parent, exist_ok=True)
-            
-            with open(self.cache_path, "wb") as f:
+
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=self.cache_path.parent,
+                prefix=f"{self.cache_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as f:
                 pickle.dump(cache_copy, f)
+                temp_path = Path(f.name)
+            os.replace(temp_path, self.cache_path)
             logger.debug("[CoverCache] Successfully saved cache to disk.")
         except IOError as e:
             logger.error(f"Could not save cover cache: {e}")
         except Exception as e:
             logger.error(f"Unexpected error saving cover cache: {e}", exc_info=True)
+        finally:
+            if temp_path and temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError as cleanup_error:
+                    logger.warning(f"[CoverCache] Could not remove temporary cache file: {cleanup_error}")
 
     def get(self, url: str) -> Optional[QPixmap]:
         with self._lock:

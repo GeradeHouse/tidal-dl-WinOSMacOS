@@ -28,6 +28,7 @@ from .gui_table import SplitterTable
 from ..printf import Printf
 from ..tidal import TIDAL_API, AudioQuality, Track, Album, Playlist, Artist
 from ..download import downloadTrack as core_downloadTrack
+from ..download_item import DownloadItem
 from ..format import getAudioTypeFolder, getTrackPath
 from ..model import StreamUrl
 from ..settings import SETTINGS
@@ -35,6 +36,8 @@ from .gui_utils import show_in_folder
 from .gui_custom_dialog import ModernDarkDialog, CustomQMessageBox
 from .gui_quality_menu import DOWNLOAD_QUALITY_MENU_ITEMS
 from ..paths import get_user_download_path, resource_path
+
+DownloadQueueEntry = Union[Track, DownloadItem]
 
 if TYPE_CHECKING:
     from tidal_dl.gui.gui_main import MainView
@@ -62,7 +65,7 @@ class DownloadWorker(QObject):
     def __init__(
         self,
         main_view_instance: "MainView",
-        items_to_download: List[Track],
+        items_to_download: List[DownloadQueueEntry],
         playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
         download_quality: Optional[str],
         parent: Optional[QObject] = None,
@@ -85,7 +88,9 @@ class DownloadWorker(QObject):
                 os.makedirs(download_path, exist_ok=True)
                 # os.chdir(download_path) #removed this line, this was causing the issue
 
-            for track_item in self.items_to_download:
+            for queue_item in self.items_to_download:
+                download_item = queue_item if isinstance(queue_item, DownloadItem) else None
+                track_item = download_item.tidal_track if download_item else queue_item
                 # Pause/Stop handling
                 if self.main_view.stop_event.is_set():
                     logger.info("Stop request detected. Aborting download queue.")
@@ -149,6 +154,7 @@ class DownloadWorker(QObject):
                         playlist_context=self.playlist_context,
                         userProgress=progress_handler,
                         downloadQuality=self.download_quality,
+                        download_item=download_item,
                     )
                     progress_handler.finish()
                     self.trackFinished.emit(track_id_str, bool(ok), err or "")
@@ -160,6 +166,8 @@ class DownloadWorker(QObject):
             # Determine final path for "Show in Folder" by computing the same path as downloadTrack
             if self.items_to_download:
                 first_track_item = self.items_to_download[0]
+                if isinstance(first_track_item, DownloadItem):
+                    first_track_item = first_track_item.tidal_track
                 final_path = None
                 album_param = (
                     self.playlist_context
@@ -316,6 +324,46 @@ class DownloadHandler(QObject):
 
         return bool(current_playlist_id and current_playlist_id == str(playlist_id))
 
+    @staticmethod
+    def _track_from_queue_entry(entry: DownloadQueueEntry) -> Optional[Track]:
+        if isinstance(entry, DownloadItem):
+            return entry.tidal_track
+        if isinstance(entry, Track):
+            return entry
+        return None
+
+    def _download_item_from_row(self, row_index: int) -> Optional[DownloadQueueEntry]:
+        table = getattr(self.main_view, "tableWidget", None)
+        if not table or row_index >= table.rowCount():
+            return None
+
+        title_item: Optional[QTableWidgetItem] = table.item(row_index, 1)
+        if not title_item:
+            return None
+
+        title_data: Optional[Any] = title_item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(title_data, dict) and title_data.get("type") == "spotify_track":
+            tidal_track_candidate = title_data.get("tidal_track")
+            spotify_data = title_data.get("data", {})
+            if isinstance(tidal_track_candidate, Track) and isinstance(spotify_data, dict):
+                features = spotify_data.get("spotify_audio_features")
+                if not isinstance(features, dict):
+                    features = {}
+                return DownloadItem(
+                    tidal_track=tidal_track_candidate,
+                    source_platform="spotify",
+                    source_track_id=str(spotify_data.get("id") or "") or None,
+                    spotify_key=features.get("key") if features else spotify_data.get("spotify_key"),
+                    spotify_mode=features.get("mode") if features else spotify_data.get("spotify_mode"),
+                    spotify_tempo=features.get("tempo") if features else spotify_data.get("spotify_tempo"),
+                    spotify_metadata=spotify_data,
+                )
+
+        if isinstance(title_data, Track):
+            return title_data
+
+        return None
+
     @pyqtSlot()
     def onActuallyPaused(self):
         logger.debug(
@@ -330,7 +378,7 @@ class DownloadHandler(QObject):
 
     def startContextMenuDownload(
         self,
-        tracks_with_rows: List[Tuple[int, Track]],
+        tracks_with_rows: List[Tuple[int, DownloadQueueEntry]],
         quality_enum: AudioQuality,
         non_completed_only: bool = False,
     ):
@@ -360,12 +408,14 @@ class DownloadHandler(QObject):
             table_handler = getattr(self.main_view, "table_handler", None)
             if table_handler:
                 filtered_tracks_with_rows = [
-                    (row, track)
-                    for row, track in tracks_with_rows
-                    if not table_handler.is_track_completed(track, current_playlist_context)
+                    (row, entry)
+                    for row, entry in tracks_with_rows
+                    for track in [self._track_from_queue_entry(entry)]
+                    if isinstance(track, Track)
+                    and not table_handler.is_track_completed(track, current_playlist_context)
                 ]
 
-        tracks_only = [track for _, track in filtered_tracks_with_rows]
+        tracks_only: List[DownloadQueueEntry] = [track for _, track in filtered_tracks_with_rows]
         if not tracks_only:
             CustomQMessageBox.information(
                 self.main_view,
@@ -382,7 +432,7 @@ class DownloadHandler(QObject):
 
     def downloadTableContextMenu(self, menu: QMenu, selected_rows_indices: List[int]):
         logger.debug("[GUI ContextMenu] downloadTableContextMenu executing.")
-        tracks_with_rows: List[Tuple[int, Track]] = []
+        tracks_with_rows: List[Tuple[int, DownloadQueueEntry]] = []
         menu_title_base = "Download"
 
         if not selected_rows_indices:
@@ -392,9 +442,9 @@ class DownloadHandler(QObject):
             return
 
         for r_idx in selected_rows_indices:
-            tidal_track: Optional[Track] = self._get_tidal_track_from_row(r_idx)
-            if tidal_track:
-                tracks_with_rows.append((r_idx, tidal_track))
+            entry = self._download_item_from_row(r_idx)
+            if entry:
+                tracks_with_rows.append((r_idx, entry))
 
         table_handler = getattr(self.main_view, "table_handler", None)
 
@@ -482,7 +532,7 @@ class DownloadHandler(QObject):
             return
 
         button_text = self.btn_download.text()
-        tracks_to_download: List[Track] = []
+        tracks_to_download: List[DownloadQueueEntry] = []
         current_playlist_obj = self.main_view.s_playlist_obj
 
         if button_text == "Download Selected":
@@ -493,9 +543,9 @@ class DownloadHandler(QObject):
                 )
                 return
             for row_index in selected_rows_indices:
-                track = self._get_tidal_track_from_row(row_index)
-                if track:
-                    tracks_to_download.append(track)
+                entry = self._download_item_from_row(row_index)
+                if entry:
+                    tracks_to_download.append(entry)
         elif button_text == "Download All":
             is_spotify_playlist = (
                 isinstance(current_playlist_obj, dict)
@@ -503,9 +553,9 @@ class DownloadHandler(QObject):
             )
             unlinked_tracks_exist = False
             for row_index in range(table.rowCount()):
-                track = self._get_tidal_track_from_row(row_index)
-                if track:
-                    tracks_to_download.append(track)
+                entry = self._download_item_from_row(row_index)
+                if entry:
+                    tracks_to_download.append(entry)
                 elif is_spotify_playlist:
                     unlinked_tracks_exist = True
 
@@ -544,7 +594,7 @@ class DownloadHandler(QObject):
     @pyqtSlot(object, object, object)
     def _start_download_thread(
         self,
-        tracks_to_start: List[Track],
+        tracks_to_start: List[DownloadQueueEntry],
         playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]],
         quality_arg_str: Optional[str]
     ):
@@ -574,20 +624,28 @@ class DownloadHandler(QObject):
         self.main_view.cancel_requested = False
 
         self.active_downloads.clear()
-        for i, track in enumerate(tracks_to_start):
+        valid_tracks_to_start: List[DownloadQueueEntry] = []
+        for i, queue_entry in enumerate(tracks_to_start):
+            track = self._track_from_queue_entry(queue_entry)
+            if not isinstance(track, Track) or track.id is None:
+                continue
+            valid_tracks_to_start.append(queue_entry)
             self.active_downloads[str(track.id)] = {
                 "status": "pending",
                 "progress": 0,
                 "track": track,
+                "download_item": queue_entry if isinstance(queue_entry, DownloadItem) else None,
                 "playlist_context": playlist_context,
                 "requested_quality": quality_arg_str,
                 "tooltip": f"Position {i+1} of {len(tracks_to_start)} in queue.",
             }
+        tracks_to_start = valid_tracks_to_start
 
         table_handler = getattr(self.main_view, "table_handler", None)
         if table_handler and playlist_id and playlist_context:
             try:
-                sample_track = tracks_to_start[0] if tracks_to_start else None
+                sample_entry = tracks_to_start[0] if tracks_to_start else None
+                sample_track = self._track_from_queue_entry(sample_entry) if sample_entry else None
                 if isinstance(sample_track, Track):
                     artists = TIDAL_API.getArtistsName(
                         cast(List[Artist], getattr(sample_track, "artists", []))

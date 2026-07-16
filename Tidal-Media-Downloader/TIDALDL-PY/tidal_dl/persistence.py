@@ -64,6 +64,8 @@ setup_gui_logger(__name__, logging.WARNING)
 
 TRACK_METADATA_CACHE_VERSION = 1
 TRACK_METADATA_CACHE_TTL_SECONDS = 90 * 24 * 60 * 60
+SPOTIFY_AUDIO_FEATURES_CACHE_VERSION = 1
+SPOTIFY_AUDIO_FEATURES_CACHE_TTL_SECONDS = 90 * 24 * 60 * 60
 TRACK_METADATA_CACHE_ALLOWED_KEYS = {
     "release_year",
     "bpm",
@@ -373,6 +375,8 @@ class LinkPersistenceManager:
             "track_quality_cache",
             "track_metadata_cache",
             "track_metadata_cache_version",
+            "spotify_audio_features_cache",
+            "spotify_audio_features_cache_version",
         ):
             optional_value = self._salvage_top_level_object(text, optional_key)
             if optional_value is not None:
@@ -905,6 +909,74 @@ class LinkPersistenceManager:
             return {}
 
         return self._clean_track_metadata_cache_values(metadata)
+
+    def get_cached_spotify_audio_features(self, spotify_track_id: str) -> Dict[str, Any]:
+        """Return cached raw Spotify Audio Features for a Spotify track ID."""
+        track_id = str(spotify_track_id or "").strip()
+        if not track_id:
+            return {}
+
+        if self.links_data is None:
+            self.load_links()
+
+        links_data_dict = cast(Dict[str, Any], self.links_data)
+        cache_version = links_data_dict.get("spotify_audio_features_cache_version")
+        if cache_version is not None and cache_version != SPOTIFY_AUDIO_FEATURES_CACHE_VERSION:
+            return {}
+
+        cache = links_data_dict.get("spotify_audio_features_cache", {})
+        if not isinstance(cache, dict):
+            return {}
+
+        entry = cache.get(track_id, {})
+        if not isinstance(entry, dict):
+            return {}
+
+        entry_version = entry.get("version")
+        if entry_version is not None and entry_version != SPOTIFY_AUDIO_FEATURES_CACHE_VERSION:
+            return {}
+
+        if self._is_track_metadata_cache_stale(entry.get("fetched_at") or entry.get("timestamp")):
+            return {}
+
+        features = entry.get("features", {})
+        return dict(features) if isinstance(features, dict) else {}
+
+    def set_cached_spotify_audio_features(
+        self,
+        spotify_track_id: str,
+        features: Dict[str, Any],
+    ) -> None:
+        """Store raw Spotify Audio Features values for a Spotify track ID."""
+        track_id = str(spotify_track_id or "").strip()
+        if not track_id or not isinstance(features, dict):
+            return
+
+        cleaned: Dict[str, Any] = {}
+        for key in ("id", "key", "mode", "tempo", "status"):
+            if key in features:
+                cleaned[key] = features.get(key)
+        if not cleaned:
+            return
+
+        if self.links_data is None:
+            self.load_links()
+
+        links_data_dict = cast(Dict[str, Any], self.links_data)
+        links_data_dict["spotify_audio_features_cache_version"] = SPOTIFY_AUDIO_FEATURES_CACHE_VERSION
+        cache = links_data_dict.get("spotify_audio_features_cache")
+        if not isinstance(cache, dict):
+            cache = {}
+            links_data_dict["spotify_audio_features_cache"] = cache
+
+        cache[track_id] = {
+            "version": SPOTIFY_AUDIO_FEATURES_CACHE_VERSION,
+            "features": cleaned,
+            "fetched_at": self._get_current_timestamp(),
+        }
+
+        if not self._save_or_defer():
+            logger.error("Failed to save Spotify Audio Features cache for track %s", track_id)
 
     def set_cached_track_metadata(self, tidal_track_id: str, metadata: Dict[str, str]) -> None:
         """

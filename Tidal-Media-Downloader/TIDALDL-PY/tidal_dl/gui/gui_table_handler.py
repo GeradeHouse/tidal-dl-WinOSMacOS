@@ -35,7 +35,12 @@ from tidal_dl.persistence import LinkPersistenceManager
 from tidal_dl.format import getAudioTypeFolder, getTrackPath
 from tidal_dl.paths import get_user_download_path
 from tidal_dl.model import Artist, StreamUrl
-from tidal_dl.metadata.enrichment import MISSING_METADATA_TEXT, get_track_display_metadata
+from tidal_dl.metadata.enrichment import (
+    MISSING_METADATA_TEXT,
+    format_spotify_key,
+    get_track_display_metadata,
+)
+from tidal_dl.download_item import DownloadItem
 
 # Robust import alias for aigpy dictToModel
 try:
@@ -271,6 +276,12 @@ class TableHandler(QObject):
         except RuntimeError:
             return False
 
+    def _alive_table_widget(self) -> Optional[SplitterTable]:
+        table = self.table_widget
+        if not self._is_qobject_alive(table):
+            return None
+        return table
+
     def _table_widget_alive(self) -> bool:
         return self._is_qobject_alive(self.table_widget)
 
@@ -279,7 +290,7 @@ class TableHandler(QObject):
 
     def _detach_spotify_drag_event_filter(self) -> None:
         viewport = self._table_viewport_ref
-        if self._is_qobject_alive(viewport):
+        if viewport is not None and self._is_qobject_alive(viewport):
             with suppress(RuntimeError, TypeError):
                 viewport.removeEventFilter(self)
         self._table_viewport_ref = None
@@ -292,7 +303,7 @@ class TableHandler(QObject):
         self._detach_spotify_drag_event_filter()
 
     def _active_spotify_playlist_can_reorder(self) -> bool:
-        if self._is_shutting_down or not self._table_widget_alive():
+        if self._is_shutting_down or self._alive_table_widget() is None:
             return False
 
         playlist_obj = getattr(self.main_view, "s_playlist_obj", None)
@@ -301,62 +312,79 @@ class TableHandler(QObject):
         return bool(playlist_obj["data"].get("can_modify_items"))
 
     def _set_spotify_reorder_visual_state(self, active: bool) -> None:
-        if not self._table_widget_alive():
+        table = self._alive_table_widget()
+        if table is None:
             return
 
-        self.table_widget.setProperty("spotifyReorderActive", bool(active))
-        self.table_widget.style().unpolish(self.table_widget)
-        self.table_widget.style().polish(self.table_widget)
-        self.table_widget.update()
+        table.setProperty("spotifyReorderActive", bool(active))
+        style = table.style()
+        if style is not None:
+            style.unpolish(table)
+            style.polish(table)
+        table.update()
 
     def _get_row_from_event_position(self, event: QtCore.QEvent) -> Optional[int]:
-        if self._is_shutting_down or not self._table_widget_alive():
+        table = self._alive_table_widget()
+        if self._is_shutting_down or table is None:
             return None
 
-        pos = event.position().toPoint() if hasattr(event, "position") else event.pos() if hasattr(event, "pos") else None
-        if pos is None:
+        if not isinstance(
+            event,
+            (
+                QtGui.QMouseEvent,
+                QtGui.QDragEnterEvent,
+                QtGui.QDragMoveEvent,
+                QtGui.QDropEvent,
+            ),
+        ):
             return None
 
-        index = self.table_widget.indexAt(pos)
-        return index.row() if index.isValid() else self.table_widget.rowCount()
+        pos = event.position().toPoint()
+        index = table.indexAt(pos)
+        return index.row() if index.isValid() else table.rowCount()
 
     def _selected_table_rows_for_drag(self, fallback_row: int) -> List[int]:
-        if self._is_shutting_down or not self._table_widget_alive():
+        table = self._alive_table_widget()
+        if self._is_shutting_down or table is None:
             return []
 
-        selected_rows = list(self.table_widget.getSelectedRows())
+        selected_rows = list(table.getSelectedRows())
         if fallback_row not in selected_rows:
             selected_rows = [fallback_row]
 
         payloads = self.get_table_track_payloads_for_rows(selected_rows)
         payload_row_set = {
-            int(payload.get("row_index"))
+            row_index
             for payload in payloads
-            if isinstance(payload.get("row_index"), int)
+            for row_index in [payload.get("row_index")]
+            if isinstance(row_index, int)
         }
         return [row for row in selected_rows if row in payload_row_set]
 
     def _selected_spotify_rows_for_drag(self, fallback_row: int) -> List[int]:
-        if self._is_shutting_down or not self._table_widget_alive():
+        table = self._alive_table_widget()
+        if self._is_shutting_down or table is None:
             return []
 
-        selected_rows = list(self.table_widget.getSelectedRows())
+        selected_rows = list(table.getSelectedRows())
         if fallback_row not in selected_rows:
             selected_rows = [fallback_row]
 
         payloads = self.get_spotify_track_payloads_for_rows(selected_rows)
         payload_row_set = {
-            int(payload.get("row_index"))
+            row_index
             for payload in payloads
-            if isinstance(payload.get("row_index"), int)
+            for row_index in [payload.get("row_index")]
+            if isinstance(row_index, int)
         }
         return [row for row in selected_rows if row in payload_row_set]
 
     def _build_table_track_drag_pixmap(self, rows: List[int]) -> QtGui.QPixmap:
         count = len(rows)
         title = "Selected tracks"
-        if count == 1 and self._table_widget_alive():
-            title_item = self.table_widget.item(rows[0], 1)
+        table = self._alive_table_widget()
+        if count == 1 and table is not None:
+            title_item = table.item(rows[0], 1)
             if title_item and title_item.text():
                 title = title_item.text()
 
@@ -383,23 +411,25 @@ class TableHandler(QObject):
         return pixmap
 
     def get_spotify_drop_insert_position(self, drop_row: int) -> int:
-        if self._is_shutting_down or not self._table_widget_alive():
+        table = self._alive_table_widget()
+        if self._is_shutting_down or table is None:
             return 0
 
-        if drop_row >= self.table_widget.rowCount():
+        if drop_row >= table.rowCount():
             active_playlist = getattr(self.main_view, "s_playlist_obj", {})
             if isinstance(active_playlist, dict):
                 data = active_playlist.get("data", {})
                 if isinstance(data, dict):
-                    return int(data.get("tracks_total") or self.table_widget.rowCount())
-            return self.table_widget.rowCount()
+                    return int(data.get("tracks_total") or table.rowCount())
+            return table.rowCount()
         payloads = self.get_spotify_track_payloads_for_rows([drop_row])
         if payloads and isinstance(payloads[0].get("playlist_position"), int):
             return int(payloads[0]["playlist_position"])
         return max(0, int(drop_row))
 
     def _start_table_row_drag(self, rows: List[int]) -> bool:
-        if self._is_shutting_down or not self._table_widget_alive() or not rows:
+        table = self._alive_table_widget()
+        if self._is_shutting_down or table is None or not rows:
             return False
 
         payloads = self.get_table_track_payloads_for_rows(rows)
@@ -419,7 +449,7 @@ class TableHandler(QObject):
                 QtCore.QByteArray(",".join(str(row) for row in rows).encode("utf-8")),
             )
 
-        drag = QtGui.QDrag(self.table_widget)
+        drag = QtGui.QDrag(table)
         drag.setMimeData(mime)
         drag.setPixmap(self._build_table_track_drag_pixmap(rows))
         drag.setHotSpot(QPoint(18, 18))
@@ -429,12 +459,15 @@ class TableHandler(QObject):
         )
         return result in (Qt.DropAction.CopyAction, Qt.DropAction.MoveAction)
 
-    def eventFilter(self, watched: QObject, event: Optional[QEvent]) -> bool:
-        if self._is_shutting_down or event is None or not self._table_widget_alive():
+    def eventFilter(self, a0: Optional[QObject], a1: Optional[QEvent]) -> bool:
+        watched = a0
+        event = a1
+        table = self._alive_table_widget()
+        if self._is_shutting_down or watched is None or event is None or table is None:
             return False
 
         viewport = self._table_viewport_ref
-        if not self._is_qobject_alive(viewport) or watched is not viewport:
+        if viewport is None or not self._is_qobject_alive(viewport) or watched is not viewport:
             return super().eventFilter(watched, event)
 
         event_type = event.type()
@@ -444,10 +477,10 @@ class TableHandler(QObject):
                 row = self._get_row_from_event_position(event)
                 if (
                     row is not None
-                    and row < self.table_widget.rowCount()
+                    and row < table.rowCount()
                     and self._selected_table_rows_for_drag(row)
                 ):
-                    self._spotify_drag_start_pos = event.pos()
+                    self._spotify_drag_start_pos = event.position().toPoint()
                     self._spotify_drag_start_row = row
             return super().eventFilter(watched, event)
 
@@ -457,7 +490,7 @@ class TableHandler(QObject):
                 and self._spotify_drag_start_row is not None
                 and event.buttons() & Qt.MouseButton.LeftButton
             ):
-                if (event.pos() - self._spotify_drag_start_pos).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
+                if (event.position().toPoint() - self._spotify_drag_start_pos).manhattanLength() >= QtWidgets.QApplication.startDragDistance():
                     rows = self._selected_table_rows_for_drag(self._spotify_drag_start_row)
                     self._spotify_drag_start_pos = None
                     self._spotify_drag_start_row = None
@@ -467,7 +500,10 @@ class TableHandler(QObject):
             return super().eventFilter(watched, event)
 
         if event_type in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
-            if isinstance(event, (QtGui.QDragEnterEvent, QtGui.QDragMoveEvent)) and event.mimeData().hasFormat(SPOTIFY_ROW_DRAG_MIME):
+            if isinstance(event, (QtGui.QDragEnterEvent, QtGui.QDragMoveEvent)):
+                mime_data = event.mimeData()
+                if mime_data is None or not mime_data.hasFormat(SPOTIFY_ROW_DRAG_MIME):
+                    return super().eventFilter(watched, event)
                 if self._active_spotify_playlist_can_reorder():
                     self._spotify_drop_indicator_row = self._get_row_from_event_position(event)
                     event.setDropAction(Qt.DropAction.MoveAction)
@@ -481,11 +517,12 @@ class TableHandler(QObject):
             return super().eventFilter(watched, event)
 
         if event_type == QEvent.Type.Drop and isinstance(event, QtGui.QDropEvent):
-            if event.mimeData().hasFormat(SPOTIFY_ROW_DRAG_MIME) and self._active_spotify_playlist_can_reorder():
-                raw_rows = bytes(event.mimeData().data(SPOTIFY_ROW_DRAG_MIME)).decode("utf-8")
+            mime_data = event.mimeData()
+            if mime_data is not None and mime_data.hasFormat(SPOTIFY_ROW_DRAG_MIME) and self._active_spotify_playlist_can_reorder():
+                raw_rows = cast(Any, mime_data.data(SPOTIFY_ROW_DRAG_MIME)).data().decode("utf-8")
                 rows = [int(part) for part in raw_rows.split(",") if part.strip().isdigit()]
                 drop_row = self._get_row_from_event_position(event)
-                insert_before = self.get_spotify_drop_insert_position(drop_row if drop_row is not None else self.table_widget.rowCount())
+                insert_before = self.get_spotify_drop_insert_position(drop_row if drop_row is not None else table.rowCount())
                 spotify_handler = getattr(self.main_view, "spotify_gui_handler", None)
                 if spotify_handler:
                     spotify_handler.moveSelectedRowsToPlaylistPosition(rows, insert_before)
@@ -498,7 +535,8 @@ class TableHandler(QObject):
     def clear_table(self):
         self._row_cover_generation += 1
         self._hide_playlist_header()
-        if not self.table_widget:
+        table = self._alive_table_widget()
+        if table is None:
             return
         self._visible_metadata_refresh_timer.stop()
         self._track_id_to_rows.clear()
@@ -513,15 +551,16 @@ class TableHandler(QObject):
             self._completed_status_inflight_keys.clear()
             self._completed_status_cache.clear()
         self._active_table_playlist_context_key = ""
-        self.table_widget.clearRows()
+        table.clearRows()
         if self.download_handler:
             self.download_handler._update_download_button_text()
 
     def _extract_tidal_track_id_from_row(self, row: int) -> Optional[str]:
-        if not self.table_widget:
+        table = self._alive_table_widget()
+        if table is None:
             return None
 
-        title_item = self.table_widget.item(row, 1)
+        title_item = table.item(row, 1)
         if not title_item:
             return None
 
@@ -541,17 +580,18 @@ class TableHandler(QObject):
         return None
 
     def _set_row_quality_text(self, row: int, quality_text: str) -> None:
-        if not self.table_widget:
+        table = self._alive_table_widget()
+        if table is None:
             return
 
         quality_col = self.column_indices.get("Quality")
         if quality_col is None:
             return
 
-        quality_item = self.table_widget.item(row, quality_col)
+        quality_item = table.item(row, quality_col)
         if not quality_item:
             quality_item = QTableWidgetItem()
-            self.table_widget.setItem(row, quality_col, quality_item)
+            table.setItem(row, quality_col, quality_item)
 
         quality_item.setText(quality_text)
         quality_item.setToolTip(quality_text)
@@ -563,17 +603,18 @@ class TableHandler(QObject):
         text: str,
         tooltip: Optional[str] = None,
     ) -> None:
-        if not self.table_widget:
+        table = self._alive_table_widget()
+        if table is None:
             return
 
         col = self.column_indices.get(header)
         if col is None:
             return
 
-        item = self.table_widget.item(row, col)
+        item = table.item(row, col)
         if not item:
             item = QTableWidgetItem()
-            self.table_widget.setItem(row, col, item)
+            table.setItem(row, col, item)
 
         final_text = str(text or MISSING_METADATA_TEXT)
         item.setText(final_text)
@@ -595,7 +636,7 @@ class TableHandler(QObject):
         return artists_text or MISSING_METADATA_TEXT
 
     def _set_row_tidal_identity_text(self, row: int, track: Optional[Track]) -> None:
-        if not self.table_widget or not isinstance(track, Track):
+        if self._alive_table_widget() is None or not isinstance(track, Track):
             return
 
         album_obj = getattr(track, "album", None)
@@ -644,6 +685,30 @@ class TableHandler(QObject):
 
         return f"{text[: max_length - 1].rstrip()}…"
 
+    def _metadata_header_for_key(self, key: str) -> str:
+        if key == "key" and "TIDAL Key" in self.column_indices:
+            return "TIDAL Key"
+        for header, metadata_key in REQUESTED_METADATA_COLUMNS:
+            if metadata_key == key:
+                return header
+        return key
+
+    def _format_spotify_key_for_table(self, spotify_track_data: Dict[str, Any]) -> str:
+        features = spotify_track_data.get("spotify_audio_features")
+        if not isinstance(features, dict):
+            features = {}
+        status = str(features.get("status") or "").strip().lower()
+        if status in {"unsupported", "unavailable"}:
+            return "Unavailable"
+        key_value = features.get("key", spotify_track_data.get("spotify_key"))
+        mode_value = features.get("mode", spotify_track_data.get("spotify_mode"))
+        formatted = format_spotify_key(
+            key_value,
+            mode_value,
+            use_camelot_key=bool(getattr(SETTINGS, "useCamelotKeyNotation", True)),
+        )
+        return formatted or MISSING_METADATA_TEXT
+
     def _get_requested_metadata_values(self, track: Optional[Track]) -> Dict[str, str]:
         enriched_track = self._apply_cached_track_metadata(track)
         use_camelot_key = bool(getattr(SETTINGS, "useCamelotKeyNotation", True))
@@ -670,11 +735,13 @@ class TableHandler(QObject):
         row: int,
         metadata_values: Dict[str, str],
     ) -> Dict[str, str]:
-        if not self.table_widget:
+        table = self._alive_table_widget()
+        if table is None:
             return metadata_values
 
         merged = dict(metadata_values)
         for header, key in REQUESTED_METADATA_COLUMNS:
+            header = self._metadata_header_for_key(key)
             if not self._is_missing_metadata_value(merged.get(key)):
                 continue
 
@@ -682,7 +749,7 @@ class TableHandler(QObject):
             if col is None:
                 continue
 
-            existing_item = self.table_widget.item(row, col)
+            existing_item = table.item(row, col)
             existing_text = existing_item.text().strip() if existing_item else ""
             if not self._is_missing_metadata_value(existing_text):
                 merged[key] = existing_text
@@ -694,7 +761,8 @@ class TableHandler(QObject):
         row: int,
         track: Optional[Track],
     ) -> None:
-        if not self.table_widget:
+        table = self._alive_table_widget()
+        if table is None:
             return
 
         metadata_values = self._get_requested_metadata_values(track)
@@ -705,37 +773,40 @@ class TableHandler(QObject):
             )
         self._replace_row_tidal_track_metadata(row, track)
         for header, key in REQUESTED_METADATA_COLUMNS:
+            header = self._metadata_header_for_key(key)
             col = self.column_indices.get(header)
             if col is None:
                 continue
 
             full_text = metadata_values.get(key, MISSING_METADATA_TEXT) or MISSING_METADATA_TEXT
             display_text = self._compact_metadata_display_text(header, full_text)
-            item = self.table_widget.item(row, col)
+            item = table.item(row, col)
             if not item:
                 item = QTableWidgetItem()
-                self.table_widget.setItem(row, col, item)
+                table.setItem(row, col, item)
             item.setText(display_text)
             item.setToolTip(full_text)
             item.setData(Qt.ItemDataRole.ToolTipRole, full_text)
             item.setData(Qt.ItemDataRole.StatusTipRole, full_text)
 
-        self.table_widget._update_row_appearance_for_row(row)
+        table._update_row_appearance_for_row(row)
 
     def _apply_metadata_tooltips_for_row(
         self,
         row: int,
         metadata_values: Dict[str, str],
     ) -> None:
-        if not self.table_widget:
+        table = self._alive_table_widget()
+        if table is None:
             return
 
         for header, key in REQUESTED_METADATA_COLUMNS:
+            header = self._metadata_header_for_key(key)
             col = self.column_indices.get(header)
             if col is None:
                 continue
 
-            item = self.table_widget.item(row, col)
+            item = table.item(row, col)
             if not item:
                 continue
 
@@ -751,10 +822,11 @@ class TableHandler(QObject):
         row: int,
         track: Optional[Track],
     ) -> None:
-        if not self.table_widget or not isinstance(track, Track):
+        table = self._alive_table_widget()
+        if table is None or not isinstance(track, Track):
             return
 
-        title_item = self.table_widget.item(row, 1)
+        title_item = table.item(row, 1)
         if not title_item:
             return
 
@@ -1438,11 +1510,12 @@ class TableHandler(QObject):
             return
         self._playlist_cover_generation += 1
         generation = self._playlist_cover_generation
-        cover_cache = getattr(self.main_view, "cover_cache", None)
+        cover_cache = cast(Any, getattr(self.main_view, "cover_cache", None))
         if cover_cache is None:
             return
         if isinstance(context, dict) and context.get("type") == "spotify":
-            playlist_data = context.get("data") if isinstance(context.get("data"), dict) else {}
+            playlist_data_raw = context.get("data")
+            playlist_data: Dict[str, Any] = playlist_data_raw if isinstance(playlist_data_raw, dict) else {}
             playlist_id = str(playlist_data.get("id") or "")
             image_url = self._best_spotify_image_url(playlist_data.get("images"), prefer_small=False)
             if not image_url:
@@ -1453,7 +1526,9 @@ class TableHandler(QObject):
                 return
             worker = CoverArtWorker(image_url, cover_cache, "spotify", playlist_id)
             worker.signals.cover_ready.connect(lambda key, pixmap, gen=generation: self._on_playlist_header_cover_ready(gen, key, pixmap))
-            QtCore.QThreadPool.globalInstance().start(worker)
+            thread_pool = QtCore.QThreadPool.globalInstance()
+            if thread_pool is not None:
+                thread_pool.start(worker)
             return
         if isinstance(context, dict) and context.get("type") == "tidal":
             playlist_data = context.get("data")
@@ -1468,7 +1543,9 @@ class TableHandler(QObject):
                 return
             worker = CoverArtWorker(None, cover_cache, "tidal", playlist_id, playlist_title)
             worker.signals.cover_ready.connect(lambda key, pixmap, gen=generation: self._on_playlist_header_cover_ready(gen, key, pixmap))
-            QtCore.QThreadPool.globalInstance().start(worker)
+            thread_pool = QtCore.QThreadPool.globalInstance()
+            if thread_pool is not None:
+                thread_pool.start(worker)
 
     def _on_playlist_header_cover_ready(self, generation: int, _key: str, pixmap: QtGui.QPixmap) -> None:
         if generation != self._playlist_cover_generation:
@@ -1509,7 +1586,7 @@ class TableHandler(QObject):
             previous_main_row_visible = is_visible
 
     def _request_row_cover(self, row: int, item_metadata: Any, spotify_track_data: Optional[Dict[str, Any]], generation: int) -> None:
-        cover_cache = getattr(self.main_view, "cover_cache", None)
+        cover_cache = cast(Any, getattr(self.main_view, "cover_cache", None))
         if cover_cache is None:
             return
         identity = ""
@@ -1544,7 +1621,9 @@ class TableHandler(QObject):
                 return
             worker = CoverArtWorker(signal_key, cover_cache, "Track", cover_id, getattr(item_metadata, "title", ""))
         worker.signals.cover_ready.connect(lambda _key, pixmap, gen=generation, row_identity=identity: self._on_row_cover_ready(gen, row_identity, pixmap))
-        QtCore.QThreadPool.globalInstance().start(worker)
+        thread_pool = QtCore.QThreadPool.globalInstance()
+        if thread_pool is not None:
+            thread_pool.start(worker)
 
     def _on_row_cover_ready(self, generation: int, identity: str, pixmap: QtGui.QPixmap) -> None:
         if generation != self._row_cover_generation or pixmap.isNull():
@@ -1552,11 +1631,12 @@ class TableHandler(QObject):
         row = self._find_row_for_cover_identity(identity)
         if row is None:
             return
-        if hasattr(self.table_widget, "setRowCoverPixmap"):
-            self.table_widget.setRowCoverPixmap(row, pixmap)
+        table = self._alive_table_widget()
+        if table is not None and hasattr(table, "setRowCoverPixmap"):
+            table.setRowCoverPixmap(row, pixmap)
 
     def _find_row_for_cover_identity(self, identity: str) -> Optional[int]:
-        table = self.table_widget
+        table = self._alive_table_widget()
         if table is None or not identity:
             return None
         title_column = self.column_indices.get("Title", 1)
@@ -1566,7 +1646,8 @@ class TableHandler(QObject):
                 continue
             data = item.data(Qt.ItemDataRole.UserRole)
             if identity.startswith("spotify:") and isinstance(data, dict):
-                spotify_data = data.get("data") if isinstance(data.get("data"), dict) else data
+                spotify_data_raw = data.get("data")
+                spotify_data: Dict[str, Any] = spotify_data_raw if isinstance(spotify_data_raw, dict) else data
                 if str(spotify_data.get("id") or "") == identity.split(":", 1)[1]:
                     return row
             if identity.startswith("tidal:") and str(getattr(data, "id", "") or "") == identity.split(":", 1)[1]:
@@ -1781,13 +1862,12 @@ class TableHandler(QObject):
         track: Track,
         playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None,
     ) -> List[str]:
-        artists_list = (
-            track.artists if isinstance(getattr(track, "artists", None), list) else [getattr(track, "artist", None)]
-        )
+        raw_artists = getattr(track, "artists", None)
+        artists_list = raw_artists if isinstance(raw_artists, list) else [getattr(track, "artist", None)]
         artists = TIDAL_API.getArtistsName(cast(List[Any], [a for a in artists_list if a is not None]))
         artist = getattr(getattr(track, "artist", None), "name", "") or artists
 
-        dummy_stream = StreamUrl()
+        dummy_stream = cast(Any, StreamUrl())
         dummy_stream.url = "https://local.invalid/placeholder.m4a"
         dummy_stream.codec = "aac"
         extensions_in_priority_order = [".flac", ".mp3", ".m4a", ".mp4"]
@@ -2459,24 +2539,26 @@ class TableHandler(QObject):
             logger.debug("Failed to shut down completed-status executor cleanly.", exc_info=True)
 
     def _visible_row_indices(self, max_rows: Optional[int] = None) -> List[int]:
-        if not self.table_widget or self.table_widget.rowCount() <= 0:
+        table = self._alive_table_widget()
+        if table is None or table.rowCount() <= 0:
             return []
 
-        first_visible_row = self.table_widget.rowAt(0)
+        first_visible_row = table.rowAt(0)
         if first_visible_row < 0:
-            first_visible_row = max(0, self.table_widget.verticalScrollBar().value())
+            vertical_scrollbar = cast(Any, table.verticalScrollBar())
+            first_visible_row = max(0, vertical_scrollbar.value() if vertical_scrollbar is not None else 0)
 
-        viewport = self.table_widget.viewport()
-        row_height = max(1, self.table_widget.verticalHeader().defaultSectionSize())
+        viewport = cast(Any, table.viewport())
+        vertical_header = cast(Any, table.verticalHeader())
+        row_height = max(1, vertical_header.defaultSectionSize() if vertical_header is not None else 36)
         estimated_visible_rows = max(1, (viewport.height() // row_height) + 2) if viewport else 12
 
-        last_visible_row = self.table_widget.rowAt(
-            self.table_widget.viewport().height() - 1
-        )
+        viewport_height = viewport.height() if viewport is not None else (estimated_visible_rows * row_height)
+        last_visible_row = table.rowAt(viewport_height - 1)
         if last_visible_row < 0:
             last_visible_row = first_visible_row + estimated_visible_rows
 
-        final_row = min(last_visible_row, self.table_widget.rowCount() - 1)
+        final_row = min(last_visible_row, table.rowCount() - 1)
         if max_rows is not None:
             final_row = min(final_row, first_visible_row + max(1, max_rows) - 1)
 
@@ -2610,30 +2692,33 @@ class TableHandler(QObject):
 
     def filter_non_completed_tracks(
         self,
-        tracks: List[Track],
+        tracks: List[Any],
         playlist_context: Optional[Union[Playlist, Album, Dict[str, Any]]] = None,
         *,
         allow_slow_fallback: bool = True,
         reason: str = "filter_non_completed_tracks",
-    ) -> List[Track]:
+    ) -> List[Any]:
         filter_start = time.perf_counter()
         index_start = time.perf_counter()
+        track_entries: List[tuple[Any, Track]] = []
+        for entry in tracks:
+            track = entry.tidal_track if isinstance(entry, DownloadItem) else entry
+            if isinstance(track, Track):
+                track_entries.append((entry, track))
+
         indexed_stems, indexed_track_ids = self._build_existing_playlist_file_index(
-            tracks,
+            [track for _, track in track_entries],
             playlist_context,
             include_track_id_tags=allow_slow_fallback,
         )
         index_elapsed_ms = (time.perf_counter() - index_start) * 1000.0
 
-        non_completed_tracks: List[Track] = []
+        non_completed_tracks: List[Any] = []
         skipped_by_stem = 0
         skipped_by_track_id = 0
         slow_fallback_checks = 0
 
-        for track in tracks:
-            if not isinstance(track, Track):
-                continue
-
+        for original_entry, track in track_entries:
             if indexed_stems:
                 candidate_stems = {
                     self._normalize_stem_for_match(
@@ -2651,12 +2736,12 @@ class TableHandler(QObject):
                 continue
 
             if not allow_slow_fallback:
-                non_completed_tracks.append(track)
+                non_completed_tracks.append(original_entry)
                 continue
 
             slow_fallback_checks += 1
             if not self.is_track_completed(track, playlist_context):
-                non_completed_tracks.append(track)
+                non_completed_tracks.append(original_entry)
 
         elapsed_ms = (time.perf_counter() - filter_start) * 1000
         if (
@@ -2734,7 +2819,23 @@ class TableHandler(QObject):
             and results_array[0].get("type") == "spotify_track"
         )
 
-        base_headers = [
+        if is_spotify_track_list:
+            base_headers = [
+                "#",
+                "Title",
+                "Artists",
+                "Album",
+                "Release Year",
+                "BPM",
+                "Spotify Key",
+                "TIDAL Key",
+                "Genre",
+                "Label",
+                "Length",
+                "Quality",
+            ]
+        else:
+            base_headers = [
             "#",
             "Title",
             "Artists",
@@ -2746,7 +2847,7 @@ class TableHandler(QObject):
             "Label",
             "Length",
             "Quality",
-        ]
+            ]
         column_headers = base_headers + ["Status"]
         table.setColumnCount(len(column_headers))
         table.setHorizontalHeaderLabels(column_headers)
@@ -2794,10 +2895,14 @@ class TableHandler(QObject):
                 candidates_list = []
                 linked_tidal_id = None
                 spotify_track_data_for_cover: Optional[Dict[str, Any]] = None
+                spotify_track_data_to_use: Dict[str, Any] = {}
+                derived_status = "not_linked"
 
                 try:
                     if is_spotify_track_list:
                         original_spotify_track_data = item.get("data", {})
+                        if not isinstance(original_spotify_track_data, dict):
+                            original_spotify_track_data = {}
                         spotify_track_id = original_spotify_track_data.get("id")
                         spotify_track_data_to_use = original_spotify_track_data
                         spotify_track_data_for_cover = spotify_track_data_to_use
@@ -2840,8 +2945,6 @@ class TableHandler(QObject):
                                 persisted_link_status = None
 
                             # 3. Determine Status
-                            derived_status = "not_linked"
-
                             if tidal_track_obj:
                                 linked_tidal_id = str(tidal_track_obj.id)
                                 track_id_for_download_check = linked_tidal_id
@@ -2916,6 +3019,9 @@ class TableHandler(QObject):
                         metadata_values = self._get_requested_metadata_values(
                             tidal_track_obj
                         )
+                        spotify_key_text = self._format_spotify_key_for_table(
+                            spotify_track_data_to_use
+                        )
                         rowData = [
                             str(index + 1),
                             spotify_track_data_to_use.get("name", "N/A"),
@@ -2923,6 +3029,7 @@ class TableHandler(QObject):
                             album_name,
                             metadata_values["release_year"],
                             metadata_values["bpm"],
+                            spotify_key_text,
                             metadata_values["key"],
                             metadata_values["genre"],
                             metadata_values["label"],
@@ -3408,10 +3515,13 @@ class TableHandler(QObject):
 
         table._update_row_appearance_for_row(row_index)
 
-    def refresh_view_for_pending_downloads(self, tracks_in_queue: List[Track]):
+    def refresh_view_for_pending_downloads(self, tracks_in_queue: List[Any]):
         if not self.table_widget:
             return
-        for i, track in enumerate(tracks_in_queue):
+        for i, entry in enumerate(tracks_in_queue):
+            track = entry.tidal_track if isinstance(entry, DownloadItem) else entry
+            if not isinstance(track, Track):
+                continue
             row = self._find_row_for_track_id(str(track.id))
             if row is not None:
                 status_item = self.table_widget.item(row, self.column_indices["Status"])

@@ -38,6 +38,8 @@ from .metadata.album import AlbumMetadata
 from .metadata.track import TrackMetadata
 from .metadata.tagger import tag_file
 from .model import Album, Artist, Playlist, StreamUrl, Track
+from .download_item import DownloadItem
+from .metadata.enrichment import MISSING_METADATA_TEXT, format_spotify_key
 from .paths import get_user_download_path
 from .printf import *
 from .tidal import TIDAL_API, SETTINGS, AudioQuality, Type
@@ -621,7 +623,43 @@ def __parseContributors__(
         return None
 
 
-def create_streamrip_metadata(track: Track, album: Album) -> TrackMetadata:
+def _extract_download_item_context(download_item: Optional[Any]) -> Dict[str, Any]:
+    if not isinstance(download_item, DownloadItem):
+        return {}
+    spotify_key = format_spotify_key(download_item.spotify_key, download_item.spotify_mode, use_camelot_key=False)
+    return {
+        "source_platform": download_item.source_platform,
+        "source_track_id": download_item.source_track_id,
+        "spotify_key": None if spotify_key == MISSING_METADATA_TEXT else spotify_key,
+        "spotify_track_id": download_item.source_track_id if download_item.source_platform == "spotify" else None,
+    }
+
+
+def _apply_download_item_metadata_override(
+    streamrip_meta: TrackMetadata,
+    download_item: Optional[Any],
+) -> None:
+    context = _extract_download_item_context(download_item)
+    if not context:
+        return
+
+    tidal_key = streamrip_meta.key
+    spotify_key = context.get("spotify_key")
+    streamrip_meta.tidal_key = tidal_key
+    if context.get("source_platform") == "spotify":
+        streamrip_meta.source_platform = "SPOTIFY"
+        streamrip_meta.spotify_track_id = context.get("spotify_track_id")
+        if context.get("source_track_id"):
+            streamrip_meta.source_track_id = context.get("source_track_id")
+        if spotify_key:
+            streamrip_meta.spotify_key = spotify_key
+            streamrip_meta.key = spotify_key
+            streamrip_meta.key_source = "spotify"
+        else:
+            streamrip_meta.key_source = "tidal" if tidal_key else None
+
+
+def create_streamrip_metadata(track: Track, album: Album, download_item: Optional[Any] = None) -> TrackMetadata:
     """
     Converts tidal-dl's Track and Album models to streamrip's Metadata models.
     This acts as a bridge between the two systems.
@@ -636,6 +674,7 @@ def create_streamrip_metadata(track: Track, album: Album) -> TrackMetadata:
     # Step 2: Create the streamrip TrackMetadata object
     # We adapt the logic from streamrip's `from_tidal` classmethod for tracks
     track_meta = TrackMetadata.from_tidal(album_meta, track)
+    _apply_download_item_metadata_override(track_meta, download_item)
 
     # Step 3: Manually add any extra information if needed
     # For example, streamrip's model can hold composer, which we get from contributors
@@ -674,6 +713,7 @@ def __setMetaData__(
     filepath: str,
     contributors: Optional[Dict[str, Any]], # Kept for potential future use, but logic is now in bridge
     lyrics: Optional[str], # Kept for potential future use
+    download_item: Optional[Any] = None,
 ):
     """
     This function now uses the advanced streamrip tagging engine.
@@ -711,7 +751,7 @@ def __setMetaData__(
     cover_path = None  # Initialize cover_path to None
     try:
         # Step 1: Create the rich streamrip metadata object
-        streamrip_meta = create_streamrip_metadata(track, album_obj)
+        streamrip_meta = create_streamrip_metadata(track, album_obj, download_item)
         
         # Add lyrics if available
         if lyrics:
@@ -1022,11 +1062,14 @@ def downloadTrack(
     userProgress: Optional[Any] = None,
     partSize: int = 1048576,
     downloadQuality: Optional[str] = None,
+    download_item: Optional[Any] = None,
 ):
     check = False
     actual_download_part_path = None
     try:
         track = __validateTrackObject__(track)
+        if isinstance(download_item, DownloadItem):
+            download_item.tidal_track = track
         assert isinstance(
             track, Track
         ), f"Validation failed, expected Track, got {type(track)}"
@@ -1253,6 +1296,8 @@ def downloadTrack(
                 logger.info(
                     f"{os.path.basename(existing_playlist_track_path)} (skip:already exists in playlist folder!)"
                 )
+                if isinstance(download_item, DownloadItem) and download_item.source_platform == "spotify":
+                    __setMetaData__(cast(Track, track), album, existing_playlist_track_path, None, "", download_item)
                 return True, ""
 
         phase_started = _log_phase_start(
@@ -1280,6 +1325,8 @@ def downloadTrack(
 
         if should_skip_existing_file:
             logger.info(f"{os.path.basename(path)} (skip:already exists!)")
+            if isinstance(download_item, DownloadItem) and download_item.source_platform == "spotify":
+                __setMetaData__(cast(Track, track), album, path, None, "", download_item)
             return True, ""
 
         actual_download_part_path = path + ".part"
@@ -1410,7 +1457,7 @@ def downloadTrack(
             track,
             f"path={path!r}",
         )
-        __setMetaData__(cast(Track, track), album, path, contributors, lyrics)
+        __setMetaData__(cast(Track, track), album, path, contributors, lyrics, download_item)
         _log_phase_end(
             "metadata_set",
             phase_started,

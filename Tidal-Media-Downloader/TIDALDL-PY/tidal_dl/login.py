@@ -12,6 +12,12 @@ import time
 from tidal_dl.tidal import TIDAL_API
 from tidal_dl.settings import SETTINGS, TOKEN
 from tidal_dl.paths import getSettingsFilePath, getTokenPath
+from tidal_dl.trial_token import (
+    apply_trial_token_if_available,
+    clear_trial_token_runtime,
+    is_trial_token_active,
+    persist_trial_token,
+)
 from tidal_dl.printf import Printf
 from tidal_dl import apiKey
 from tidal_dl.logging_config import setup_logging
@@ -59,6 +65,7 @@ def initialize_and_login():
     setup_logging()
     SETTINGS.read(getSettingsFilePath())
     TOKEN.read(getTokenPath())
+    apply_trial_token_if_available(TOKEN)
     
     all_keys = apiKey.getItems()
 
@@ -115,6 +122,12 @@ def saveToken():
             TOKEN.expiresAfter = int(time.time()) + int(TIDAL_API.key.expiresIn)
             
         TOKEN.apiKeyIndex = SETTINGS.apiKeyIndex if isinstance(SETTINGS.apiKeyIndex, int) else 0
+
+        if is_trial_token_active():
+            persist_trial_token(TOKEN)
+            logger.info("Temporary TIDAL trial token data saved to isolated DPAPI storage.")
+            return
+
         TOKEN.save()
         logger.info("TIDAL token data saved successfully.")
     except Exception as e:
@@ -182,6 +195,9 @@ def getLoginUrl():
     Gets the login URL for web-based authentication.
     It iterates through all valid API keys until one succeeds.
     """
+    if is_trial_token_active():
+        clear_trial_token_runtime(TOKEN, delete_local=True)
+
     all_keys = apiKey.getItems()
     if not all_keys:
         raise RuntimeError("No TIDAL API key profiles are available.")

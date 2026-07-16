@@ -36,7 +36,7 @@ Usage example:
 import os
 import logging
 import time
-from typing import List, Dict, Optional, Any, Set
+from typing import List, Dict, Optional, Any, Set, cast
 
 # Third-party imports
 from PyQt6 import QtWidgets, QtCore, QtGui
@@ -126,9 +126,11 @@ class SplitterTable(QtWidgets.QTableWidget):
         self.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self.setLineWidth(0)
         self.setMouseTracking(True)
-        self.viewport().setMouseTracking(True)
-        self.viewport().setAutoFillBackground(False)
-        self.viewport().setStyleSheet("background: transparent; border: none;")
+        viewport = cast(Any, self.viewport())
+        if viewport is not None:
+            viewport.setMouseTracking(True)
+            viewport.setAutoFillBackground(False)
+            viewport.setStyleSheet("background: transparent; border: none;")
         self.setSortingEnabled(True)  # Enable sorting
         self.linking_gui_handler = None
         self.setColumnCount(len(column_names))
@@ -168,7 +170,9 @@ class SplitterTable(QtWidgets.QTableWidget):
         self.setShowGrid(False)
         self.setGridStyle(Qt.PenStyle.NoPen)
         self.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.verticalScrollBar().setSingleStep(14)
+        vertical_scrollbar = cast(Any, self.verticalScrollBar())
+        if vertical_scrollbar is not None:
+            vertical_scrollbar.setSingleStep(14)
         # Use ExtendedSelection to allow selecting multiple rows.
         self.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
@@ -375,10 +379,11 @@ class SplitterTable(QtWidgets.QTableWidget):
 
     def _get_length_column_index(self) -> int:
         """Resolve and cache the current 'Length' column index based on header labels."""
-        header_signature = tuple(
-            self.horizontalHeaderItem(i).text() if self.horizontalHeaderItem(i) else ""
-            for i in range(self.columnCount())
-        )
+        header_signature_parts: List[str] = []
+        for i in range(self.columnCount()):
+            header_item = self.horizontalHeaderItem(i)
+            header_signature_parts.append(header_item.text() if header_item else "")
+        header_signature = tuple(header_signature_parts)
         if header_signature != self._cached_header_signature:
             self._cached_header_signature = header_signature
             self._cached_length_col_index = -1
@@ -435,7 +440,7 @@ class SplitterTable(QtWidgets.QTableWidget):
 
         quality_col_index = self._get_column_index_by_header("Quality")
         total_cols = self.columnCount()
-        centered_headers = {"Release Year", "BPM", "Key", "Length"}
+        centered_headers = {"Release Year", "BPM", "Key", "Spotify Key", "TIDAL Key", "Length"}
 
         for col_index in range(total_cols):
             cell_text = str(row_data[col_index]) if col_index < len(row_data) else ""
@@ -537,7 +542,7 @@ class SplitterTable(QtWidgets.QTableWidget):
             self.updateCell(row, col, text)
 
     # Fix parameter name mismatch: col -> column
-    def item(self, row, column):
+    def item(self, row: int, column: int) -> Optional[QTableWidgetItem]:
         """
         Returns the QTableWidgetItem at (row, column) or None if invalid.
         """
@@ -546,8 +551,7 @@ class SplitterTable(QtWidgets.QTableWidget):
         except Exception:
             return None
 
-    # Fix parameter name mismatch: event -> e
-    def mousePressEvent(self, e: QtGui.QMouseEvent | None):
+    def mousePressEvent(self, e: QtGui.QMouseEvent | None) -> None:
         """
         Records the initial mouse position and the row index at the press location.
         """
@@ -575,9 +579,12 @@ class SplitterTable(QtWidgets.QTableWidget):
                 for col in range(self.columnCount()):
                     item = self.item(affected_row, col)
                     if item is not None:
-                        self.viewport().update(self.visualItemRect(item))
+                        viewport = cast(Any, self.viewport())
+                        if viewport is not None:
+                            viewport.update(self.visualItemRect(item))
 
-    def wheelEvent(self, e: QtGui.QWheelEvent | None) -> None:
+    def wheelEvent(self, a0: QtGui.QWheelEvent | None) -> None:
+        e = a0
         if e is not None:
             playlist_header = getattr(self, "_playlist_header_widget", None)
             consume = getattr(playlist_header, "consume_wheel_event_for_header", None)
@@ -586,8 +593,7 @@ class SplitterTable(QtWidgets.QTableWidget):
                 return
         super().wheelEvent(e)
 
-    # Fix parameter name mismatch: event -> e
-    def mouseMoveEvent(self, e: QtGui.QMouseEvent | None):
+    def mouseMoveEvent(self, e: QtGui.QMouseEvent | None) -> None:
         """
         Monitors mouse movement to determine if the user is dragging.
         """
@@ -605,8 +611,7 @@ class SplitterTable(QtWidgets.QTableWidget):
         self._set_hovered_row(-1)
         super().leaveEvent(a0)
 
-    # Fix parameter name mismatch: event -> e
-    def mouseReleaseEvent(self, e: QtGui.QMouseEvent | None):
+    def mouseReleaseEvent(self, e: QtGui.QMouseEvent | None) -> None:
         """
         If the mouse is released without dragging, applies standard row selection behavior.
         Supports SHIFT-click for range selection and Ctrl/Cmd-click for toggling rows.
@@ -805,8 +810,13 @@ class SplitterTable(QtWidgets.QTableWidget):
                 item.setForeground(foreground_brush)  # Set foreground
                 item.setData(QtCore.Qt.ItemDataRole.ForegroundRole, foreground_brush)
 
-        key_col = self._get_column_index_by_header("Key")
-        if key_col >= 0:
+        for key_col in [
+            self._get_column_index_by_header("Key"),
+            self._get_column_index_by_header("Spotify Key"),
+            self._get_column_index_by_header("TIDAL Key"),
+        ]:
+            if key_col < 0:
+                continue
             key_item = self.item(row, key_col)
             if key_item:
                 camelot_color = self._get_camelot_wheel_color(key_item.text())
@@ -860,8 +870,7 @@ class SplitterTable(QtWidgets.QTableWidget):
         if clipboard:
             clipboard.setText(text)
 
-    # Fix parameter name mismatch: event -> e
-    def keyPressEvent(self, e: QtGui.QKeyEvent | None):
+    def keyPressEvent(self, e: QtGui.QKeyEvent | None) -> None:
         """
         Captures Ctrl+A to select all rows and Ctrl+C to copy selected rows.
         """
@@ -892,8 +901,7 @@ class SplitterTable(QtWidgets.QTableWidget):
             # It's unlikely Qt would pass None here, but this handles the type hint possibility.
             super().keyPressEvent(e)
 
-    # Fix parameter name mismatch: event -> e
-    def resizeEvent(self, e: QtGui.QResizeEvent | None):  # Correct type hint
+    def resizeEvent(self, e: QtGui.QResizeEvent | None) -> None:  # Correct type hint
         """
         Overridden resize event.
         IMPORTANT: We NO LONGER call adjustColumnWidths here automatically,
@@ -905,7 +913,7 @@ class SplitterTable(QtWidgets.QTableWidget):
 
         # --- Debounced logger Logic (Keep this) ---
         # Calculate resize information for logger purposes only
-        viewport = self.viewport()
+        viewport = cast(Any, self.viewport())
         if not viewport:
             return  # Add check
         total_width = viewport.width()
@@ -1039,7 +1047,9 @@ class SplitterTable(QtWidgets.QTableWidget):
                 break
 
         self.apply_column_visibility_preferences()
-        self.viewport().update()
+        viewport = cast(Any, self.viewport())
+        if viewport is not None:
+            viewport.update()
 
     def _show_column_visibility_menu(self, position: QtCore.QPoint) -> None:
         header = self.horizontalHeader()
@@ -1123,10 +1133,11 @@ class SplitterTable(QtWidgets.QTableWidget):
             if num_cols <= 0:
                 return
 
-            header_signature = tuple(
-                self.horizontalHeaderItem(i).text() if self.horizontalHeaderItem(i) else ""
-                for i in range(num_cols)
-            )
+            header_signature_parts: List[str] = []
+            for i in range(num_cols):
+                header_item = self.horizontalHeaderItem(i)
+                header_signature_parts.append(header_item.text() if header_item else "")
+            header_signature = tuple(header_signature_parts)
             if header_signature == self._last_adjust_signature:
                 self.apply_column_visibility_preferences()
                 logger.debug(
@@ -1181,6 +1192,8 @@ class SplitterTable(QtWidgets.QTableWidget):
                 "Release Year": 92,
                 "BPM": 70,
                 "Key": 64,
+                "Spotify Key": 92,
+                "TIDAL Key": 82,
                 "Genre": 175,
                 "Label": 170,
                 "Length": 72,

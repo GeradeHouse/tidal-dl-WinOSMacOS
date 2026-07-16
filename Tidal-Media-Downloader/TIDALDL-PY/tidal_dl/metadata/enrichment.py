@@ -10,6 +10,21 @@ logger = logging.getLogger(__name__)
 
 MISSING_METADATA_TEXT = "-"
 
+SPOTIFY_PITCH_CLASSES = (
+    "C",
+    "C#",
+    "D",
+    "D#",
+    "E",
+    "F",
+    "F#",
+    "G",
+    "G#",
+    "A",
+    "A#",
+    "B",
+)
+
 _CAMELOT_KEYS: Dict[tuple[str, str], str] = {
     ("B", "major"): "1B",
     ("F#", "major"): "2B",
@@ -210,6 +225,40 @@ def format_track_key(track: Any, *, use_camelot_key: bool = False) -> str:
     if scale:
         return f"{key} {scale}"
     return key
+
+
+def format_spotify_key(
+    key_number: int | None,
+    mode: int | None,
+    *,
+    use_camelot_key: bool = False,
+) -> str:
+    """Format Spotify Audio Features key/mode values for display or tagging."""
+    try:
+        key_int = int(key_number) if key_number is not None else -1
+    except (TypeError, ValueError):
+        return MISSING_METADATA_TEXT
+
+    if key_int < 0 or key_int >= len(SPOTIFY_PITCH_CLASSES):
+        return MISSING_METADATA_TEXT
+
+    try:
+        mode_int = int(mode) if mode is not None else None
+    except (TypeError, ValueError):
+        mode_int = None
+
+    if mode_int not in (0, 1):
+        return MISSING_METADATA_TEXT
+
+    key = SPOTIFY_PITCH_CLASSES[key_int]
+    scale = "major" if mode_int == 1 else "minor"
+
+    if use_camelot_key:
+        camelot_key = _CAMELOT_KEYS.get((key, scale))
+        if camelot_key:
+            return camelot_key
+
+    return f"{key} {scale}"
 
 
 def format_bpm(track: Any) -> str:

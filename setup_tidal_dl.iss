@@ -180,12 +180,51 @@ end;
 // --------------------------------------------------------------------------
 // 2. INSTALLATION STEPS
 // --------------------------------------------------------------------------
+procedure MaterializeTidalTrialTokenBundle;
+var
+  SourceDir, SourceBundle, TargetDir, TargetBundle, MarkerPath, MarkerJson: String;
+begin
+  SourceDir := ExpandConstant('{app}\_internal\tidal_dl\trial_token');
+  SourceBundle := SourceDir + '\.tidal-dl.trial-token.bundle';
+  TargetDir := ExpandConstant('{localappdata}\Tidal-DL GUI\trial-token');
+  TargetBundle := TargetDir + '\.tidal-dl.trial-token.bundle';
+  MarkerPath := TargetDir + '\.tidal-dl.trial-token-install.json';
+
+  if FileExists(SourceBundle) then
+  begin
+    ForceDirectories(TargetDir);
+
+    if not FileExists(TargetBundle) then
+    begin
+      FileCopy(SourceBundle, TargetBundle, False);
+    end;
+
+    if not FileExists(MarkerPath) then
+    begin
+      MarkerJson :=
+        '{' + #13#10 +
+        '  "installedAt": "' + GetDateTimeString('yyyy-mm-dd"T"hh:nn:ss', '-', ':') + '",' + #13#10 +
+        '  "maxAgeDays": 10' + #13#10 +
+        '}';
+
+      SaveStringToFile(MarkerPath, MarkerJson, False);
+    end;
+
+    DeleteFile(SourceBundle);
+    RemoveDir(SourceDir);
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
     // Apply the custom icon to the Music folder after files are installed
     CustomizeMusicFolderIcon;
+
+    #ifdef TidalTokenTrialEnabled
+    MaterializeTidalTrialTokenBundle;
+    #endif
   end;
 end;
 

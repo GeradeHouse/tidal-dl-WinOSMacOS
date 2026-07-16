@@ -127,6 +127,9 @@ param(
     [switch]$DeployInstalled,
 
     [Parameter(Mandatory=$false)]
+    [switch]$TidalToken,
+
+    [Parameter(Mandatory=$false)]
     [Alias("h")]
     [switch]$Help
 )
@@ -143,6 +146,15 @@ $ProjectSourceDir = Join-Path $ScriptDir "Tidal-Media-Downloader" # Path to the 
 $PackageDir = Join-Path $ProjectSourceDir "TIDALDL-PY" # Path to the main Python package
 $AigpyDir = Join-Path $ScriptDir "AIGPY"
 $AigpyPackageInit = Join-Path $AigpyDir "aigpy\__init__.py"
+$TidalTrialTokenSourcePath = Join-Path $ScriptDir ".tidal-dl.token.json"
+$TidalTrialTokenBuildDir = Join-Path $ProjectSourceDir "build\trial-token"
+$TidalTrialTokenBundlePath = Join-Path $TidalTrialTokenBuildDir ".tidal-dl.trial-token.bundle"
+$TidalTrialTokenBundleDest = "tidal_dl/trial_token"
+
+if ($TidalToken -and -not (Test-Path -LiteralPath $TidalTrialTokenSourcePath)) {
+    Write-Error "The -TidalToken flag was specified, but the token file was not found at '$TidalTrialTokenSourcePath'."
+    exit 1
+}
 
 function Get-AppVersionFromIss {
     param(
@@ -160,6 +172,79 @@ function Get-AppVersionFromIss {
     }
 
     return $null
+}
+
+function New-TidalTrialTokenBundle {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$PythonExe
+    )
+
+    $outputDir = Split-Path -Path $OutputPath -Parent
+    if (-not (Test-Path -LiteralPath $outputDir)) {
+        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+    }
+
+    $bundleScript = @'
+import base64
+import hashlib
+import json
+import os
+import sys
+
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
+
+source_path = sys.argv[1]
+output_path = sys.argv[2]
+
+with open(source_path, "rb") as handle:
+    plaintext = handle.read()
+
+key = get_random_bytes(32)
+nonce = get_random_bytes(12)
+salt = get_random_bytes(16)
+iterations = 200000
+
+secret_parts = ("Tidal", "-", "DL", "::", "GUI", "::", "Trial", "::", "Token", "::", "2026")
+secret = hashlib.sha256("".join(secret_parts).encode("utf-8")).digest()
+mask = hashlib.pbkdf2_hmac("sha256", secret, salt, iterations, dklen=len(key))
+wrapped_key = bytes(a ^ b for a, b in zip(key, mask))
+
+cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+cipher.update(b"Tidal-DL GUI trial token bundle v1")
+ciphertext, tag = cipher.encrypt_and_digest(plaintext)
+
+def b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+bundle = {
+    "version": 1,
+    "algorithm": "AES-256-GCM",
+    "kdf": "PBKDF2-HMAC-SHA256",
+    "iterations": iterations,
+    "salt": b64(salt),
+    "nonce": b64(nonce),
+    "tag": b64(tag),
+    "wrappedKey": b64(wrapped_key),
+    "ciphertext": b64(ciphertext),
+}
+
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
+with open(output_path, "w", encoding="utf-8") as handle:
+    json.dump(bundle, handle, separators=(",", ":"))
+'@
+
+    & $PythonExe -c $bundleScript $SourcePath $OutputPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create encrypted TIDAL trial token bundle."
+    }
 }
 
 # --- 0. Automatic Version Increment ---
@@ -823,6 +908,7 @@ Write-Host "Build Type: $BuildType" -ForegroundColor Cyan
 Write-Host "Build Mode: $BuildMode" -ForegroundColor Cyan
 Write-Host "Testing Mode: $(if ($Testing) {'Enabled'} else {'Disabled'})" -ForegroundColor Cyan
 Write-Host "Deploy Installed: $(if ($DeployInstalled) {'Enabled'} else {'Disabled'})" -ForegroundColor Cyan
+Write-Host "TIDAL Trial Token: $(if ($TidalToken) {'Enabled'} else {'Disabled'})" -ForegroundColor Cyan
 Write-Host "Project Source: $ProjectSourceDir" -ForegroundColor Cyan
 Write-Host "-------------------------------------"
 
@@ -875,6 +961,21 @@ else {
 }
 
 Write-Host "Cleanup complete." -ForegroundColor Green
+
+if ($TidalToken) {
+    Write-Host "Creating encrypted TIDAL trial token bundle..." -ForegroundColor Yellow
+    try {
+        New-TidalTrialTokenBundle `
+            -SourcePath $TidalTrialTokenSourcePath `
+            -OutputPath $TidalTrialTokenBundlePath `
+            -PythonExe $PythonPath
+
+        Write-Host "Encrypted TIDAL trial token bundle created: $TidalTrialTokenBundlePath" -ForegroundColor Green
+    } catch {
+        Write-Error "Failed to create encrypted TIDAL trial token bundle: $($_.Exception.Message)"
+        exit 1
+    }
+}
 
 # --- Versioned Splash Image ---
 try {
@@ -930,6 +1031,12 @@ $pyinstallerArgs = @(
     "--add-data", "TIDALDL-PY/tidal_dl/assets/images;tidal_dl/assets/images",
     "--add-data", "TIDALDL-PY/tidal_dl/metadata;tidal_dl/metadata"
 )
+
+if ($TidalToken) {
+    $pyinstallerArgs += @("--add-data", "$TidalTrialTokenBundlePath;$TidalTrialTokenBundleDest")
+    Write-Host "Bundling encrypted TIDAL trial token artifact. Raw token file is not added to PyInstaller." -ForegroundColor Yellow
+}
+
 # Add build type specific flag
 if ($BuildType -eq "Windowed") {
     # --noconsole is preferred alias for --windowed on Windows
@@ -1111,6 +1218,11 @@ if ($Installer) {
         if ($Testing) {
             Write-Host "Enabling 'TestingMode' in Inno Setup..." -ForegroundColor Yellow
             $isccArgs += "/DTestingMode"
+        }
+
+        if ($TidalToken) {
+            Write-Host "Enabling 'TidalTokenTrialEnabled' in Inno Setup..." -ForegroundColor Yellow
+            $isccArgs += "/DTidalTokenTrialEnabled"
         }
 
         # Add the script file

@@ -13,6 +13,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, Qt
 # Local imports
 from tidal_dl.tidal import Playlist, AudioQuality, Track, TIDAL_API, Type
 from tidal_dl.printf import Printf
+from tidal_dl.download_item import DownloadItem
 import aigpy
 
 if TYPE_CHECKING:
@@ -357,7 +358,7 @@ class TaskQueueManager(QObject):
                 if all_tracks_meta:
                     persisted_links = self.main_view.link_persistence_manager.get_links_for_playlist(playlist_id)
                     persisted_tracks = persisted_links.get("tracks", {})
-                    linked_tracks_for_download: List[Track] = []
+                    linked_tracks_for_download: List[Any] = []
 
                     for meta in all_tracks_meta:
                         spotify_id = meta.get("id") if isinstance(meta, dict) else None
@@ -383,7 +384,7 @@ class TaskQueueManager(QObject):
                         if requires_manual_review:
                             continue
 
-                        track_obj = self._deserialize_persisted_track(
+                        track_obj = self._download_item_from_persisted_link(
                             playlist_id,
                             str(spotify_id),
                             link_info,
@@ -521,6 +522,33 @@ class TaskQueueManager(QObject):
             return track_obj
 
         return None
+
+    def _download_item_from_persisted_link(
+        self,
+        playlist_id: str,
+        spotify_id: str,
+        link_info: Dict[str, Any],
+    ) -> Optional[DownloadItem]:
+        track_obj = self._deserialize_persisted_track(playlist_id, spotify_id, link_info)
+        if not isinstance(track_obj, Track):
+            return None
+
+        spotify_details = link_info.get("spotify_track_details")
+        if not isinstance(spotify_details, dict):
+            spotify_details = {}
+        features = spotify_details.get("spotify_audio_features")
+        if not isinstance(features, dict):
+            features = {}
+
+        return DownloadItem(
+            tidal_track=track_obj,
+            source_platform="spotify",
+            source_track_id=str(spotify_id or spotify_details.get("id") or "") or None,
+            spotify_key=features.get("key") if features else spotify_details.get("spotify_key"),
+            spotify_mode=features.get("mode") if features else spotify_details.get("spotify_mode"),
+            spotify_tempo=features.get("tempo") if features else spotify_details.get("spotify_tempo"),
+            spotify_metadata=spotify_details,
+        )
 
     @pyqtSlot(str, str, str)
     def _finish_job_no_download_needed(
@@ -662,7 +690,7 @@ class TaskQueueManager(QObject):
                     return
 
                 unlinked_tracks_for_worker = []
-                linked_tracks_for_download = []
+                linked_tracks_for_download: List[Any] = []
                 persisted_links = self.main_view.link_persistence_manager.get_links_for_playlist(playlist_id)
                 persisted_tracks = persisted_links.get("tracks", {})
                 persisted_track_hits = 0
@@ -701,7 +729,7 @@ class TaskQueueManager(QObject):
                                 continue
 
                             # It has valid link details and is confirmed/confident -> Add to download
-                            track_obj = self._deserialize_persisted_track(
+                            track_obj = self._download_item_from_persisted_link(
                                 str(playlist_id),
                                 str(spotify_id),
                                 link_info,
@@ -770,7 +798,7 @@ class TaskQueueManager(QObject):
                         post_link_start = time.perf_counter()
                         try:
                             logger.info("Pre-download linking finished. Gathering all linked tracks for download.")
-                            all_linked_tracks: List[Track] = []
+                            all_linked_tracks: List[Any] = []
                             newly_linked_links = self.main_view.link_persistence_manager.get_links_for_playlist(
                                 playlist_id
                             )
@@ -790,13 +818,13 @@ class TaskQueueManager(QObject):
                                     continue
 
                                 try:
-                                    track_obj = self._deserialize_persisted_track(
+                                    track_obj = self._download_item_from_persisted_link(
                                         str(playlist_id),
                                         str(spotify_track_id),
                                         saved_link,
                                     )
-                                    if isinstance(track_obj, Track):
-                                        all_linked_tracks.append(cast(Track, track_obj))
+                                    if isinstance(track_obj, DownloadItem):
+                                        all_linked_tracks.append(cast(Any, track_obj))
                                 except Exception as exc:
                                     logger.warning(
                                         "Failed to deserialize newly linked track for download | "
@@ -1038,7 +1066,7 @@ class TaskQueueManager(QObject):
 
         threading.Thread(target=fetch_tracks_thread, daemon=True).start()
 
-    def _start_download(self, tracks: List[Track], playlist_context: Union[Playlist, Dict[str, Any]], quality: Optional[AudioQuality]):
+    def _start_download(self, tracks: List[Any], playlist_context: Union[Playlist, Dict[str, Any]], quality: Optional[AudioQuality]):
         """Starts the DownloadWorker with the prepared list of tracks."""
         if not tracks:
             logger.warning("No tracks to download.")
