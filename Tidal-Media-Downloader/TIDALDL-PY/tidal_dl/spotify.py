@@ -82,7 +82,7 @@ from tidal_dl.paths import getProfilePath
 import aigpy
 
 from tidal_dl.tidal import TIDAL_API, Track
-from typing import Any, Dict, List, Optional, Sequence, Union, cast
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union, cast
 
 SPOTIFY_REQUIRED_SCOPES = (
     "playlist-read-private",
@@ -155,6 +155,16 @@ class SpotifyAPI:
             )
             return False
         return True
+
+    def _get_access_token_callable(self, auth_manager: Any) -> Optional[Callable[..., Any]]:
+        access_token_fn = getattr(auth_manager, "get_access_token", None)
+        if not callable(access_token_fn):
+            return None
+        return cast(Callable[..., Any], access_token_fn)
+
+    @staticmethod
+    def _normalize_token_info(token_info: Any) -> Optional[Dict[str, Any]]:
+        return token_info if isinstance(token_info, dict) else None
 
     def _clear_cached_token(self) -> None:
         try:
@@ -484,12 +494,13 @@ class SpotifyAPI:
             logger.error("Spotify auth manager is None after initialization attempt.")
             return False
         auth_manager = cast(Any, self.auth_manager)
-        get_access_token = getattr(auth_manager, "get_access_token", None)
-        if not callable(get_access_token):
+        access_token_fn = self._get_access_token_callable(auth_manager)
+        if access_token_fn is None:
             logger.error("Spotify auth manager does not expose get_access_token.")
             return False
+        get_access_token: Callable[..., Any] = access_token_fn
 
-        token_info = None
+        token_info: Optional[Dict[str, Any]] = None
         max_retries = 2  # Reduce retries slightly, maybe 2 is enough
         retry_delay = 3
 
@@ -506,7 +517,9 @@ class SpotifyAPI:
                     logger.debug(
                         "Calling auth_manager.get_access_token(check_cache=True) for silent check."
                     )
-                    token_info = get_access_token(check_cache=True)
+                    token_info = self._normalize_token_info(
+                        get_access_token(check_cache=True)
+                    )
                     if not token_info:
                         logger.warning(
                             "Silent authentication failed (cache/refresh unsuccessful or requires interaction)."
@@ -518,7 +531,9 @@ class SpotifyAPI:
                     logger.debug(
                         "Calling auth_manager.get_access_token(check_cache=False) for interactive check."
                     )
-                    token_info = get_access_token(check_cache=False)
+                    token_info = self._normalize_token_info(
+                        get_access_token(check_cache=False)
+                    )
                     if not token_info:
                         # This means the interactive flow (browser) was likely cancelled or failed.
                         logger.warning(
@@ -550,12 +565,15 @@ class SpotifyAPI:
                         if not init_result:
                             return False
                         auth_manager = cast(Any, self.auth_manager)
-                        get_access_token = getattr(auth_manager, "get_access_token", None)
-                        if not callable(get_access_token):
+                        reauth_access_token_fn = self._get_access_token_callable(auth_manager)
+                        if reauth_access_token_fn is None:
                             logger.error("Spotify auth manager does not expose get_access_token after reinitialization.")
                             return False
+                        get_reauth_access_token: Callable[..., Any] = reauth_access_token_fn
 
-                        token_info = get_access_token(check_cache=False)
+                        token_info = self._normalize_token_info(
+                            get_reauth_access_token(check_cache=False)
+                        )
                         if not token_info or not self._token_has_required_scopes(token_info):
                             logger.error("Spotify reauthorization did not grant the required playlist scopes.")
                             return "SPOTIFY_SCOPE_UPGRADE_REQUIRED"
