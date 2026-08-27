@@ -814,6 +814,63 @@ class SpotifyAPI:
             logger.error("Check log file for detailed traceback.")
             return None
 
+    def get_playlist_track_ids(self, playlist_id):
+        """Fetches current non-local track IDs without loading full track metadata."""
+        if not self._ensure_client():
+            logger.error("Authentication failed within get_playlist_track_ids.")
+            return None
+
+        track_ids = []
+        try:
+            offset = 0
+            limit = 100
+
+            while True:
+                results = self.sp.playlist_items(
+                    playlist_id,
+                    fields="items(is_local,track(id)),next",
+                    limit=limit,
+                    offset=offset,
+                    additional_types=["track"],
+                )
+                if not results:
+                    break
+
+                items = results.get("items", [])
+                if not items:
+                    break
+
+                for item in items:
+                    if not isinstance(item, dict) or item.get("is_local"):
+                        continue
+
+                    track_info = item.get("track")
+                    if not isinstance(track_info, dict):
+                        continue
+
+                    track_id = track_info.get("id")
+                    if track_id:
+                        track_ids.append(str(track_id))
+
+                if results.get("next"):
+                    offset += limit
+                else:
+                    break
+
+            return track_ids
+        except spotipy.SpotifyException as e:
+            logger.error(
+                f"Spotify API error fetching playlist track IDs: {e.http_status} - {e.msg}",
+                exc_info=True,
+            )
+            return None
+        except Exception as e:
+            logger.error(
+                f"Unexpected error fetching playlist track IDs: {e}",
+                exc_info=True,
+            )
+            return None
+
     def get_playlist_tracks(self, playlist_id):
         """Fetches all tracks for a given Spotify playlist ID."""
         logger.debug(f"get_playlist_tracks called for playlist_id: {playlist_id}")

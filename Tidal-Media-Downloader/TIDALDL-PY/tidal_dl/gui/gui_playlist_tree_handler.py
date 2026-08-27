@@ -15,12 +15,14 @@ import json
 import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import threading
 import datetime
 import time
 from typing import TYPE_CHECKING, List, Dict, Optional, Any, Set, Iterator, cast
 
+import aigpy
 from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtCore import (
     QObject,
@@ -291,6 +293,7 @@ class PlaylistTreeHandler(QObject):
     tidalPlaylistSelected = pyqtSignal(Playlist)
     spotifyPlaylistSelected = pyqtSignal(dict)
     requestTidalPlaylistDownload = pyqtSignal(list, AudioQuality)
+    playlistDownloadCountResolved = pyqtSignal(str, int, int)
 
     def __init__(
         self,
@@ -324,6 +327,23 @@ class PlaylistTreeHandler(QObject):
         self._geometry_update_timer.setSingleShot(True)
         self._geometry_update_timer.setInterval(16)
         self._geometry_update_timer.timeout.connect(self._flush_pending_geometry_updates)
+
+        self._download_count_cache: Dict[str, tuple[int, int]] = {}
+        self._download_count_generation: Dict[str, int] = {}
+        self._download_count_pending: Set[str] = set()
+        self._download_count_visibility_timer = QTimer(self)
+        self._download_count_visibility_timer.setSingleShot(True)
+        self._download_count_visibility_timer.setInterval(120)
+        self._download_count_visibility_timer.timeout.connect(
+            self._queue_visible_download_counts
+        )
+        self.playlistDownloadCountResolved.connect(
+            self._on_playlist_download_count_resolved
+        )
+        self._download_count_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="playlist-download-count",
+        )
 
         # --- Load Default Playlist Icon ---
         self.default_playlist_icon = QIcon(QPixmap())
@@ -516,6 +536,9 @@ class PlaylistTreeHandler(QObject):
         if viewport is None:
             return False
 
+        if watched is viewport and event.type() == QEvent.Type.Resize:
+            self._schedule_visible_download_count_scan()
+
         if watched is viewport and event.type() in (
             QEvent.Type.DragEnter,
             QEvent.Type.DragMove,
@@ -659,6 +682,7 @@ class PlaylistTreeHandler(QObject):
 
     def set_table_handler(self, handler: "TableHandler") -> None:
         self.table_handler = handler
+        self._schedule_visible_download_count_scan()
 
     def set_linking_handler(self, handler: "LinkingGuiHandler") -> None:
         self.linking_handler = handler
@@ -676,6 +700,8 @@ class PlaylistTreeHandler(QObject):
         self.tree_widget.customContextMenuRequested.connect(self._handleTreeContextMenu)
         self.tree_widget.itemExpanded.connect(self._loadVisibleSpotifyIcons)
         self.tree_widget.itemCollapsed.connect(self._loadVisibleSpotifyIcons)
+        self.tree_widget.itemExpanded.connect(self._schedule_visible_download_count_scan)
+        self.tree_widget.itemCollapsed.connect(self._schedule_visible_download_count_scan)
         scrollbar = self.tree_widget.verticalScrollBar()
         if scrollbar:
             scrollbar.valueChanged.connect(self._onSpotifyScroll)
@@ -689,11 +715,409 @@ class PlaylistTreeHandler(QObject):
 
     # --- Helper Methods ---
     def _get_name_from_item(self, item: QTreeWidgetItem) -> str:
-        """Safely retrieves the name of the playlist item, checking for custom widget."""
+        """Safely retrieves the playlist name without sidebar status text."""
+        descriptor = self._get_playlist_download_count_descriptor(item)
+        if descriptor is not None:
+            return descriptor[2]
+
         widget = self.tree_widget.itemWidget(item, 0)
         if isinstance(widget, PlaylistItemProgressWidget):
             return widget.name_label.text()
         return item.text(0)
+
+    @staticmethod
+    def _format_playlist_item_text(
+        playlist_name: str,
+        total_tracks: int,
+        downloaded_tracks: Optional[int] = None,
+    ) -> str:
+        safe_total = max(0, int(total_tracks))
+        if safe_total == 0:
+            return f"{playlist_name} (0/0 downloaded)"
+
+        if downloaded_tracks is None or downloaded_tracks < 0:
+            return f"{playlist_name} ({safe_total} total)"
+
+        safe_downloaded = min(
+            max(0, int(downloaded_tracks)),
+            safe_total,
+        )
+        return f"{playlist_name} ({safe_downloaded}/{safe_total} downloaded)"
+
+    def _get_playlist_download_count_descriptor(
+        self,
+        item: QTreeWidgetItem,
+    ) -> Optional[tuple[str, str, str, int, Any]]:
+        item_data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(item_data, dict):
+            return None
+
+        service = str(item_data.get("type") or "").strip().lower()
+        if service == "tidal":
+            playlist_obj = item_data.get("data")
+            if not isinstance(playlist_obj, Playlist):
+                return None
+
+            playlist_id = str(
+                getattr(playlist_obj, "uuid", "") or ""
+            ).strip()
+            if not playlist_id:
+                return None
+
+            playlist_name = str(
+                getattr(playlist_obj, "title", "") or "Untitled Playlist"
+            )
+            try:
+                total_tracks = max(
+                    0,
+                    int(getattr(playlist_obj, "numberOfTracks", 0) or 0),
+                )
+            except (TypeError, ValueError):
+                total_tracks = 0
+
+            return (
+                playlist_id,
+                "tidal",
+                playlist_name,
+                total_tracks,
+                playlist_obj,
+            )
+
+        if service == "spotify":
+            playlist_data = item_data.get("data")
+            if not isinstance(playlist_data, dict):
+                return None
+
+            playlist_id = str(playlist_data.get("id") or "").strip()
+            if not playlist_id:
+                return None
+
+            playlist_name = str(
+                playlist_data.get("name") or "Unknown Name"
+            )
+            try:
+                total_tracks = max(
+                    0,
+                    int(playlist_data.get("tracks_total") or 0),
+                )
+            except (TypeError, ValueError):
+                total_tracks = 0
+
+            return (
+                playlist_id,
+                "spotify",
+                playlist_name,
+                total_tracks,
+                {
+                    "type": "spotify",
+                    "data": dict(playlist_data),
+                },
+            )
+
+        return None
+
+    def _schedule_visible_download_count_scan(self, *_args: Any) -> None:
+        if self.table_handler is None:
+            return
+        self._download_count_visibility_timer.start()
+
+    def _invalidate_playlist_download_count(self, playlist_id: str) -> None:
+        normalized_playlist_id = str(playlist_id or "").strip()
+        if not normalized_playlist_id:
+            return
+
+        self._download_count_generation[normalized_playlist_id] = (
+            self._download_count_generation.get(normalized_playlist_id, 0) + 1
+        )
+        self._download_count_cache.pop(normalized_playlist_id, None)
+        self._download_count_pending.discard(normalized_playlist_id)
+
+    @pyqtSlot()
+    def _queue_visible_download_counts(self) -> None:
+        if self.table_handler is None:
+            return
+
+        viewport = self.tree_widget.viewport()
+        if viewport is None:
+            return
+
+        viewport_rect = viewport.rect()
+
+        for playlist_id, item in list(self.id_to_item.items()):
+            if playlist_id in self.active_job_actions:
+                continue
+
+            try:
+                if item.isHidden():
+                    continue
+                item_rect = self.tree_widget.visualItemRect(item)
+            except RuntimeError:
+                continue
+
+            if not item_rect.isValid() or not viewport_rect.intersects(item_rect):
+                continue
+
+            descriptor = self._get_playlist_download_count_descriptor(item)
+            if descriptor is None:
+                continue
+
+            (
+                descriptor_playlist_id,
+                service,
+                _playlist_name,
+                total_tracks,
+                playlist_context,
+            ) = descriptor
+            if descriptor_playlist_id != playlist_id:
+                continue
+
+            cached = self._download_count_cache.get(playlist_id)
+            if cached is not None and cached[1] == total_tracks:
+                continue
+
+            if playlist_id in self._download_count_pending:
+                continue
+
+            if total_tracks <= 0:
+                self._download_count_cache[playlist_id] = (0, 0)
+                continue
+
+            generation = self._download_count_generation.get(playlist_id, 0)
+            self._download_count_pending.add(playlist_id)
+
+            try:
+                self._download_count_executor.submit(
+                    self._playlist_download_count_task,
+                    playlist_id,
+                    generation,
+                    service,
+                    playlist_context,
+                    total_tracks,
+                )
+            except RuntimeError:
+                self._download_count_pending.discard(playlist_id)
+
+    def _playlist_download_count_task(
+        self,
+        playlist_id: str,
+        generation: int,
+        service: str,
+        playlist_context: Any,
+        total_tracks: int,
+    ) -> None:
+        downloaded_tracks = -1
+        try:
+            downloaded_tracks = self._compute_playlist_download_count(
+                playlist_id,
+                service,
+                playlist_context,
+                total_tracks,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Playlist download count failed | playlist_id=%s service=%s error=%s",
+                playlist_id,
+                service,
+                exc,
+                exc_info=True,
+            )
+
+        with contextlib.suppress(RuntimeError):
+            self.playlistDownloadCountResolved.emit(
+                playlist_id,
+                int(generation),
+                int(downloaded_tracks),
+            )
+
+    def _compute_playlist_download_count(
+        self,
+        playlist_id: str,
+        service: str,
+        playlist_context: Any,
+        total_tracks: int,
+    ) -> int:
+        table_handler = self.table_handler
+        if table_handler is None:
+            return -1
+
+        tracks_for_check: List[Track] = []
+
+        if service == "tidal":
+            fetched_tracks, _ = TIDAL_API.getItems(
+                str(playlist_id),
+                Type.Playlist,
+            )
+            tracks_for_check = [
+                track
+                for track in (fetched_tracks or [])
+                if isinstance(track, Track)
+            ]
+
+        elif service == "spotify":
+            spotify_track_ids = (
+                self.main_view.spotify_api.get_playlist_track_ids(
+                    playlist_id
+                )
+            )
+            if spotify_track_ids is None:
+                return -1
+
+            persisted_links = (
+                self.main_view.link_persistence_manager.get_links_for_playlist(
+                    playlist_id
+                )
+            )
+            persisted_tracks = (
+                persisted_links.get("tracks", {})
+                if isinstance(persisted_links, dict)
+                else {}
+            )
+            if not isinstance(persisted_tracks, dict):
+                persisted_tracks = {}
+
+            for spotify_track_id in spotify_track_ids:
+                normalized_spotify_id = str(
+                    spotify_track_id or ""
+                ).strip()
+                if not normalized_spotify_id:
+                    continue
+
+                link_info = persisted_tracks.get(normalized_spotify_id)
+                if not isinstance(link_info, dict):
+                    continue
+
+                details = link_info.get("tidal_track_details")
+                if not isinstance(details, dict):
+                    continue
+
+                score = link_info.get("score")
+                candidates = link_info.get("candidates") or []
+                link_status = link_info.get("link_status")
+                requires_manual_review = (
+                    score is not None
+                    and isinstance(score, (int, float))
+                    and score > 1
+                    and isinstance(candidates, list)
+                    and len(candidates) > 1
+                    and link_status
+                    not in {"manual_linked", "candidate_confirmed"}
+                )
+                if requires_manual_review:
+                    continue
+
+                try:
+                    track_obj = aigpy.model.dictToModel(
+                        details,
+                        Track(),
+                    )
+                except Exception:
+                    continue
+
+                if not isinstance(track_obj, Track):
+                    continue
+
+                if getattr(track_obj, "id", None) is None:
+                    fallback_id = str(
+                        link_info.get("tidal_track_id")
+                        or details.get("id")
+                        or ""
+                    ).strip()
+                    if fallback_id:
+                        setattr(track_obj, "id", fallback_id)
+
+                if getattr(track_obj, "id", None) is None:
+                    continue
+
+                tracks_for_check.append(track_obj)
+
+        else:
+            return -1
+
+        if not tracks_for_check:
+            return 0
+
+        non_completed_tracks = table_handler.filter_non_completed_tracks(
+            tracks_for_check,
+            playlist_context,
+            allow_slow_fallback=False,
+            reason="playlist_tree_download_count",
+        )
+        downloaded_tracks = len(tracks_for_check) - len(
+            non_completed_tracks
+        )
+        return min(
+            max(0, downloaded_tracks),
+            max(0, int(total_tracks)),
+        )
+
+    @pyqtSlot(str, int, int)
+    def _on_playlist_download_count_resolved(
+        self,
+        playlist_id: str,
+        generation: int,
+        downloaded_tracks: int,
+    ) -> None:
+        if generation != self._download_count_generation.get(
+            playlist_id,
+            0,
+        ):
+            return
+
+        self._download_count_pending.discard(playlist_id)
+
+        if playlist_id in self.active_job_actions:
+            return
+
+        item = self.id_to_item.get(playlist_id)
+        if item is None:
+            return
+
+        descriptor = self._get_playlist_download_count_descriptor(item)
+        if descriptor is None:
+            return
+
+        (
+            descriptor_playlist_id,
+            _service,
+            playlist_name,
+            total_tracks,
+            _playlist_context,
+        ) = descriptor
+        if descriptor_playlist_id != playlist_id:
+            return
+
+        normalized_downloaded = (
+            -1
+            if downloaded_tracks < 0
+            else min(
+                max(0, int(downloaded_tracks)),
+                max(0, total_tracks),
+            )
+        )
+        self._download_count_cache[playlist_id] = (
+            normalized_downloaded,
+            total_tracks,
+        )
+
+        item_text = self._format_playlist_item_text(
+            playlist_name,
+            total_tracks,
+            normalized_downloaded,
+        )
+        self.original_item_data.setdefault(
+            playlist_id,
+            {},
+        )["text"] = item_text
+
+        with contextlib.suppress(RuntimeError):
+            item.setText(0, item_text)
+
+        widget = self.item_widgets.get(playlist_id)
+        if widget is not None:
+            with contextlib.suppress(RuntimeError):
+                widget.name_label.setText(item_text)
+                widget.updateGeometry()
+                widget.update()
 
     @pyqtSlot(str)
     def _apply_playlist_filter(self, text: Optional[str] = None) -> None:
@@ -731,6 +1155,8 @@ class PlaylistTreeHandler(QObject):
             if child:
                 process_item(child)
 
+        self._schedule_visible_download_count_scan()
+
     @pyqtSlot()
     def onPlaylistDisplaySettingsChanged(self):
         """Called when playlist display settings (like icon size) change."""
@@ -749,6 +1175,22 @@ class PlaylistTreeHandler(QObject):
     @pyqtSlot()
     def refreshTidalPlaylists(self) -> None:
         logger.info("Refreshing TIDAL playlists...")
+
+        stale_tidal_ids: List[str] = []
+        for index in range(self.tidal_root_item.childCount()):
+            child = self.tidal_root_item.child(index)
+            if child is None:
+                continue
+            descriptor = self._get_playlist_download_count_descriptor(child)
+            if descriptor is not None:
+                stale_tidal_ids.append(descriptor[0])
+
+        for playlist_id in stale_tidal_ids:
+            self._invalidate_playlist_download_count(playlist_id)
+            self.id_to_item.pop(playlist_id, None)
+            self.item_widgets.pop(playlist_id, None)
+            self.original_item_data.pop(playlist_id, None)
+
         while self.tidal_root_item.childCount() > 0:
             self.tidal_root_item.removeChild(self.tidal_root_item.child(0))
         self.tidal_root_item.setText(0, "Tidal Playlists (Loading...)")
@@ -797,12 +1239,25 @@ class PlaylistTreeHandler(QObject):
                 if not playlist_uuid:
                     continue
 
+                try:
+                    total_tracks = max(
+                        0,
+                        int(getattr(playlist_summary, "numberOfTracks", 0) or 0),
+                    )
+                except (TypeError, ValueError):
+                    total_tracks = 0
+
+                item_text = self._format_playlist_item_text(
+                    playlist_name,
+                    total_tracks,
+                )
+
                 self.original_item_data[str(playlist_uuid)] = {
-                    "text": playlist_name,
+                    "text": item_text,
                     "icon": self.default_music_icon
                 }
                 
-                widget = PlaylistItemProgressWidget(playlist_name)
+                widget = PlaylistItemProgressWidget(item_text)
                 self.tree_widget.setItemWidget(item, 0, widget)
                 self.id_to_item[str(playlist_uuid)] = item
                 self.item_widgets[str(playlist_uuid)] = widget
@@ -940,8 +1395,14 @@ class PlaylistTreeHandler(QObject):
         if not updated_playlist:
             return
 
+        self._invalidate_playlist_download_count(normalized_playlist_id)
+        self._schedule_visible_download_count_scan()
+
         playlist_name = str(updated_playlist.get("name") or "Unknown Name")
-        item_text = f"{playlist_name} ({updated_playlist.get('tracks_total', '?')})"
+        item_text = self._format_playlist_item_text(
+            playlist_name,
+            next_total,
+        )
 
         self.original_item_data.setdefault(normalized_playlist_id, {})["text"] = item_text
 
@@ -1007,6 +1468,12 @@ class PlaylistTreeHandler(QObject):
                 for playlist in self._spotify_playlist_cache
                 if isinstance(playlist, dict)
             ]
+
+            if refresh_cache:
+                for playlist_id in previous_spotify_playlist_ids:
+                    if playlist_id:
+                        self._invalidate_playlist_download_count(playlist_id)
+
             for playlist_id in previous_spotify_playlist_ids:
                 if playlist_id:
                     self.id_to_item.pop(playlist_id, None)
@@ -1074,7 +1541,28 @@ class PlaylistTreeHandler(QObject):
                 if not playlist_id:
                     continue
 
-                item_text = f"{playlist_name} ({p_data.get('tracks_total', '?')})"
+                try:
+                    total_tracks = max(
+                        0,
+                        int(p_data.get("tracks_total") or 0),
+                    )
+                except (TypeError, ValueError):
+                    total_tracks = 0
+
+                cached_count = self._download_count_cache.get(
+                    str(playlist_id)
+                )
+                downloaded_tracks = (
+                    cached_count[0]
+                    if cached_count is not None
+                    and cached_count[1] == total_tracks
+                    else None
+                )
+                item_text = self._format_playlist_item_text(
+                    playlist_name,
+                    total_tracks,
+                    downloaded_tracks,
+                )
                 
                 current_icon = self.default_music_icon
                 images = p_data.get("images", [])
@@ -1994,6 +2482,7 @@ class PlaylistTreeHandler(QObject):
     @pyqtSlot(int)
     def _onSpotifyScroll(self, value: int) -> None:
         self._loadVisibleSpotifyIcons()
+        self._schedule_visible_download_count_scan()
 
     # --- Job Status Updates ---
     @pyqtSlot(str, str, int)
@@ -2045,6 +2534,9 @@ class PlaylistTreeHandler(QObject):
                 original_data = self.original_item_data[playlist_id]
                 if "icon" in original_data:
                     widget.set_icon(original_data["icon"])
+
+        self._invalidate_playlist_download_count(playlist_id)
+        self._schedule_visible_download_count_scan()
 
     @pyqtSlot(str)
     def set_playlist_queued(self, playlist_id: str):
