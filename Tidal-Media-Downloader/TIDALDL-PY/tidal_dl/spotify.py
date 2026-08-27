@@ -39,6 +39,19 @@ from spotipy.client import logger as spotipy_logger
 _original_spotipy_debug = spotipy_logger.debug
 
 
+class _ExpectedAudioFeaturesErrorFilter(logging.Filter):
+    """Hide Spotipy's enormous raw URL log for an optional denied endpoint."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage().lower()
+        except Exception:
+            return True
+        is_audio_features_request = "/audio-features" in message
+        is_expected_denial = "returned 403" in message or "returned 404" in message
+        return not (is_audio_features_request and is_expected_denial)
+
+
 def _spotipy_debug_wrapper(msg, *args, **kwargs):
     """
     Wrapper to conditionally suppress specific spotipy debug messages
@@ -71,6 +84,8 @@ def _spotipy_debug_wrapper(msg, *args, **kwargs):
 
 # Apply the patch
 spotipy_logger.debug = _spotipy_debug_wrapper
+if not any(isinstance(item, _ExpectedAudioFeaturesErrorFilter) for item in spotipy_logger.filters):
+    spotipy_logger.addFilter(_ExpectedAudioFeaturesErrorFilter())
 logger.info(
     "Applied monkey patch to spotipy.client.logger.debug"
 )  # Confirm patch application
@@ -303,8 +318,9 @@ class SpotifyAPI:
                 http_status = getattr(exc, "http_status", None)
                 if http_status in (403, 404):
                     self.audio_features_supported = False
-                    logger.warning(
-                        "Spotify Audio Features unavailable for this app/session (HTTP %s). TIDAL keys will be used as fallback.",
+                    logger.info(
+                        "Spotify Audio Features are unavailable for this app/session (HTTP %s); "
+                        "this optional endpoint is now disabled for the remainder of the session and TIDAL keys will be used.",
                         http_status,
                     )
                     for track_id in chunk:

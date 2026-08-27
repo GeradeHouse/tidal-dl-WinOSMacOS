@@ -397,14 +397,35 @@ class Container(Enum):
 
     def tag_audio(self, audio, tags: list[tuple]):
         for k, v in tags:
-            if k.startswith("TXXX:"):
-                # Handle TXXX frames for custom tags
-                description = k.split(":", 1)[1]
-                txxx = id3.TXXX(encoding=3, desc=description, text=v)
-                audio.add(txxx)
-            else:
-                # Handle regular tags
-                audio[k] = v
+            try:
+                if k.startswith("TXXX:"):
+                    # Handle TXXX frames for custom tags
+                    description = k.split(":", 1)[1]
+                    txxx = id3.TXXX(encoding=3, desc=description, text=v)
+                    audio.add(txxx)
+                else:
+                    # Mutagen requires every MP4 freeform atom value to be bytes.
+                    # Keep this final guard here so newly added custom fields cannot
+                    # accidentally reach MP4Tags as str and fail during rendering.
+                    if k.startswith("----:"):
+                        if isinstance(v, str):
+                            v = v.encode("utf-8")
+                        elif isinstance(v, list):
+                            v = [
+                                item.encode("utf-8") if isinstance(item, str) else item
+                                for item in v
+                            ]
+                    # Handle regular tags
+                    audio[k] = v
+            except Exception:
+                logger.error(
+                    "Metadata assignment failed | key=%r value_type=%s item_types=%s",
+                    k,
+                    type(v).__name__,
+                    [type(item).__name__ for item in v] if isinstance(v, list) else "-",
+                    exc_info=True,
+                )
+                raise
 
     async def embed_cover(self, audio, cover_path):
         if self == Container.FLAC:

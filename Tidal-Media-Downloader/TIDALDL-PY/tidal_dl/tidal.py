@@ -2172,6 +2172,8 @@ class TidalAPI(object):
         ret.trackid = resp.trackid
         ret.soundQuality = resp.audioQuality
         ret.manifestMimeType = resp.manifestMimeType
+        ret.audioMode = resp.audioMode
+        ret.assetPresentation = resp.assetPresentation
 
         if resp.manifest is None:
             raise Exception(f"Manifest is missing for track {id}. User message: {data.get('userMessage', 'N/A')}")
@@ -2198,6 +2200,24 @@ class TidalAPI(object):
         ret.urls = urls
         ret.codec = manifest_data.get("codecs")
         ret.encryptionKey = manifest_data.get("keyId") or manifest_data.get("encryptionKey", "")
+        ret.encryptionType = manifest_data.get("encryptionType")
+        ret.mediaMimeType = manifest_data.get("mimeType")
+
+        logger.info(
+            "TIDAL_PLAYBACK_RESOLVED track_id=%s requested_quality=%s returned_quality=%s "
+            "codec=%s audio_mode=%s asset_presentation=%s manifest_mime=%s media_mime=%s "
+            "encryption_type=%s segment_count=%d",
+            id,
+            quality.value,
+            ret.soundQuality,
+            ret.codec,
+            ret.audioMode,
+            ret.assetPresentation,
+            ret.manifestMimeType,
+            ret.mediaMimeType,
+            ret.encryptionType,
+            len(urls),
+        )
         
         return ret
 

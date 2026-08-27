@@ -1,11 +1,17 @@
 #!/usr/bin/env python
-print("[DEBUG] Importing in main.py")
 import os
 import sys
-print("[DEBUG] Finished importing os, sys in main.py")
 
 # --- START: PYINSTALLER RUNTIME DEBUGGING ---
 def print_pyinstaller_debug_info():
+    """Print bundle internals only when explicitly requested for diagnostics."""
+    if os.environ.get("TIDAL_DL_PYINSTALLER_DEBUG", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return
     print("\n--- PYINSTALLER RUNTIME DEBUG ---")
     print(f"Python Executable: {sys.executable}")
     print(f"sys.frozen: {getattr(sys, 'frozen', 'Not frozen')}")
@@ -55,7 +61,8 @@ try:
     # Set the FFMPEG_BINARY configuration for moviepy
     moviepy.config.FFMPEG_BINARY = ffmpeg_exe
     
-    print(f"[DEBUG] MoviePy's FFMPEG_BINARY set to: {ffmpeg_exe}")
+    if os.environ.get("TIDAL_DL_PYINSTALLER_DEBUG"):
+        print(f"[DEBUG] MoviePy's FFMPEG_BINARY set to: {ffmpeg_exe}")
 except ImportError:
     print("[WARNING] imageio_ffmpeg or moviepy not found. Conversion features may fail.")
 except Exception as e:
@@ -88,13 +95,9 @@ def main():
         pyi_splash.update_text("Loading core components...")
 
     try:
-        print("[DEBUG] About to import tidal_dl.login")
         from tidal_dl.login import initialize_and_login
-        print("[DEBUG] Successfully imported initialize_and_login")
         
-        print("[DEBUG] About to import tidal_dl.gui")
         from tidal_dl.gui import main as gui_main
-        print("[DEBUG] Successfully imported gui_main")
     except ImportError as e:
         print(f"Error: A critical component failed to import: {e}")
         print(f"[DEBUG] Import error details: {type(e).__name__}: {str(e)}")

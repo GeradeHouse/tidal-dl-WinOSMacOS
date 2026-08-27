@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QMenu,
 )
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QPixmap,
     QIcon,
@@ -550,6 +550,11 @@ class CustomQMessageBox:
     Provides standard methods: information, warning, critical, question.
     """
 
+    # Keep Python references to non-modal dialogs until they close. Without
+    # this, a timed notification may be garbage-collected immediately after
+    # the helper returns.
+    _active_timed_dialogs: List[ModernDarkDialog] = []
+
     @staticmethod
     def _get_icon(name: str) -> str:
         """Resolves icon path with fallback."""
@@ -588,6 +593,51 @@ class CustomQMessageBox:
             buttons=["OK"]
         )
         dlg.exec()
+
+    @staticmethod
+    def timed_warning(
+        parent: Optional[QWidget],
+        title: str,
+        main_message: str,
+        informative_text: str = "",
+        icon_path: Optional[str] = None,
+        timeout_ms: int = 30000,
+    ) -> ModernDarkDialog:
+        """Display a non-blocking warning that closes automatically."""
+        icon = icon_path if icon_path else CustomQMessageBox._get_icon("info_icon.png")
+        timeout_ms = max(1, int(timeout_ms))
+        timeout_seconds = max(1, (timeout_ms + 999) // 1000)
+        timeout_note = f"This notification will close automatically after {timeout_seconds} seconds."
+        detail = (
+            f"{informative_text}\n\n{timeout_note}"
+            if informative_text
+            else timeout_note
+        )
+        dlg = ModernDarkDialog(
+            title=title,
+            main_message=main_message,
+            informative_text=detail,
+            icon_path=icon,
+            parent=parent,
+            buttons=["OK"],
+        )
+        dlg.setModal(False)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        CustomQMessageBox._active_timed_dialogs.append(dlg)
+
+        def release_dialog_reference(*_args) -> None:
+            try:
+                CustomQMessageBox._active_timed_dialogs.remove(dlg)
+            except ValueError:
+                pass
+
+        dlg.finished.connect(release_dialog_reference)
+        dlg.destroyed.connect(release_dialog_reference)
+        QTimer.singleShot(timeout_ms, dlg.accept)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        return dlg
 
     @staticmethod
     def critical(parent: Optional[QWidget], title: str, main_message: str, informative_text: str = "", icon_path: Optional[str] = None):

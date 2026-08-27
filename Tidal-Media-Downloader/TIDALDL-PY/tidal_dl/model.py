@@ -32,6 +32,10 @@ class StreamUrl(aigpy.model.ModelBase):
         self.encryptionKey: Optional[str] = None
         self.soundQuality = None
         self.manifestMimeType = None
+        self.audioMode = None
+        self.assetPresentation = None
+        self.encryptionType = None
+        self.mediaMimeType = None
 
 
 class Artist(aigpy.model.ModelBase):

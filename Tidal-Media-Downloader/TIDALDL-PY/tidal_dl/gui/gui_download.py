@@ -81,6 +81,7 @@ class DownloadWorker(QObject):
             f"[DownloadWorker] Started for {len(self.items_to_download)} tracks."
         )
         final_path = None
+        failures: List[tuple[str, str, str]] = []
         try:
             # Set working directory on Windows if needed
             if platform.system() == "Windows":
@@ -107,6 +108,11 @@ class DownloadWorker(QObject):
                         break
 
                 if not isinstance(track_item, Track) or track_item.id is None:
+                    invalid_id = str(getattr(track_item, "id", "unknown") or "unknown")
+                    invalid_title = str(getattr(track_item, "title", "Unknown track") or "Unknown track")
+                    error_msg = "Invalid track data: no usable TIDAL track ID."
+                    failures.append((invalid_id, invalid_title, error_msg))
+                    self.trackFinished.emit(invalid_id, False, error_msg)
                     continue
 
                 track_id_str = str(track_item.id)
@@ -156,10 +162,16 @@ class DownloadWorker(QObject):
                         downloadQuality=self.download_quality,
                         download_item=download_item,
                     )
-                    progress_handler.finish()
+                    if ok:
+                        progress_handler.finish()
+                    else:
+                        failures.append(
+                            (track_id_str, str(track_item.title or track_id_str), err or "Unknown download error")
+                        )
                     self.trackFinished.emit(track_id_str, bool(ok), err or "")
                 except Exception as e:
                     logger.exception("Download failed for track %s", track_id_str)
+                    failures.append((track_id_str, str(track_item.title or track_id_str), str(e)))
                     self.trackFinished.emit(track_id_str, False, str(e))
                     # IMPORTANT: do not raise; continue with next track
 
@@ -228,6 +240,25 @@ class DownloadWorker(QObject):
                     else "Download Stopped"
                 )
                 self.allFinished.emit(status_title, False, status_msg, "")
+            elif failures:
+                failure_lines = [
+                    f"- {title} (TIDAL ID {track_id}): {error}"
+                    for track_id, title, error in failures[:10]
+                ]
+                if len(failures) > 10:
+                    failure_lines.append(f"- ...and {len(failures) - 10} more failure(s); see the log for details.")
+                failure_message = (
+                    f"{len(failures)} of {len(self.items_to_download)} track(s) failed. "
+                    "The download is not considered successful.\n\n"
+                    + "\n".join(failure_lines)
+                )
+                logger.error(
+                    "DOWNLOAD_BATCH_FAILED failed=%d total=%d details=%s",
+                    len(failures),
+                    len(self.items_to_download),
+                    failures,
+                )
+                self.allFinished.emit("Download Failed", False, failure_message, final_path or "")
             else:
                 self.allFinished.emit("Download Success!", True, "", final_path or "")
 
@@ -878,8 +909,18 @@ class DownloadHandler(QObject):
 
         # The TaskQueueManager will now handle the final dialog
         if self.main_view.task_queue_manager and self.main_view.task_queue_manager.is_running_task:
-             # Let the queue manager know this job is done
+            # Finish the queue job before presenting any notification. The
+            # warning is deliberately non-modal, so the next queued playlist
+            # can start immediately and never depends on user interaction.
             self.main_view.task_queue_manager.job_finished()
+            if not result:
+                CustomQMessageBox.timed_warning(
+                    self.main_view,
+                    title or "Download Failed",
+                    "One or more tracks were not downloaded successfully.",
+                    msg or "See the download log for details.",
+                    timeout_ms=30000,
+                )
         else:
             # If not part of a queue, show the dialog as before
             if result:
@@ -894,4 +935,9 @@ class DownloadHandler(QObject):
             elif title in ["Download Stopped", "Download Cancelled", "Download Error"]:
                 CustomQMessageBox.information(self.main_view, title, "Download Status", msg or f"Download failed: {msg}")
             else:
-                CustomQMessageBox.information(self.main_view, "Download Failed", "Download Error", f"Download failed: {msg}")
+                CustomQMessageBox.warning(
+                    self.main_view,
+                    "Download Failed",
+                    "One or more tracks were not downloaded successfully.",
+                    msg or "See the download log for details.",
+                )

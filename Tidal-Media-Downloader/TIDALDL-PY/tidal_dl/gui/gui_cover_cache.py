@@ -14,6 +14,7 @@ import tempfile
 import pickle
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Dict, Optional
 import os
@@ -45,6 +46,9 @@ def _setup_gui_logging():
 _setup_gui_logging()
 
 CACHE_FILE_NAME = "cover_cache.pkl"
+CACHE_SAVE_DEBOUNCE_SECONDS = 0.75
+CACHE_REPLACE_MAX_ATTEMPTS = 6
+CACHE_REPLACE_BASE_DELAY_SECONDS = 0.15
 
 TIDAL_COVER_ID_RE = re.compile(
     r"^[0-9a-fA-F]{8}[-/][0-9a-fA-F]{4}[-/][0-9a-fA-F]{4}[-/][0-9a-fA-F]{4}[-/][0-9a-fA-F]{12}$"
@@ -79,6 +83,10 @@ class CoverCache:
         
         logger.debug(f"[CoverCache] Initializing cache singleton instance at {self.cache_path}")
         self._lock = threading.Lock()
+        # Cover workers finish concurrently. Keep disk replacement serialized and
+        # coalesce bursts so a large playlist does not rewrite the pickle once per row.
+        self._save_lock = threading.Lock()
+        self._save_timer: Optional[threading.Timer] = None
         self.cache: Dict[str, bytes] = self._load_cache()
         self.max_size = max_size
         self._initialized = True
@@ -116,34 +124,78 @@ class CoverCache:
     def _save_cache(self):
         with self._lock:
             cache_copy = self.cache.copy()
+            self._save_timer = None
         
         logger.debug(f"[CoverCache] Saving {len(cache_copy)} items to {self.cache_path}")
-        temp_path = None
-        try:
-            # Ensure directory exists (just in case)
-            os.makedirs(self.cache_path.parent, exist_ok=True)
+        with self._save_lock:
+            temp_path = None
+            try:
+                # Ensure directory exists (just in case)
+                os.makedirs(self.cache_path.parent, exist_ok=True)
 
-            with tempfile.NamedTemporaryFile(
-                "wb",
-                dir=self.cache_path.parent,
-                prefix=f"{self.cache_path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as f:
-                pickle.dump(cache_copy, f)
-                temp_path = Path(f.name)
-            os.replace(temp_path, self.cache_path)
-            logger.debug("[CoverCache] Successfully saved cache to disk.")
-        except IOError as e:
-            logger.error(f"Could not save cover cache: {e}")
-        except Exception as e:
-            logger.error(f"Unexpected error saving cover cache: {e}", exc_info=True)
-        finally:
-            if temp_path and temp_path.exists():
-                try:
-                    temp_path.unlink()
-                except OSError as cleanup_error:
-                    logger.warning(f"[CoverCache] Could not remove temporary cache file: {cleanup_error}")
+                with tempfile.NamedTemporaryFile(
+                    "wb",
+                    dir=self.cache_path.parent,
+                    prefix=f"{self.cache_path.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as f:
+                    pickle.dump(cache_copy, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                    temp_path = Path(f.name)
+
+                for attempt in range(1, CACHE_REPLACE_MAX_ATTEMPTS + 1):
+                    try:
+                        if self.cache_path.exists():
+                            try:
+                                os.chmod(self.cache_path, 0o600)
+                            except OSError:
+                                pass
+                        os.replace(temp_path, self.cache_path)
+                        temp_path = None
+                        logger.debug("[CoverCache] Successfully saved cache to disk.")
+                        break
+                    except PermissionError as replace_error:
+                        if attempt >= CACHE_REPLACE_MAX_ATTEMPTS:
+                            raise
+                        delay = CACHE_REPLACE_BASE_DELAY_SECONDS * attempt
+                        logger.debug(
+                            "[CoverCache] Cache destination temporarily locked; retrying "
+                            "atomic replace in %.2fs (attempt %d/%d): %s",
+                            delay,
+                            attempt,
+                            CACHE_REPLACE_MAX_ATTEMPTS,
+                            replace_error,
+                        )
+                        time.sleep(delay)
+            except IOError as e:
+                logger.warning(
+                    "Cover cache could not be persisted after retries; continuing with the in-memory cache: %s",
+                    e,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Unexpected error saving cover cache; continuing with the in-memory cache: %s",
+                    e,
+                    exc_info=True,
+                )
+            finally:
+                if temp_path and temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except OSError as cleanup_error:
+                        logger.debug(f"[CoverCache] Could not remove temporary cache file: {cleanup_error}")
+
+    def _schedule_save(self) -> None:
+        """Debounce persistent writes triggered by concurrent cover workers."""
+        with self._lock:
+            if self._save_timer is not None:
+                self._save_timer.cancel()
+            timer = threading.Timer(CACHE_SAVE_DEBOUNCE_SECONDS, self._save_cache)
+            timer.daemon = True
+            self._save_timer = timer
+            timer.start()
 
     def get(self, url: str) -> Optional[QPixmap]:
         with self._lock:
@@ -179,7 +231,7 @@ class CoverCache:
 
             self.cache[url] = image_data
         
-        self._save_cache()
+        self._schedule_save()
 
 
 class CoverArtWorkerSignals(QObject):

@@ -745,8 +745,7 @@ def __setMetaData__(
     # Determine the correct album object
     album_obj = album if album is not None else track.album
     if not isinstance(album_obj, Album):
-        logger.error("Could not determine a valid album object for metadata. Aborting tagging.")
-        return
+        raise ValueError("Could not determine a valid album object for metadata tagging.")
 
     cover_path = None  # Initialize cover_path to None
     try:
@@ -863,11 +862,12 @@ def __setMetaData__(
                         "If this path is inside OneDrive, consider pausing sync or "
                         "using a non-synced download folder."
                     )
-                break
+                raise
 
     except Exception as e:
         logger.error(f"Failed to tag file '{os.path.basename(filepath)}' using streamrip engine: {e}", exc_info=True)
         logger.error(f"Failed to write metadata for '{track.title}': {e}")
+        raise
     finally:
         # Clean up the temporary cover file
         if cover_path and os.path.exists(cover_path):
@@ -1200,21 +1200,120 @@ def downloadTrack(
             "stream_url_fetch",
             phase_started,
             track,
-            f"retrieved_quality={getattr(stream, 'soundQuality', None)} codec={getattr(stream, 'codec', None)} segment_count={len(getattr(stream, 'urls', []) or [])}",
+            f"retrieved_quality={getattr(stream, 'soundQuality', None)} codec={getattr(stream, 'codec', None)} "
+            f"audio_mode={getattr(stream, 'audioMode', None)} manifest_mime={getattr(stream, 'manifestMimeType', None)} "
+            f"media_mime={getattr(stream, 'mediaMimeType', None)} encryption_type={getattr(stream, 'encryptionType', None)} "
+            f"segment_count={len(getattr(stream, 'urls', []) or [])}",
         )
 
-        requested_lossless_stream = q in {
+        strict_lossless_requested = intended_quality in {
+            AudioQuality.HIGH,
             AudioQuality.LOSSLESS,
             AudioQuality.HI_RES_LOSSLESS,
-        }
+        } and not requested_mp3
         resolved_codec = str(getattr(stream, "codec", "") or "").lower()
         resolved_sound_quality = str(getattr(stream, "soundQuality", "") or "").upper()
+        resolved_audio_mode = str(getattr(stream, "audioMode", "") or "").upper()
+        resolved_manifest_mime = str(getattr(stream, "manifestMimeType", "") or "")
+        resolved_media_mime = str(getattr(stream, "mediaMimeType", "") or "")
+        advertised_quality = str(getattr(track, "audioQuality", "") or "").upper()
+        media_metadata = getattr(track, "mediaMetadata", {})
+        advertised_tags = media_metadata.get("tags", []) if isinstance(media_metadata, dict) else []
 
-        if requested_lossless_stream and "mp4a" in resolved_codec:
-            raise ValueError(
-                "Requested FLAC/lossless quality, but TIDAL returned an AAC stream "
-                f"(requested={q.value}, retrieved={resolved_sound_quality}, codec={resolved_codec}). "
-                "Aborting instead of silently saving an .m4a file."
+        if strict_lossless_requested:
+            accepted_lossless_qualities = {
+                "HIGH",
+                "LOSSLESS",
+                "HI_RES",
+                "HI_RES_LOSSLESS",
+            }
+            codec_is_flac = "flac" in resolved_codec
+            if intended_quality == AudioQuality.HI_RES_LOSSLESS:
+                quality_is_lossless = resolved_sound_quality in {
+                    "HI_RES",
+                    "HI_RES_LOSSLESS",
+                }
+            else:
+                quality_is_lossless = resolved_sound_quality in accepted_lossless_qualities
+
+            # TIDAL's current playback API uses HIGH for CD-quality FLAC on some
+            # account/profile combinations while older responses use LOSSLESS.
+            # Retry URL resolution only (no media bytes are downloaded) with
+            # HIGH when the legacy LOSSLESS request resolves to a compressed
+            # stream. The retry is accepted only if its manifest is truly FLAC.
+            if q == AudioQuality.LOSSLESS and (not codec_is_flac or not quality_is_lossless):
+                logger.warning(
+                    "DL_STRICT_QUALITY_RETRY track_id=%s initial_request=%s returned_quality=%s "
+                    "codec=%s retry_request=%s reason=legacy_lossless_alias_returned_non_flac",
+                    track.id,
+                    q.value,
+                    resolved_sound_quality or "UNKNOWN",
+                    resolved_codec or "UNKNOWN",
+                    AudioQuality.HIGH.value,
+                )
+                retry_stream = TIDAL_API.getStreamUrl(str(track.id), AudioQuality.HIGH)
+                retry_codec = str(getattr(retry_stream, "codec", "") or "").lower()
+                retry_quality = str(getattr(retry_stream, "soundQuality", "") or "").upper()
+                logger.info(
+                    "DL_STRICT_QUALITY_RETRY_RESULT track_id=%s retry_request=%s returned_quality=%s "
+                    "codec=%s audio_mode=%s manifest_mime=%s media_mime=%s segment_count=%d",
+                    track.id,
+                    AudioQuality.HIGH.value,
+                    retry_quality or "UNKNOWN",
+                    retry_codec or "UNKNOWN",
+                    getattr(retry_stream, "audioMode", None),
+                    getattr(retry_stream, "manifestMimeType", None),
+                    getattr(retry_stream, "mediaMimeType", None),
+                    len(getattr(retry_stream, "urls", []) or []),
+                )
+                if "flac" in retry_codec and retry_quality in accepted_lossless_qualities:
+                    stream = retry_stream
+                    resolved_codec = retry_codec
+                    resolved_sound_quality = retry_quality
+                    resolved_audio_mode = str(getattr(stream, "audioMode", "") or "").upper()
+                    resolved_manifest_mime = str(getattr(stream, "manifestMimeType", "") or "")
+                    resolved_media_mime = str(getattr(stream, "mediaMimeType", "") or "")
+                    codec_is_flac = True
+                    quality_is_lossless = True
+                    logger.info(
+                        "DL_STRICT_QUALITY_RETRY_ACCEPTED track_id=%s requested=%s playback_request=%s "
+                        "returned_quality=%s codec=%s",
+                        track.id,
+                        q.value,
+                        AudioQuality.HIGH.value,
+                        resolved_sound_quality,
+                        resolved_codec,
+                    )
+
+            if not codec_is_flac or not quality_is_lossless:
+                url_host = "-"
+                first_url = str(getattr(stream, "url", "") or "")
+                if "://" in first_url:
+                    url_host = first_url.split("/", 3)[2]
+                diagnostic = (
+                    f"track_id={track.id}, requested={q.value}, returned_quality={resolved_sound_quality or 'UNKNOWN'}, "
+                    f"codec={resolved_codec or 'UNKNOWN'}, audio_mode={resolved_audio_mode or 'UNKNOWN'}, "
+                    f"manifest_mime={resolved_manifest_mime or 'UNKNOWN'}, media_mime={resolved_media_mime or 'UNKNOWN'}, "
+                    f"url_host={url_host}, advertised_track_quality={advertised_quality or 'UNKNOWN'}, "
+                    f"advertised_tags={advertised_tags!r}"
+                )
+                logger.error(
+                    "DL_STRICT_QUALITY_REJECTED %s. The playback response is authoritative; "
+                    "catalog/table quality metadata only describes advertised availability.",
+                    diagnostic,
+                )
+                raise ValueError(
+                    "FLAC download was requested, but TIDAL did not return a FLAC/lossless stream "
+                    f"({diagnostic}). No compressed file was downloaded and no conversion to FLAC was attempted."
+                )
+
+            logger.info(
+                "DL_STRICT_QUALITY_ACCEPTED track_id=%s requested=%s returned_quality=%s codec=%s audio_mode=%s",
+                track.id,
+                q.value,
+                resolved_sound_quality,
+                resolved_codec,
+                resolved_audio_mode or "UNKNOWN",
             )
 
         artists = TIDAL_API.getArtistsName(cast(List[Artist], getattr(track, "artists", [])))
