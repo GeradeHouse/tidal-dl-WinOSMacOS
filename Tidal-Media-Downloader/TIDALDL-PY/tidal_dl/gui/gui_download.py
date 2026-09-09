@@ -82,6 +82,7 @@ class DownloadWorker(QObject):
         )
         final_path = None
         failures: List[tuple[str, str, str]] = []
+        completed_source_ids = set()
         try:
             # Set working directory on Windows if needed
             if platform.system() == "Windows":
@@ -116,6 +117,15 @@ class DownloadWorker(QObject):
                     continue
 
                 track_id_str = str(track_item.id)
+                source_identity = (
+                    (download_item.source_platform, download_item.source_track_id)
+                    if download_item and download_item.source_track_id
+                    else ("tidal", track_id_str)
+                )
+                if source_identity in completed_source_ids:
+                    logger.info("Skipping repeated queue entry %s", source_identity)
+                    self.trackFinished.emit(track_id_str, True, "")
+                    continue
 
                 # Bridge object for aigpy callbacks
                 class AigpyProgressBridge:
@@ -163,6 +173,7 @@ class DownloadWorker(QObject):
                         download_item=download_item,
                     )
                     if ok:
+                        completed_source_ids.add(source_identity)
                         progress_handler.finish()
                     else:
                         failures.append(

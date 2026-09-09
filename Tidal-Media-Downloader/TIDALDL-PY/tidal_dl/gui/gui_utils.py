@@ -181,6 +181,10 @@ class EmittingStream(QObject):
 
     textWritten = pyqtSignal(str)
 
+    def __init__(self, parent: Optional[QObject] = None, *, echo_to_console: bool = True):
+        super().__init__(parent)
+        self._echo_to_console = echo_to_console
+
     def write(self, text: str):
         """
         Writes text to the original stdout and emits a signal with the text.
@@ -190,7 +194,7 @@ class EmittingStream(QObject):
         """
         # Ensure output still goes to the console where the app was launched.
         try:
-            if sys.__stdout__ is not None:
+            if self._echo_to_console and sys.__stdout__ is not None:
                 sys.__stdout__.write(text)
                 sys.__stdout__.flush()
         except Exception as e:
@@ -213,7 +217,7 @@ class EmittingStream(QObject):
         It includes flushing the original stdout for completeness.
         """
         try:
-            if sys.__stdout__ is not None:
+            if self._echo_to_console and sys.__stdout__ is not None:
                 sys.__stdout__.flush()
         except Exception:
             pass  # Ignore errors flushing original stdout

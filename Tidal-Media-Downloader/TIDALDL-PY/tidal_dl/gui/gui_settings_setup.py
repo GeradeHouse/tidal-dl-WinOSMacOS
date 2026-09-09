@@ -1,4 +1,4 @@
-# file: gui_settings_setup.py
+ # file: gui_settings_setup.py
 
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
@@ -147,6 +147,8 @@ def init_ui(self: "SettingsPage"):
     create_tidal_section(self)
     create_spotify_section(self)
     create_paths_section(self)
+    create_duplicate_cleanup_section(self)
+    create_identity_registration_section(self)
     create_download_options_section(self)
     create_ui_behavior_section(self)
     create_cache_section(self)
@@ -289,6 +291,38 @@ def initialize_controls(self: "SettingsPage"):
     # Navigation Buttons
     self.btnBack = QPushButton("Back")
     self.btnSave = QPushButton("Save")
+
+
+def create_duplicate_cleanup_section(self: "SettingsPage"):
+    from .gui_duplicate_cleanup import open_duplicate_cleanup
+
+    assert self.mainLayout is not None
+    section = CollapsibleSection("Local playlist duplicate cleanup")
+    layout = QVBoxLayout()
+    label = QLabel("Scan Spotify playlists and local audio, review duplicate candidates, then move only selected copies to a recoverable folder. Unrelated local tracks are preserved.")
+    label.setWordWrap(True)
+    button = QPushButton("Scan and review local duplicates...")
+    button.clicked.connect(lambda: open_duplicate_cleanup(self))
+    layout.addWidget(label)
+    layout.addWidget(button)
+    section.addLayout(layout)
+    self.mainLayout.addWidget(section)
+
+
+def create_identity_registration_section(self: "SettingsPage"):
+    from .gui_identity_registration import open_identity_registration
+
+    assert self.mainLayout is not None
+    section = CollapsibleSection("Register existing files / repair identity tags")
+    layout = QVBoxLayout()
+    label = QLabel("Give existing downloads a durable identity (audio-based) so they stay recognized after renaming files or editing tags in VirtualDJ. Only dedicated TIDAL-DL identity fields are written; your own tags, artwork and DJ metadata are never changed. A backup is made before each write.")
+    label.setWordWrap(True)
+    button = QPushButton("Register existing files / repair identity tags...")
+    button.clicked.connect(lambda: open_identity_registration(self))
+    layout.addWidget(label)
+    layout.addWidget(button)
+    section.addLayout(layout)
+    self.mainLayout.addWidget(section)
 
 
 def create_tidal_section(self: "SettingsPage"):

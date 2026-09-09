@@ -41,6 +41,8 @@ from tidal_dl.metadata.enrichment import (
     get_track_display_metadata,
 )
 from tidal_dl.download_item import DownloadItem
+from tidal_dl import identity_index
+from tidal_dl.local_identity import read_local_audio
 
 # Robust import alias for aigpy dictToModel
 try:
@@ -2378,6 +2380,22 @@ class TableHandler(QObject):
                 tags_track_id = self._extract_track_id_from_audio_tags(entry.path)
                 if tags_track_id and tags_track_id == track_id_str:
                     return entry.path
+
+                # Registered audio identities survive renamed files and edited tags.
+                with suppress(Exception):
+                    registered_identity = identity_index.resolve_identity(entry.path)
+                    if registered_identity is None:
+                        local_audio = read_local_audio(entry.path)
+                        if local_audio and local_audio.recording.uid:
+                            registered_identity = identity_index.identity_for_uid(
+                                local_audio.recording.uid
+                            )
+                    if (
+                        registered_identity
+                        and registered_identity.tidal_id
+                        and registered_identity.tidal_id == track_id_str
+                    ):
+                        return entry.path
 
         return None
 

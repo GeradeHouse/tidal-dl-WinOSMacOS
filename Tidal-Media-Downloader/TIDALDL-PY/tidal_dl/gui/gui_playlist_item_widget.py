@@ -39,7 +39,8 @@ class PlaylistItemProgressWidget(QWidget):
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 5, 8, 5)
         self.main_layout.setSpacing(2)
-        self.main_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize)
+        # The tree owns row geometry; do not force it to match long label widths.
+        self.main_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetNoConstraint)
 
         # --- Top Row Horizontal Layout (for Icon and Name) ---
         top_row_widget = QWidget()
@@ -139,10 +140,8 @@ class PlaylistItemProgressWidget(QWidget):
 
     def _refresh_geometry(self) -> None:
         """Refresh local layout metrics and request parent row relayout."""
-        self.adjustSize()
-        self.updateGeometry()
         self.main_layout.invalidate()
-        self.main_layout.activate()
+        self.updateGeometry()
         self.geometryRequest.emit()
 
     def set_drop_target_active(self, active: bool) -> None:
@@ -281,9 +280,5 @@ class PlaylistItemProgressWidget(QWidget):
             self._refresh_geometry()
 
     def sizeHint(self) -> QSize:
-        """Provide a dynamic size hint based on visibility."""
-        # Ensure layout is up to date before calculating
-        self.main_layout.activate() 
-        height = self.main_layout.sizeHint().height()
-        width = super().sizeHint().width()
-        return QSize(width, height)
+        """Read layout metrics without changing geometry during tree layout."""
+        return self.main_layout.sizeHint()

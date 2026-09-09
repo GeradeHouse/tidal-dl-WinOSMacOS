@@ -1654,7 +1654,7 @@ $rules = if ($gitIgnoreLines.Count -gt 0) {
 
 $filesToInclude = @()
 if ($repoRoot) {
-    Write-Host "Git worktree detected. Using Git discovery, then applying .gitignore export filtering." -ForegroundColor Yellow
+    # Write-Host "Git worktree detected. Using Git discovery, then applying .gitignore export filtering." -ForegroundColor Yellow
     $filesToInclude = Get-GitTrackedAndUntrackedNotIgnored -RepoRoot $repoRoot -ResolvedProjectPath $projectRootPath
 } else {
     Write-Host "Git not available or not a worktree. Falling back to best-effort .gitignore parsing." -ForegroundColor Yellow

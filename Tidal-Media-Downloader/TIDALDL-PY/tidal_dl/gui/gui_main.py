@@ -152,6 +152,9 @@ class MainView(QWidget):
             logger_gui.error(f"Error loading background image: {e}", exc_info=True)
             self.background_pixmap = QPixmap()
 
+        self._scaled_background_pixmap = QPixmap()
+        self._scaled_background_key = None
+
         self.link_persistence_manager = LinkPersistenceManager()
         self._ui_freeze_last_tick = time.perf_counter()
         self._ui_freeze_monitor_timer: Optional[QTimer] = None
@@ -251,7 +254,11 @@ class MainView(QWidget):
         # --- End stdout redirection ---
 
         # --- NEW: Create and add a dedicated handler for the GUI Log Area ---
-        gui_log_handler = logging.StreamHandler(self.stdout_stream)
+        # Logging already has a console handler. Do not echo the GUI copy back
+        # to stdout, which duplicates every warning and adds synchronous I/O.
+        self.gui_log_stream = EmittingStream(self, echo_to_console=False)
+        self.gui_log_stream.textWritten.connect(self._append_log_text_safely)
+        gui_log_handler = logging.StreamHandler(self.gui_log_stream)
         gui_log_handler.setLevel(logging.INFO)  # Set the level for the GUI log
         
         # Configure GUI handler with the new module-specific filtering system
@@ -1484,11 +1491,19 @@ class MainView(QWidget):
         painter.fillRect(self.rect(), bg_color)
         if hasattr(self, "background_pixmap") and not self.background_pixmap.isNull():
             target_rect = self.rect()
-            scaled_pixmap = self.background_pixmap.scaled(
-                target_rect.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
+            background_key = (
+                self.background_pixmap.cacheKey(),
+                target_rect.width(),
+                target_rect.height(),
             )
+            if background_key != self._scaled_background_key:
+                self._scaled_background_pixmap = self.background_pixmap.scaled(
+                    target_rect.size(),
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self._scaled_background_key = background_key
+            scaled_pixmap = self._scaled_background_pixmap
             x = (target_rect.width() - scaled_pixmap.width()) / 2
             y = (target_rect.height() - scaled_pixmap.height()) / 2
             painter.drawPixmap(QPoint(int(x), int(y)), scaled_pixmap)
@@ -1572,6 +1587,11 @@ class MainView(QWidget):
         if stream is not None:
             with suppress(TypeError, RuntimeError):
                 stream.textWritten.disconnect(self._append_log_text_safely)
+
+        gui_stream = getattr(self, "gui_log_stream", None)
+        if gui_stream is not None:
+            with suppress(TypeError, RuntimeError):
+                gui_stream.textWritten.disconnect(self._append_log_text_safely)
 
         handler = getattr(self, "_gui_log_handler", None)
         if handler is not None:

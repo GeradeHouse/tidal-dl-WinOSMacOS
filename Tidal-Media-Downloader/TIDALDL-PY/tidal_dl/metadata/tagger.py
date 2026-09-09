@@ -217,7 +217,7 @@ class Container(Enum):
                         out.append((formatted_key, str(tag)))
                     continue
                 elif k == "key":
-                    out.append((v, str(tag)))
+                    # Mixed In Key uses the FLAC KEY field for its own Base64 metadata.
                     out.append(("INITIALKEY", str(tag)))
                     continue
                 elif k in {"spotify_key", "tidal_key", "key_source", "spotify_track_id"}:
@@ -473,6 +473,15 @@ async def tag_file(path: str, meta: TrackMetadata, cover_path: str | None):
 
     audio = container.get_mutagen_class(path)
     tags = container.get_tag_pairs(meta)
+    # Preserve the actual audio provider ID even for Spotify-sourced downloads.
+    # source_track_id is the Spotify ID in that case, not the TIDAL recording ID.
+    if meta.info.id:
+        if container == Container.FLAC:
+            tags.append(("TIDAL_TRACK_ID", str(meta.info.id)))
+        elif container == Container.MP3:
+            tags.append(("TXXX:TIDAL_TRACK_ID", str(meta.info.id)))
+        else:
+            tags.append(("----:com.apple.iTunes:TIDAL_TRACK_ID", str(meta.info.id).encode("utf-8")))
     logger.debug("Tagging with %s", tags)
     container.tag_audio(audio, tags)
     if cover_path is not None:

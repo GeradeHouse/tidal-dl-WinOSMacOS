@@ -39,6 +39,7 @@ from .metadata.track import TrackMetadata
 from .metadata.tagger import tag_file
 from .model import Album, Artist, Playlist, StreamUrl, Track
 from .download_item import DownloadItem
+from .local_identity import download_recordings, find_existing_recording, folder_lock
 from .metadata.enrichment import MISSING_METADATA_TEXT, format_spotify_key
 from .paths import get_user_download_path
 from .printf import *
@@ -406,6 +407,7 @@ def _find_existing_playlist_track_path(
     candidate_extensions: Optional[List[str]] = None,
     allow_deep_playlist_scan: bool = False,
     read_audio_tags: bool = False,
+    download_item: Optional[Any] = None,
 ) -> Optional[str]:
     if not playlist_context:
         return None
@@ -454,9 +456,25 @@ def _find_existing_playlist_track_path(
         )
         return result_path
 
+    target_recordings = download_recordings(track, download_item) if read_audio_tags else []
+
     for candidate_path in candidate_paths:
         if os.path.exists(candidate_path) and aigpy.file.getSize(candidate_path) > 0:
-            return _finish(candidate_path, "exact_candidate_path")
+            if not read_audio_tags:
+                return _finish(candidate_path, "exact_candidate_path")
+
+            matched = find_existing_recording(
+                os.path.dirname(candidate_path),
+                target_recordings,
+                {os.path.splitext(candidate_path)[1].lower()},
+            )
+            if matched:
+                return _finish(matched, "recording_identity")
+
+            raise ValueError(
+                "Existing audio occupies the intended output path but does not match "
+                f"the requested recording. No file was overwritten: {candidate_path}"
+            )
 
     download_root, computed_relative_playlist_dir = _extract_download_root_and_relative_playlist_dir(
         candidate_paths[0]
@@ -493,13 +511,23 @@ def _find_existing_playlist_track_path(
         if not os.path.isdir(candidate_dir):
             continue
 
+        if read_audio_tags:
+            matched = find_existing_recording(
+                candidate_dir,
+                target_recordings,
+                expected_extensions,
+            )
+            if matched:
+                return _finish(matched, "recording_identity")
+            continue
+
         matched = _scan_single_playlist_folder_for_track(
             candidate_dir,
             expected_stems,
             expected_extensions,
             track_id_str,
             allow_stem_match=True,
-            read_audio_tags=read_audio_tags,
+            read_audio_tags=False,
         )
         if matched:
             return _finish(matched, "preferred_playlist_dir")
@@ -1066,6 +1094,7 @@ def downloadTrack(
 ):
     check = False
     actual_download_part_path = None
+    destination_lock = None
     try:
         track = __validateTrackObject__(track)
         if isinstance(download_item, DownloadItem):
@@ -1335,6 +1364,12 @@ def downloadTrack(
             path = os.path.join(get_user_download_path(SETTINGS.downloadPath), path)
         path = os.path.normpath(path)
         aigpy.path.mkdirs(os.path.dirname(path))
+        destination_lock = folder_lock(os.path.dirname(path))
+        destination_lock.acquire()
+        # Skip checks must use the final output format, not the pre-conversion one.
+        final_extension = ".mp3" if requested_mp3 else (
+            ".flac" if "flac" in resolved_codec else os.path.splitext(path)[1].lower()
+        )
 
         if SETTINGS.showTrackInfo and not SETTINGS.multiThread:
             # Convert to logger.info() with structured track information
@@ -1359,7 +1394,7 @@ def downloadTrack(
             phase_started = _log_phase_start(
                 "playlist_existing_check",
                 track,
-                f"path={path!r} audio_type_folder={audio_type_folder!r} deep_scan=false read_audio_tags=false",
+                f"path={path!r} audio_type_folder={audio_type_folder!r} deep_scan=false read_audio_tags=true",
             )
             try:
                 existing_playlist_track_path = _find_existing_playlist_track_path(
@@ -1371,9 +1406,10 @@ def downloadTrack(
                     playlist_context,
                     main_view_instance,
                     audio_type_folder=audio_type_folder,
-                    candidate_extensions=[os.path.splitext(path)[1].lower()],
+                    candidate_extensions=[final_extension],
                     allow_deep_playlist_scan=False,
-                    read_audio_tags=False,
+                    read_audio_tags=True,
+                    download_item=download_item,
                 )
                 _log_phase_end(
                     "playlist_existing_check",
@@ -1395,8 +1431,6 @@ def downloadTrack(
                 logger.info(
                     f"{os.path.basename(existing_playlist_track_path)} (skip:already exists in playlist folder!)"
                 )
-                if isinstance(download_item, DownloadItem) and download_item.source_platform == "spotify":
-                    __setMetaData__(cast(Track, track), album, existing_playlist_track_path, None, "", download_item)
                 return True, ""
 
         phase_started = _log_phase_start(
@@ -1424,8 +1458,6 @@ def downloadTrack(
 
         if should_skip_existing_file:
             logger.info(f"{os.path.basename(path)} (skip:already exists!)")
-            if isinstance(download_item, DownloadItem) and download_item.source_platform == "spotify":
-                __setMetaData__(cast(Track, track), album, path, None, "", download_item)
             return True, ""
 
         actual_download_part_path = path + ".part"
@@ -1571,9 +1603,13 @@ def downloadTrack(
         logger.error(f"Exception in downloadTrack for '{getattr(track, 'title', 'Unknown')}': {e}", exc_info=True)
         return False, str(e)
     finally:
-        interrupted = main_view_instance.stop_requested or main_view_instance.cancel_requested
-        if (not check or interrupted) and actual_download_part_path and os.path.exists(actual_download_part_path):
-            os.remove(actual_download_part_path)
+        try:
+            interrupted = main_view_instance.stop_requested or main_view_instance.cancel_requested
+            if (not check or interrupted) and actual_download_part_path and os.path.exists(actual_download_part_path):
+                os.remove(actual_download_part_path)
+        finally:
+            if destination_lock is not None:
+                destination_lock.release()
 
 
 # Modify signature to accept playlist_context (including Album)

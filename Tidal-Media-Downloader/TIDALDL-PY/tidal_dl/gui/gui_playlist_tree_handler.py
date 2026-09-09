@@ -131,6 +131,26 @@ class PlaylistDelegate(QtWidgets.QStyledItemDelegate):
         self.hover_background_color = QColor("#3e3e43")
         self.folder_child_background_color = QColor("#050507ED")
 
+    def initStyleOption(
+        self,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> None:
+        super().initStyleOption(option, index)
+        tree_widget = self.tree_handler.tree_widget
+        item = tree_widget.itemFromIndex(index)
+        if item is not None and isinstance(
+            tree_widget.itemWidget(item, index.column()), PlaylistItemProgressWidget
+        ):
+            # The transparent row widget owns the title and cover. Keep model
+            # data for searching/accessibility, but never paint a second copy.
+            option.text = ""
+            option.icon = QIcon()
+            option.features &= ~(
+                QtWidgets.QStyleOptionViewItem.ViewItemFeature.HasDisplay
+                | QtWidgets.QStyleOptionViewItem.ViewItemFeature.HasDecoration
+            )
+
     def paint(
         self,
         painter: QtGui.QPainter | None,
@@ -269,17 +289,15 @@ class PlaylistDelegate(QtWidgets.QStyledItemDelegate):
 
     def sizeHint(self, option: QtWidgets.QStyleOptionViewItem, index: QModelIndex) -> QSize:
         """Returns the size hint for the item, driven by its custom widget."""
-        original_hint = super().sizeHint(option, index)
-
         tree_widget = cast(QTreeWidget, self.parent())
         if isinstance(tree_widget, QTreeWidget):
             item = tree_widget.itemFromIndex(index)
             if item:
                 widget = tree_widget.itemWidget(item, 0)
                 if widget:
-                    return QSize(original_hint.width(), widget.sizeHint().height())
+                    return widget.sizeHint()
         
-        return original_hint
+        return super().sizeHint(option, index)
 
 
 # --- Playlist Tree Handler ---
