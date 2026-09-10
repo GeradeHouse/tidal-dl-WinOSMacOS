@@ -17,34 +17,53 @@ layers provide this:
    separate custom fields. Registration may read descriptive tags as matching
    evidence and to verify preservation, but it only writes missing identity fields.
 
-2. **A persistent audio-content index**
-   [`identity_index.py`](tidal_dl/identity_index.py) stores, per recording, a
-   fingerprint computed from the **fully decoded audio** (SHA-256 of decoded
-   PCM plus sample rate and channel count) using FFmpeg's incremental hash
-   muxer — no whole-track memory buffer. This fingerprint is independent of
-   filenames, tags and artwork. The SQLite database lives in the profile
-   directory (`local-audio-identities.sqlite3`); it is **not** placed in the
-   OneDrive-synced music folder, and journaling uses the default rollback mode
-   deliberately for that reason.
+2. **A persistent recording and audio-content index**
+   [`identity_index.py`](tidal_dl/identity_index.py) stores durable recording
+   UIDs separately from exact audio fingerprints. One recording can therefore
+   accumulate multiple fingerprint forms over time.
 
-If a custom identity tag survives VirtualDJ edits, tag matching works instantly.
-If even the custom tags are stripped, the audio fingerprint still recovers the
-identity from the index (with audio verification enabled).
+   FLAC uses the native STREAMINFO decoded-PCM MD5 together with sample rate,
+   channel count, bit depth and total sample count. Reading this identity does
+   not decode the track.
+
+   MP3 and M4A/MP4 use SHA-256 over the demuxed encoded audio stream through
+   FFmpeg stream copy. The compressed audio is read, but it is not decoded to
+   PCM. Filename, ordinary tags, artwork and MP4/ID3 metadata do not participate
+   in this fingerprint.
+
+   Version-1 decoded-PCM fingerprints remain mapped during the automatic SQLite
+   schema migration and can coexist with the newer fast fingerprints.
+
+If a dedicated identity tag survives metadata edits, identity lookup is
+immediate. If dedicated tags are unavailable, the exact content fingerprint
+can recover the recording through the local index.
 
 ## How the scan works
 
-The scan ([`identity_registration.py`](tidal_dl/identity_registration.py)) walks the
-selected playlist root and, for each supported audio file (FLAC, MP3, M4A/MP4):
+Before walking local files, the scanner builds its playlist-folder catalog
+exclusively from locally persisted data (`spotify_to_tidal_links.json`, stored
+Spotify track details and cached folder hints). It does not log in to Spotify,
+refresh playlists, fetch tracks, or make any Spotify API call. Cached playlist
+data can be incomplete or stale, so it is supporting evidence rather than an
+authoritative statement of current playlist membership.
 
-1. Reads any existing identity tags (conflicting duplicate values abort that
-   file rather than being overwritten).
-2. Computes the audio fingerprint (cached in the index when the file is
-   unchanged; actual decoding is skipped for cached files).
-3. Looks up the fingerprint in the index.
-4. For files inside mapped Spotify playlist folders, proposes an association
-   with the matching Spotify track. A persisted TIDAL link helps *ranking* but
-   is **never** written as a TIDAL provider ID automatically — association
-   choices are always explicit.
+The scan ([`identity_registration.py`](tidal_dl/identity_registration.py)) then
+walks the selected playlist root and, for each supported audio file (FLAC,
+MP3, M4A/MP4):
+
+1. Reads existing dedicated identity tags and resolves them against locally
+   stored recording identities.
+2. Reuses a valid path/fingerprint cache when available.
+3. Defers content fingerprinting when dedicated identity fields already provide
+   sufficient identity evidence.
+4. When embedded identity is unavailable, computes the fast format-specific
+   fingerprint: FLAC STREAMINFO MD5 or encoded-audio stream-copy SHA-256.
+5. Transparently maps a current fast fingerprint to an existing version-1
+   identity when an unchanged legacy cache entry proves that association.
+6. Uses locally cached Spotify playlist metadata only as legacy association
+   evidence. Metadata-only candidates remain review-required.
+
+Missing local Spotify cache data never triggers an online refresh.
 
 Each row shows one status:
 
@@ -86,42 +105,61 @@ is valid and the backup exists; re-running the scan repairs the index.
 
 ## Integration with downloads
 
+- New downloads reserve or reuse a durable recording UID from the locally
+  stored Spotify/TIDAL provider IDs before metadata writing.
+- `TIDAL_DL_ID`, `SPOTIFY_TRACK_ID` when applicable, and `TIDAL_TRACK_ID` are
+  written into the completed file.
+- After tagging, the completed audio is registered with the fast
+  format-specific fingerprint. FLAC registration reads STREAMINFO only;
+  MP3/M4A registration hashes the compressed audio stream without decoding it.
+- Failure to update the local content index does not invalidate an otherwise
+  completed download; embedded provider identity remains available and the
+  maintenance scan can repair the index later.
 - The download skip check ([`local_identity.py`](tidal_dl/local_identity.py))
-  consults the cached audio index and dedicated identity fields. A registered
-  file can be resolved through its Spotify ID, TIDAL ID, or `TIDAL_DL_ID` even
-  after filename or descriptive-tag edits, provided at least one dedicated
-  identity field survives.
-- The GUI local-file lookup ([`gui_table_handler.py`](tidal_dl/gui/gui_table_handler.py))
-  uses the same private UID fallback while checking registered TIDAL identities.
-- If all dedicated identity fields are stripped, the explicit registration scan
-  can recover an existing identity from decoded-audio fingerprinting. The normal
-  download hot path does not decode every local file merely to perform a lookup.
-- New downloads already carry `SPOTIFY_TRACK_ID` / `TIDAL_TRACK_ID` tags; run
-  registration once to index older files.
+  consults the cached audio index and dedicated identity fields.
+- The GUI local-file lookup
+  ([`gui_table_handler.py`](tidal_dl/gui/gui_table_handler.py)) uses the same
+  private UID fallback.
+- Content fingerprinting remains a recovery layer rather than the first lookup
+  mechanism. Normal recognition through dedicated identity fields does not
+  require audio hashing.
 
 ## Diagnostics
 
-All identity modules log at `WARNING` by default so normal downloads stay
-quiet. Set the environment variable before launching to enable detailed
-diagnostics (`IDENTITY_HASH_START/DONE`, `IDENTITY_SCAN_ROW`,
-`IDENTITY_INDEX_REGISTER`, `IDENTITY_REGISTERED`, failures with tracebacks):
+High-level identity operations log at `INFO` by default, including worker
+start/completion, cache-only catalog counts, mapped folders, scan totals,
+fingerprint cache hits, computed fingerprints, deferred fingerprints, legacy
+migrations and elapsed time. Per-file fingerprint details remain at `DEBUG`.
 
-```
-TIDAL_DL_IDENTITY_LOG_LEVEL=DEBUG
-```
+Set `TIDAL_DL_IDENTITY_LOG_LEVEL=DEBUG` before launch for detailed identity
+diagnostics.
+
+Useful detailed events include `IDENTITY_FINGERPRINT_CACHE_HIT`,
+`IDENTITY_FINGERPRINT_LEGACY_CACHE`,
+`IDENTITY_FINGERPRINT_STREAMCOPY_START`,
+`IDENTITY_FINGERPRINT_DONE`, `IDENTITY_SCAN_ROW`,
+`IDENTITY_INDEX_REGISTER`, `DL_IDENTITY_INDEXED`,
+`IDENTITY_REGISTERED`, and failure tracebacks.
 
 ## Limits
 
-- Fingerprinting decodes each file once (cached afterwards); large libraries
-  take time on first scan. Progress is shown and cancellation is safe.
-- The index matches audio content; two genuinely identical copies of the same
-  recording share one identity by design.
-- Index schema version 1 stores one Spotify ID and one TIDAL ID per decoded
-  fingerprint. If identical decoded audio is associated with conflicting
-  provider IDs, registration reports a conflict for manual investigation rather
-  than silently replacing an existing association.
-- Restoring a backup restores **all** tags to their pre-registration values —
-  preserve any later VirtualDJ edits before restoring.
-- Spotify login is required only to propose legacy Spotify associations. Without
-  login, the scan can still verify decoded audio and existing identity tags.
-- The scan never deletes, renames or moves files.
+- FLAC STREAMINFO MD5 is extremely cheap to read and identifies identical
+  decoded lossless PCM. Re-encoding identical PCM as FLAC therefore retains
+  the same FLAC content identity.
+- MP3/M4A fingerprints require one pass over the compressed audio packets, but
+  do not perform codec decoding or expand the stream to PCM.
+- A metadata or filename change does not alter either current fingerprint form
+  as long as the encoded audio itself is unchanged.
+- Transcoding changes the MP3/M4A encoded-audio fingerprint. Such cases remain
+  review-oriented rather than being silently treated as identical.
+- Acoustic-similarity fingerprinting is intentionally not used for automatic
+  duplicate suppression because similarity is weaker evidence than exact audio
+  identity.
+- SQLite schema version 2 stores recording identity independently of
+  fingerprints, allowing legacy decoded-PCM fingerprints and newer fast
+  fingerprints to resolve to the same recording UID.
+- Cached Spotify metadata can be incomplete or outdated. Identity maintenance
+  never contacts Spotify to fill those gaps automatically.
+- Restoring a registration backup restores all tags to their pre-registration
+  values.
+- The registration scan never deletes, renames or moves audio files.

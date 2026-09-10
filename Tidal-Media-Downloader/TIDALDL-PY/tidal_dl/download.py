@@ -32,6 +32,7 @@ import aigpy
 from moviepy.audio.io.AudioFileClip import AudioFileClip
 from mutagen import File as MutagenFile
 
+from . import identity_index
 from .decryption import *
 from .format import getAlbumPath, getAudioTypeFolder, getTrackPath
 from .metadata.album import AlbumMetadata
@@ -704,6 +705,35 @@ def create_streamrip_metadata(track: Track, album: Album, download_item: Optiona
     track_meta = TrackMetadata.from_tidal(album_meta, track)
     _apply_download_item_metadata_override(track_meta, download_item)
 
+    proposed_identity = identity_index.Identity(
+        uid="",
+        spotify_id=str(
+            track_meta.spotify_track_id or ""
+        ),
+        tidal_id=str(track.id or ""),
+    )
+    try:
+        reserved_identity = (
+            identity_index.ensure_identity(
+                proposed_identity
+            )
+        )
+        track_meta.tidal_dl_id = (
+            reserved_identity.uid
+        )
+    except Exception as exc:
+        track_meta.tidal_dl_id = None
+        logger.warning(
+            "DL_IDENTITY_RESERVATION_FAILED "
+            "track_id=%s spotify_id=%s error=%s",
+            track.id,
+            proposed_identity.spotify_id,
+            exc,
+            exc_info=logger.isEnabledFor(
+                logging.DEBUG
+            ),
+        )
+
     # Step 3: Manually add any extra information if needed
     # For example, streamrip's model can hold composer, which we get from contributors
     phase_started = _log_phase_start(
@@ -852,14 +882,79 @@ def __setMetaData__(
                     track,
                     f"file={file_name!r} attempt={attempt}/{max_retries}",
                 )
-                asyncio.run(tag_file(filepath, streamrip_meta, cover_path))
+                asyncio.run(
+                    tag_file(
+                        filepath,
+                        streamrip_meta,
+                        cover_path,
+                    )
+                )
                 _log_phase_end(
                     "metadata_tag_file",
                     phase_started,
                     track,
-                    f"file={file_name!r} attempt={attempt}/{max_retries}",
+                    f"file={file_name!r} "
+                    f"attempt={attempt}/{max_retries}",
                 )
-                logger.info(f"Successfully tagged '{file_name}' with extensive metadata.")
+                logger.info(
+                    f"Successfully tagged '{file_name}' "
+                    "with extensive metadata."
+                )
+
+                try:
+                    identity_signature = (
+                        identity_index.signature(
+                            filepath
+                        )
+                    )
+                    fingerprint = (
+                        identity_index.audio_fingerprint(
+                            filepath
+                        )
+                    )
+                    registered_identity = (
+                        identity_index.register(
+                            filepath,
+                            fingerprint,
+                            identity_index.Identity(
+                                uid=str(
+                                    streamrip_meta.tidal_dl_id
+                                    or ""
+                                ),
+                                spotify_id=str(
+                                    streamrip_meta.spotify_track_id
+                                    or ""
+                                ),
+                                tidal_id=str(
+                                    streamrip_meta.info.id
+                                    or ""
+                                ),
+                            ),
+                            identity_signature,
+                        )
+                    )
+                    logger.info(
+                        "DL_IDENTITY_INDEXED "
+                        "track_id=%s uid=%s "
+                        "fingerprint_kind=%s",
+                        track.id,
+                        registered_identity.uid,
+                        identity_index.fingerprint_kind(
+                            fingerprint
+                        ),
+                    )
+                except Exception as identity_error:
+                    logger.warning(
+                        "DL_IDENTITY_INDEX_FAILED "
+                        "track_id=%s path=%r error=%s",
+                        track.id,
+                        filepath,
+                        identity_error,
+                        exc_info=logger.isEnabledFor(
+                            logging.DEBUG
+                        ),
+                    )
+
                 break
             except Exception as tag_error:
                 _log_phase_error(

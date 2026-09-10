@@ -21,13 +21,24 @@ These are confirmed code paths, not a forensic identification of the user's exis
 
 Open **Settings → Local playlist duplicate cleanup → Scan and review local duplicates**.
 
-1. Log in to Spotify and select your local **Playlists** root. The default comes from the saved download location, under the FLAC playlist directory; it is not hard-coded to a particular computer.
-2. Start the scan. It reads current Spotify playlists and files directly inside mapped local playlist directories. Existing path formats and saved folder hints are used. A selected alternative Playlists root is also supported.
-3. Review each pair's evidence, paths and durations. No row is selected automatically. Listen to metadata-only candidates before deciding.
-4. Select only unwanted copies and choose **Keep A** or **Keep B**. Keep the path used by VirtualDJ whenever possible.
-5. Confirm the exact selected file list. The selected audio is moved into a recovery directory beneath the scan root. It is not permanently deleted.
+1. Select the local **Playlists** root. Spotify login is not required for this
+   maintenance scan.
+2. Start the scan. It reads locally cached Spotify playlist/track metadata and
+   files directly inside mapped local playlist directories. No Spotify API
+   calls are made. Existing path formats and saved folder hints are used, and a
+   selected alternative Playlists root is supported.
+3. Review each pair's evidence, paths and durations. No row is selected
+   automatically. Listen to metadata-only candidates before deciding.
+4. Select only unwanted copies and choose **Keep A** or **Keep B**. Keep the
+   path already referenced by DJ software whenever possible.
+5. Confirm the exact selected file list. Selected audio can be moved into the
+   recovery directory or permanently deleted through the separate explicit
+   deletion action.
 
-The scanner implementation is in [duplicate_cleanup.py](tidal_dl/duplicate_cleanup.py); the background worker and review dialog are in [gui_duplicate_cleanup.py](tidal_dl/gui/gui_duplicate_cleanup.py).
+The scanner implementation is in
+[`duplicate_cleanup.py`](tidal_dl/duplicate_cleanup.py); the background worker
+and review dialog are in
+[`gui_duplicate_cleanup.py`](tidal_dl/gui/gui_duplicate_cleanup.py).
 
 ## Safety and recovery
 
@@ -42,6 +53,13 @@ The scanner implementation is in [duplicate_cleanup.py](tidal_dl/duplicate_clean
 
 ## Limits
 
-The scanner does not decode or acoustically fingerprint every recording. Matching FLAC STREAMINFO PCM checksums and stream parameters are stronger evidence than metadata, but these stored checksums are not recomputed from decoded audio. Metadata and equal duration alone cannot prove audio equivalence. Missing identifiers, incomplete metadata, inaccessible Spotify playlists, unmapped folders or major filename changes can leave duplicates undetected. Fetch failures are reported; files are never removed because an online response is empty or incomplete.
+The scanner does not decode or acoustically fingerprint every recording.
+Matching FLAC STREAMINFO PCM checksums and stream parameters are stronger
+evidence than metadata, but these stored checksums are not recomputed from
+decoded audio. Metadata and equal duration alone cannot prove audio
+equivalence. Missing identifiers, incomplete or stale cached playlist
+metadata, unmapped folders, or major filename changes can leave duplicates
+undetected. Cache gaps are reported; files are never removed merely because
+cached Spotify playlist or track information is missing.
 
 The changes were reviewed statically only. No application execution, compilation, build or tests were performed, and no test code was added.

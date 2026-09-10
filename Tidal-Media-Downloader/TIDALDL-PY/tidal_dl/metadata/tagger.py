@@ -63,6 +63,7 @@ MP4_KEYS = (
     None,  # tidal_key (handled as freeform)
     None,  # key_source (handled as freeform)
     None,  # spotify_track_id (handled as freeform)
+    None,  # tidal_dl_id (handled as freeform)
     "----:com.apple.iTunes:TRACK_ARTIST_CREDIT",
     "----:com.apple.iTunes:ALBUM_ARTIST_CREDIT",
     "----:com.apple.iTunes:ORIGINALDATE",  # was ORIGINAL_RELEASE_DATE
@@ -108,6 +109,7 @@ MP3_KEYS = (
     None,  # tidal_key (handled as TXXX)
     None,  # key_source (handled as TXXX)
     None,  # spotify_track_id (handled as TXXX)
+    None,  # tidal_dl_id (handled as TXXX)
     None,  # track_artist_credit (handled as TXXX)
     None,  # album_artist_credit (handled as TXXX)
     id3.TDOR,  # originaldate
@@ -153,6 +155,7 @@ METADATA_TYPES = (
     "tidal_key",
     "key_source",
     "spotify_track_id",
+    "tidal_dl_id",
     "track_artist_credit",
     "album_artist_credit",
     "originaldate",
@@ -220,7 +223,13 @@ class Container(Enum):
                     # Mixed In Key uses the FLAC KEY field for its own Base64 metadata.
                     out.append(("INITIALKEY", str(tag)))
                     continue
-                elif k in {"spotify_key", "tidal_key", "key_source", "spotify_track_id"}:
+                elif k in {
+                    "spotify_key",
+                    "tidal_key",
+                    "key_source",
+                    "spotify_track_id",
+                    "tidal_dl_id",
+                }:
                     out.append((k.upper(), str(tag)))
                     continue
                 elif k == "artists":
@@ -270,11 +279,32 @@ class Container(Enum):
                     text = ", ".join(artists) if isinstance(artists, list) else str(artists)
                     out.append((f"TXXX:{k.upper()}", text))
                 continue
-            elif k in ["barcode", "replaygain_track_gain", "replaygain_album_gain", "releasetype", "track_artist_credit", "album_artist_credit", "media_type", "purchase_date", "originaldate", "rym_descriptors", "spotify_key", "tidal_key", "key_source", "spotify_track_id"]:
+            elif k in [
+                "barcode",
+                "replaygain_track_gain",
+                "replaygain_album_gain",
+                "releasetype",
+                "track_artist_credit",
+                "album_artist_credit",
+                "media_type",
+                "purchase_date",
+                "originaldate",
+                "rym_descriptors",
+                "spotify_key",
+                "tidal_key",
+                "key_source",
+                "spotify_track_id",
+                "tidal_dl_id",
+            ]:
                 # Handle as TXXX custom tags
                 text = self._attr_from_meta(meta, k)
                 if text is not None:
-                    out.append((f"TXXX:{k.upper()}", str(text)))
+                    out.append(
+                        (
+                            f"TXXX:{k.upper()}",
+                            str(text),
+                        )
+                    )
                 continue
             else:
                 text = self._attr_from_meta(meta, k)
@@ -322,13 +352,34 @@ class Container(Enum):
                     text = text.encode("utf-8")
                     out.append((v, text))
                 continue
-            elif k in ["barcode", "replaygain_track_gain", "replaygain_album_gain", "releasetype", "track_artist_credit", "album_artist_credit", "originaldate", "media_type", "rym_descriptors", "spotify_key", "tidal_key", "key_source", "spotify_track_id"]:
+            elif k in [
+                "barcode",
+                "replaygain_track_gain",
+                "replaygain_album_gain",
+                "releasetype",
+                "track_artist_credit",
+                "album_artist_credit",
+                "originaldate",
+                "media_type",
+                "rym_descriptors",
+                "spotify_key",
+                "tidal_key",
+                "key_source",
+                "spotify_track_id",
+                "tidal_dl_id",
+            ]:
                 # Handle custom MP4 freeform tags that need bytes encoding
                 text = self._attr_from_meta(meta, k)
                 if text is not None:
-                    freeform_key = v or f"----:com.apple.iTunes:{k.upper()}"
+                    freeform_key = (
+                        v
+                        or "----:com.apple.iTunes:"
+                        f"{k.upper()}"
+                    )
                     text = str(text).encode("utf-8")
-                    out.append((freeform_key, text))
+                    out.append(
+                        (freeform_key, text)
+                    )
                 continue
             else:
                 text = self._attr_from_meta(meta, k)
@@ -360,6 +411,7 @@ class Container(Enum):
             "tidal_key",
             "key_source",
             "spotify_track_id",
+            "tidal_dl_id",
             # Track-specific additional metadata
             "bpm",
             "replaygain_track_gain",

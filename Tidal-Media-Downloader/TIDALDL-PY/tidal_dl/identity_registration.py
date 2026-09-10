@@ -60,119 +60,500 @@ def embedded_identity(path):
     return identity
 
 
-def playlist_catalog(api, persistence, root, progress, cancelled):
-    """Exact folder mappings only. Never infer identity from folder names alone."""
-    if api.sp is None:
-        raise ValueError("Log in to Spotify to match legacy files, or disable Spotify matching for an offline scan.")
-    playlists = api.get_user_playlists()
-    if playlists is None:
-        raise RuntimeError("Spotify playlists could not be read. Retry or use an offline scan.")
+def playlist_catalog(persistence, root, playlist_names, progress, cancelled):
+    """Build exact playlist-folder mappings from local persistence only."""
     folders = defaultdict(list)
-    warnings = []
+    warnings = [
+        "Cache-only identity scan: no Spotify API calls were made. "
+        "Cached metadata may be incomplete or outdated; current Spotify "
+        "playlist membership is not verified."
+    ]
     download_root = get_user_download_path(SETTINGS.downloadPath)
-    for playlist in playlists:
+    playlists = persistence.get_cached_spotify_playlists_for_cleanup()
+
+    for playlist_id, name in (playlist_names or {}).items():
+        normalized_id = str(playlist_id)
+        playlist = playlists.setdefault(
+            normalized_id,
+            {
+                "id": normalized_id,
+                "name": str(name or ""),
+                "folder_hint": "",
+                "tracks": [],
+            },
+        )
+        if name:
+            playlist["name"] = str(name)
+
+    if not playlists:
+        warnings.append(
+            "No locally cached Spotify playlists or track metadata are "
+            "available. Audio files can still be checked against existing "
+            "identity tags and the audio index."
+        )
+        logger.info(
+            "IDENTITY_CATALOG_CACHE_ONLY playlists=0 "
+            "mapped_playlists=0 mapped_folders=0 tracks=0"
+        )
+        return folders, warnings
+
+    mapped_playlists = 0
+    cached_tracks = 0
+
+    for playlist in playlists.values():
         if cancelled():
             raise index.IdentityCancelled()
+        if not isinstance(playlist, dict):
+            continue
+
+        playlist_id = str(playlist.get("id") or "").strip()
+        if not playlist_id:
+            continue
+
+        name = str(playlist.get("name") or playlist_id).strip()
+        tracks = playlist.get("tracks")
+        if not isinstance(tracks, list) or not tracks:
+            warnings.append(
+                f"No cached Spotify track metadata; skipped playlist: {name}"
+            )
+            continue
+
         context = {"type": "spotify", "data": playlist}
         candidates = set()
-        for audio_type in ("", "flac", "mp3", "m4a", "mp4", "aac", "unknown"):
-            path = getPlaylistPath(context, os.path.join(download_root, audio_type))
-            if path:
-                candidates.add(os.path.abspath(path))
-        hint = persistence.get_playlist_folder_hint(str(playlist["id"]))
+
+        if playlist.get("name"):
+            for audio_type in (
+                "",
+                "flac",
+                "mp3",
+                "m4a",
+                "mp4",
+                "aac",
+                "unknown",
+            ):
+                path = getPlaylistPath(
+                    context,
+                    os.path.join(download_root, audio_type),
+                )
+                if path:
+                    candidates.add(os.path.abspath(path))
+
+        hint = str(playlist.get("folder_hint") or "").strip()
         if hint:
-            candidates.add(os.path.abspath(os.path.join(download_root, hint)))
-        relative = getPlaylistPath(context, "__identity_root__")
-        if relative:
-            parts = os.path.relpath(relative, "__identity_root__").split(os.sep)
-            if parts and parts[0].casefold() == "playlists":
-                parts = parts[1:]
-            if parts:
-                candidates.add(os.path.abspath(os.path.join(root, *parts)))
-        candidates = {p for p in candidates if inside(p, root) and os.path.isdir(p)}
+            candidates.add(
+                os.path.abspath(os.path.join(download_root, hint))
+            )
+
+        if playlist.get("name"):
+            relative_candidate = getPlaylistPath(
+                context,
+                "__identity_root__",
+            )
+            if relative_candidate:
+                relative = os.path.relpath(
+                    relative_candidate,
+                    "__identity_root__",
+                )
+                parts = relative.split(os.sep)
+                if parts and parts[0].casefold() == "playlists":
+                    parts = parts[1:]
+                if parts:
+                    candidates.add(
+                        os.path.abspath(os.path.join(root, *parts))
+                    )
+
+        candidates = {
+            path
+            for path in candidates
+            if inside(path, root) and os.path.isdir(path)
+        }
         if not candidates:
+            warnings.append(
+                "No local folder could be mapped from cached metadata; "
+                f"skipped playlist: {name}"
+            )
             continue
-        progress(f"Reading Spotify playlist: {playlist['name']}")
-        tracks = api.get_playlist_tracks(playlist["id"])
-        if tracks is None:
-            warnings.append(f"Spotify fetch failed; no legacy matches proposed for {playlist['name']}")
-            continue
-        links = persistence.get_links_for_playlist(str(playlist["id"])).get("tracks", {})
+
+        links = persistence.get_links_for_playlist(
+            playlist_id
+        ).get("tracks", {})
+        if not isinstance(links, dict):
+            links = {}
+
+        progress(
+            f"Using {len(tracks)} cached Spotify track(s): {name}"
+        )
+        mapped_playlists += 1
+        cached_tracks += len(tracks)
+
         for meta in tracks:
-            if not meta.get("id") or meta.get("is_local"):
+            if not isinstance(meta, dict):
                 continue
-            # A persisted link helps identify candidates, but is NOT proof that
-            # the local audio was downloaded from that TIDAL release.
-            link = links.get(meta["id"], {})
+
+            spotify_id = str(meta.get("id") or "").strip()
+            if not spotify_id or meta.get("is_local"):
+                continue
+
+            link = links.get(spotify_id, {})
+            if not isinstance(link, dict):
+                link = {}
+
             details = link.get("tidal_track_details") or {}
-            tidal_id = str(link.get("tidal_track_id") or details.get("id") or "")
-            target = replace(spotify_recording(meta), tidal_id=tidal_id)
+            tidal_id = str(
+                link.get("tidal_track_id")
+                or (
+                    details.get("id")
+                    if isinstance(details, dict)
+                    else ""
+                )
+                or ""
+            )
+
+            target = replace(
+                spotify_recording(meta),
+                tidal_id=tidal_id,
+            )
+            title = str(meta.get("name") or spotify_id)
+
             for folder in candidates:
-                folders[index.path_key(folder)].append((target, str(meta.get("name") or meta["id"])))
+                folders[index.path_key(folder)].append(
+                    (target, title)
+                )
+
+    logger.info(
+        "IDENTITY_CATALOG_CACHE_ONLY playlists=%d "
+        "mapped_playlists=%d mapped_folders=%d tracks=%d",
+        len(playlists),
+        mapped_playlists,
+        len(folders),
+        cached_tracks,
+    )
     return folders, warnings
 
 
-def scan(root, catalog, progress=lambda text: None, cancelled=lambda: False):
-    proposals, warnings = [], []
+def scan(
+    root,
+    catalog,
+    progress=lambda text: None,
+    cancelled=lambda: False,
+):
+    proposals = []
+    warnings = []
     root = os.path.realpath(root)
-    def walk_error(error):
-        warnings.append(str(error))
-    for directory, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
-        dirs[:] = [name for name in dirs if name not in EXCLUDED and not name.startswith(".") and
-                   not os.path.islink(os.path.join(directory, name)) and inside(os.path.join(directory, name), root)]
-        for name in sorted(files):
+    cache_hits = 0
+    fingerprints_computed = 0
+    fingerprints_deferred = 0
+    legacy_migrations = 0
+
+    logger.info(
+        "IDENTITY_SCAN_START root=%r mapped_folders=%d",
+        root,
+        len(catalog),
+    )
+
+    def walk_error(exc):
+        warnings.append(
+            f"Could not inspect folder: {exc}"
+        )
+
+    for directory, dirnames, filenames in os.walk(
+        root,
+        topdown=True,
+        onerror=walk_error,
+        followlinks=False,
+    ):
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name.casefold() not in EXCLUDED
+        ]
+
+        if cancelled():
+            raise index.IdentityCancelled()
+
+        for filename in filenames:
             if cancelled():
                 raise index.IdentityCancelled()
-            path = os.path.join(directory, name)
-            if name.startswith(".") or os.path.splitext(name)[1].lower() not in SUPPORTED:
+
+            path = os.path.join(
+                directory,
+                filename,
+            )
+            if (
+                os.path.splitext(filename)[1].lower()
+                not in SUPPORTED
+            ):
                 continue
-            if not inside(path, root) or os.path.islink(path):
-                warnings.append(f"Skipped redirected file: {path}")
-                continue
-            progress(f"Verifying audio ({len(proposals) + 1}): {path}")
+
+            file_number = len(proposals) + 1
+            progress(
+                f"Checking local audio "
+                f"({file_number}): {path}"
+            )
             before = ()
+
             try:
                 before = index.signature(path)
                 embedded = embedded_identity(path)
-                fingerprint = index.audio_fingerprint(path, cancelled)
-                known = index.identity_for_fingerprint(fingerprint)
-                # Reuse an indexed UID when available; otherwise defer UID creation
-                # until registration commit so identical audio copies converge.
-                combined = index.merge_identity(known, embedded) if known is not None else embedded
+                has_embedded_identity = bool(
+                    embedded.uid
+                    or embedded.spotify_id
+                    or embedded.tidal_id
+                )
+
+                cached = index.cached_fingerprint(
+                    path
+                )
+                current_cached = bool(
+                    cached
+                    and index.fingerprint_is_current(
+                        cached
+                    )
+                )
+                fingerprint = (
+                    (cached or "")
+                    if current_cached
+                    else ""
+                )
+
+                identity = (
+                    index.resolve_declared_identity(
+                        embedded,
+                        cached or "",
+                    )
+                )
+                legacy_identity = bool(
+                    cached
+                    and not current_cached
+                    and (
+                        identity.uid
+                        or identity.spotify_id
+                        or identity.tidal_id
+                    )
+                )
+
+                content_known = bool(
+                    cached
+                    and index.identity_for_fingerprint(
+                        cached
+                    )
+                )
+
+                if current_cached:
+                    cache_hits += 1
+
+                if (
+                    not fingerprint
+                    and not has_embedded_identity
+                ):
+                    progress(
+                        "Computing fast audio identity "
+                        f"({file_number}): {path}"
+                    )
+                    fingerprint = (
+                        index.audio_fingerprint(
+                            path,
+                            cancelled,
+                        )
+                    )
+                    fingerprints_computed += 1
+
+                    fingerprint_identity = (
+                        index.identity_for_fingerprint(
+                            fingerprint
+                        )
+                    )
+                    if fingerprint_identity:
+                        identity = (
+                            index.merge_identity(
+                                identity,
+                                fingerprint_identity,
+                            )
+                            if (
+                                identity.uid
+                                or identity.spotify_id
+                                or identity.tidal_id
+                            )
+                            else fingerprint_identity
+                        )
+                        content_known = True
+                    elif legacy_identity:
+                        identity = index.register(
+                            path,
+                            fingerprint,
+                            identity,
+                            before,
+                        )
+                        content_known = True
+                        legacy_migrations += 1
+                elif not fingerprint:
+                    fingerprints_deferred += 1
+
                 local = read_local_audio(path)
                 if local is None:
-                    raise ValueError("Audio tags could not be read.")
-                choices = {}
-                for target, title in catalog.get(index.path_key(directory), ()):
-                    reason = match_recording(local.recording, target, allow_legacy=True)
-                    if reason:
-                        # Never invent a TIDAL provider ID from the current link.
-                        proposed = index.Identity(combined.uid, target.spotify_id, embedded.tidal_id or combined.tidal_id)
-                        choices[target.spotify_id] = (proposed, f"{title} — {target.spotify_id} — {reason}")
-                if combined.spotify_id or combined.tidal_id:
-                    status = "Registered" if known and embedded.uid and combined == known else "Identified"
-                    evidence = "Verified audio index" if known else "Existing provider identity tags"
-                    # Even a TIDAL-ID match to Spotify must be explicitly chosen.
-                    if not combined.spotify_id and choices:
-                        status = "Review association"
-                        choices = {"keep": (combined, "Keep existing identity; do not add Spotify association"), **choices}
+                    raise ValueError(
+                        "Audio tags could not be read."
+                    )
+
+                choices = []
+                evidence = ""
+
+                if not identity.spotify_id:
+                    for target, title in catalog.get(
+                        index.path_key(directory),
+                        (),
+                    ):
+                        reason = match_recording(
+                            local.recording,
+                            target,
+                            allow_legacy=True,
+                        )
+                        if reason:
+                            choices.append(
+                                (
+                                    target,
+                                    title,
+                                    reason,
+                                )
+                            )
+
+                has_identity = bool(
+                    identity.uid
+                    or identity.spotify_id
+                    or identity.tidal_id
+                )
+
+                if has_identity:
+                    if (
+                        content_known
+                        and has_embedded_identity
+                        and embedded.uid
+                        == identity.uid
+                        and embedded.spotify_id
+                        == identity.spotify_id
+                        and embedded.tidal_id
+                        == identity.tidal_id
+                    ):
+                        status = "Registered"
+                        evidence = (
+                            "Dedicated identity tags and "
+                            "the content index agree."
+                        )
+                    elif content_known:
+                        status = "Identified"
+                        evidence = (
+                            "Verified through the fast "
+                            "audio-content index."
+                        )
+                    elif has_embedded_identity:
+                        status = "Identified"
+                        evidence = (
+                            "Consistent dedicated identity "
+                            "tags; content fingerprint "
+                            "deferred until registration."
+                        )
                     else:
-                        choices = {}
-                    proposal = Proposal(path, before, fingerprint, combined, status, evidence, tuple(choices.values()))
+                        status = "Identified"
+                        evidence = (
+                            "Existing indexed identity found."
+                        )
                 elif choices:
-                    proposal = Proposal(path, before, fingerprint, None, "Review association", "Legacy matching is not audio proof; choose a source explicitly.", tuple(choices.values()))
+                    status = "Review association"
+                    evidence = (
+                        "Cached playlist metadata match "
+                        "only; manual review required."
+                    )
                 else:
-                    proposal = Proposal(path, before, fingerprint, None, "Unmatched", "No reliable provider association. Left untouched.")
-                if index.signature(path) != before:
-                    raise index.IdentityConflict("File changed during scan; scan again.")
-                proposals.append(proposal)
-                logger.debug("IDENTITY_SCAN_ROW path=%r status=%s choices=%d", path, proposal.status, len(proposal.choices))
+                    status = "Unmatched"
+                    evidence = (
+                        "No embedded identity, indexed "
+                        "audio identity, or cached "
+                        "playlist association."
+                    )
+
+                proposals.append(
+                    Proposal(
+                        path=path,
+                        signature=before,
+                        fingerprint=fingerprint,
+                        identity=identity,
+                        status=status,
+                        evidence=evidence,
+                        choices=tuple(
+                            (
+                                replace(
+                                    target,
+                                    uid=(
+                                        identity.uid
+                                        or target.uid
+                                    ),
+                                ),
+                                f"{title} — {reason}",
+                            )
+                            for (
+                                target,
+                                title,
+                                reason,
+                            ) in choices
+                        ),
+                    )
+                )
+
+                logger.debug(
+                    "IDENTITY_SCAN_ROW "
+                    "path=%r status=%s "
+                    "fingerprint_kind=%s choices=%d",
+                    path,
+                    status,
+                    (
+                        index.fingerprint_kind(
+                            fingerprint
+                        )
+                        if fingerprint
+                        else "deferred"
+                    ),
+                    len(choices),
+                )
             except index.IdentityCancelled:
                 raise
             except Exception as exc:
-                logger.warning("IDENTITY_SCAN_FAILED path=%r error=%s", path, exc, exc_info=logger.isEnabledFor(logging.DEBUG))
-                proposals.append(Proposal(path, before, "", None, "Conflict / error", str(exc)))
-    logger.info("IDENTITY_SCAN_DONE root=%r files=%d warnings=%d", root, len(proposals), len(warnings))
+                warnings.append(
+                    f"{path}: {exc}"
+                )
+                proposals.append(
+                    Proposal(
+                        path=path,
+                        signature=before,
+                        fingerprint="",
+                        identity=None,
+                        status="Conflict / error",
+                        evidence=str(exc),
+                    )
+                )
+                logger.warning(
+                    "IDENTITY_SCAN_FAILED "
+                    "path=%r error=%s",
+                    path,
+                    exc,
+                    exc_info=logger.isEnabledFor(
+                        logging.DEBUG
+                    ),
+                )
+
+    logger.info(
+        "IDENTITY_SCAN_DONE root=%r files=%d "
+        "warnings=%d fingerprint_cache_hits=%d "
+        "fingerprints_computed=%d "
+        "fingerprints_deferred=%d "
+        "legacy_migrations=%d",
+        root,
+        len(proposals),
+        len(warnings),
+        cache_hits,
+        fingerprints_computed,
+        fingerprints_deferred,
+        legacy_migrations,
+    )
     return proposals, warnings
 
 
@@ -221,24 +602,62 @@ def backup_root():
     return os.path.join(getProfilePath(), "identity-backups")
 
 
-def apply_one(proposal, identity, root, write_tags, cancelled=lambda: False):
+def apply_one(
+    proposal,
+    identity,
+    root,
+    write_tags,
+    cancelled=lambda: False,
+):
     path = proposal.path
     if not inside(path, root) or os.path.islink(path):
-        raise ValueError("Path is outside the selected root or is a symbolic link.")
+        raise ValueError(
+            "Path is outside the selected root "
+            "or is a symbolic link."
+        )
+
     with folder_lock(os.path.dirname(path)):
         if cancelled():
             raise index.IdentityCancelled()
+
         if index.signature(path) != proposal.signature:
-            raise index.IdentityConflict("File changed since review; scan again.")
+            raise index.IdentityConflict(
+                "File changed since review; scan again."
+            )
+
         current = embedded_identity(path)
-        # Check every association before writing anything.
-        identity = index.merge_identity(index.identity_for_fingerprint(proposal.fingerprint), identity)
-        identity = index.merge_identity(identity, current)
-        fingerprint = index.audio_fingerprint(path, cancelled, use_cache=False)
-        if fingerprint != proposal.fingerprint:
-            raise index.IdentityConflict("Audio changed since review; scan again.")
+
+        fingerprint = (
+            proposal.fingerprint
+            if index.fingerprint_is_current(
+                proposal.fingerprint
+            )
+            else index.audio_fingerprint(
+                path,
+                cancelled,
+            )
+        )
+
+        resolved = index.resolve_declared_identity(
+            identity,
+            fingerprint,
+        )
+        identity = index.merge_identity(
+            resolved if resolved.uid else None,
+            identity,
+        )
+        identity = index.merge_identity(
+            identity,
+            current,
+        )
+
         if not write_tags or current == identity:
-            index.register(path, fingerprint, identity, proposal.signature)
+            index.register(
+                path,
+                fingerprint,
+                identity,
+                proposal.signature,
+            )
             return "Indexed without changing audio file"
         # Full byte-for-byte backup permits recovery of unknown tags and padding,
         # not just the fields this application understands.
@@ -272,11 +691,27 @@ def apply_one(proposal, identity, root, write_tags, cancelled=lambda: False):
             else:
                 audio.save()
             if _snapshot(MutagenFile(staged)) != previous:
-                raise index.IdentityConflict("Tag writer changed nonidentity metadata. Staged changes rejected; original untouched.")
+                raise index.IdentityConflict(
+                    "Tag writer changed nonidentity metadata. "
+                    "Staged changes rejected; original untouched."
+                )
             if embedded_identity(staged) != identity:
-                raise index.IdentityConflict("Identity-tag verification failed; original untouched.")
-            if index.audio_fingerprint(staged, cancelled, use_cache=False) != fingerprint:
-                raise index.IdentityConflict("Staged audio verification failed; original untouched.")
+                raise index.IdentityConflict(
+                    "Identity-tag verification failed; "
+                    "original untouched."
+                )
+            if (
+                index.audio_fingerprint(
+                    staged,
+                    cancelled,
+                    use_cache=False,
+                )
+                != fingerprint
+            ):
+                raise index.IdentityConflict(
+                    "Staged audio verification failed; "
+                    "original untouched."
+                )
             with open(staged, "rb") as handle:
                 os.fsync(handle.fileno())
             record["registered_sha256"] = _file_hash(staged, cancelled)

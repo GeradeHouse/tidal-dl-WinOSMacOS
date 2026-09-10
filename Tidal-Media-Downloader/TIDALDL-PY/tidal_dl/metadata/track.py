@@ -53,6 +53,7 @@ class TrackMetadata:
     tidal_key: str | None = None
     key_source: str | None = None
     spotify_track_id: str | None = None
+    tidal_dl_id: str | None = None
     # Additional Deezer tags
     bpm: int | None = None
     replaygain_track_gain: str | None = None  # ReplayGain format: "+/-X.XX dB"
