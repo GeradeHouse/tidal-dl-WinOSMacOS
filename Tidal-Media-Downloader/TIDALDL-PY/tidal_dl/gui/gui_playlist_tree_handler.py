@@ -133,9 +133,11 @@ class PlaylistDelegate(QtWidgets.QStyledItemDelegate):
 
     def initStyleOption(
         self,
-        option: QtWidgets.QStyleOptionViewItem,
+        option: Optional[QtWidgets.QStyleOptionViewItem],
         index: QModelIndex,
     ) -> None:
+        if option is None:
+            return
         super().initStyleOption(option, index)
         tree_widget = self.tree_handler.tree_widget
         item = tree_widget.itemFromIndex(index)
@@ -1384,6 +1386,7 @@ class PlaylistTreeHandler(QObject):
             return
 
         updated_playlist: Optional[Dict[str, Any]] = None
+        next_total: Optional[int] = None
         for playlist in self._spotify_playlist_cache:
             if not isinstance(playlist, dict):
                 continue
@@ -1410,7 +1413,7 @@ class PlaylistTreeHandler(QObject):
             updated_playlist = playlist
             break
 
-        if not updated_playlist:
+        if not updated_playlist or next_total is None:
             return
 
         self._invalidate_playlist_download_count(normalized_playlist_id)

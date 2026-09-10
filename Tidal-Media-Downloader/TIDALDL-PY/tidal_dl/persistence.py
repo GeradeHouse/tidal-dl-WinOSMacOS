@@ -776,6 +776,51 @@ class LinkPersistenceManager:
 
     # --- Public Data Access and Modification Methods ---
 
+    def get_cached_spotify_playlists_for_cleanup(self) -> Dict[str, Any]:
+        """Return detached local playlist/track metadata, with no API or TTL refresh.
+
+        Link history can be incomplete or stale. It is evidence for local review,
+        not an authoritative snapshot of current Spotify playlist membership.
+        Only copy Spotify metadata, not the much larger Tidal candidate cache.
+        """
+        if self.links_data is None:
+            self.load_links()
+        data = self.links_data
+        if not isinstance(data, dict):
+            return {}
+        playlists = data.get("playlists", {})
+        folder_cache = data.get("playlist_folder_cache", {})
+        if not isinstance(playlists, dict):
+            return {}
+        if not isinstance(folder_cache, dict):
+            folder_cache = {}
+        result = {}
+        for playlist_id, entry in list(playlists.items()):
+            if not isinstance(entry, dict):
+                continue
+            links = entry.get("tracks", {})
+            if not isinstance(links, dict):
+                continue
+            tracks = []
+            for track_id, link in list(links.items()):
+                details = link.get("spotify_track_details") if isinstance(link, dict) else None
+                if not isinstance(details, dict) or not details:
+                    continue
+                track = copy.deepcopy(details)
+                track["id"] = str(track.get("id") or track_id or "").strip()
+                if track["id"]:
+                    tracks.append(track)
+            hint = folder_cache.get(str(playlist_id), {})
+            if not isinstance(hint, dict):
+                hint = {}
+            result[str(playlist_id)] = {
+                "id": str(playlist_id),
+                "name": str(hint.get("playlist_name") or entry.get("name") or "").strip(),
+                "folder_hint": str(hint.get("relative_path") or "").strip(),
+                "tracks": tracks,
+            }
+        return result
+
     def get_links_for_playlist(self, playlist_id: str) -> Dict[str, Any]:
         """
         Retrieves all track links for a given playlist ID.

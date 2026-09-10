@@ -307,7 +307,9 @@ class CustomTitleBar(QWidget):
         # Setup Menu
         self.menu = QMenu(self)
         self.settings_action = self.menu.addAction("Settings")
-        menu_button.clicked.connect(self.show_menu)
+        menu_button.setToolTip("Settings")
+        menu_button.setAccessibleName("Settings")
+        menu_button.clicked.connect(self._on_settings_triggered)
         if self.settings_action:
             self.settings_action.triggered.connect(self._on_settings_triggered)
 

@@ -223,7 +223,10 @@ class EmittingStream(QObject):
             pass  # Ignore errors flushing original stdout
 
 
-def append_text_to_output(text_edit: QTextEdit, text: str):
+GUI_PROGRESS_PATTERN = re.compile(r"\d+%.*|^\[.*\]")
+
+
+def append_text_to_output(text_edit: QTextEdit, text: str, *, filter_progress: bool = True):
     """
     Appends text to the output log QTextEdit widget.
     Only appends progress bar text if SETTINGS.showProgress is True.
@@ -233,10 +236,9 @@ def append_text_to_output(text_edit: QTextEdit, text: str):
         text (str): The text to append to the log view.
     """
     if text_edit:  # Check if the widget exists
-        if not SETTINGS.showProgress:
+        if filter_progress and not SETTINGS.showProgress:
             # Check if the text looks like a progress bar update
-            progress_pattern = re.compile(r"\d+%.*|^\[.*\]")
-            if progress_pattern.search(text):
+            if GUI_PROGRESS_PATTERN.search(text):
                 return  # Skip appending progress bar text
 
         cursor = text_edit.textCursor()

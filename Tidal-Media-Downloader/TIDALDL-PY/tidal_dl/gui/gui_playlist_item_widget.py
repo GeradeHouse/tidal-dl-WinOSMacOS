@@ -179,8 +179,10 @@ class PlaylistItemProgressWidget(QWidget):
             self.setToolTip("")
             self.setStyleSheet("")
 
-        self.style().unpolish(self)
-        self.style().polish(self)
+        style = self.style()
+        if style is not None:
+            style.unpolish(self)
+            style.polish(self)
         self.update()
 
     def set_icon(self, icon: QIcon):

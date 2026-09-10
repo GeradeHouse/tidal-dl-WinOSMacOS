@@ -34,7 +34,7 @@ def inside(path, root):
 
 
 def scan_duplicates(root, playlist_folders, progress=lambda text: None, cancelled=lambda: False):
-    """playlist_folders maps exact local directories to fetched Spotify tracks.
+    """playlist_folders maps exact local directories to supplied Spotify metadata.
 
     Only compare within a directory, and only pairs associated with the same
     online recording. Extra local tracks are not orphans to be deleted.
@@ -95,6 +95,44 @@ def _sha256(path):
         for block in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def delete_selected(root, selections, cancelled=lambda: False):
+    """Permanently delete explicitly confirmed audio duplicates, never sidecars.
+
+    Apply the same keeper, path, signature and folder-lock checks as quarantine.
+    Cancellation stops before the next file; completed deletions cannot be undone.
+    """
+    root = os.path.realpath(root)
+    removal_paths = {audio.path for audio, _, _ in selections}
+    if any(keep.path in removal_paths for _, keep, _ in selections):
+        raise ValueError("A file chosen to keep is also selected for deletion. Resolve the conflicting selections first.")
+    deleted, errors = [], []
+    seen = set()
+    for duplicate, keeper, _ in selections:
+        if cancelled():
+            errors.append("Deletion cancelled. Files already deleted cannot be restored by this application.")
+            break
+        if duplicate.path in seen:
+            continue
+        seen.add(duplicate.path)
+        try:
+            if duplicate.path == keeper.path or os.path.dirname(duplicate.path) != os.path.dirname(keeper.path):
+                raise ValueError("A duplicate must have a different retained file in the same folder.")
+            if not all(inside(audio.path, root) and not os.path.islink(audio.path) for audio in (duplicate, keeper)):
+                raise ValueError("File is outside the scan root or is a symbolic link.")
+            if os.path.splitext(duplicate.path)[1].lower() not in AUDIO_EXTENSIONS:
+                raise ValueError("Only scanned audio files can be deleted.")
+            with folder_lock(os.path.dirname(duplicate.path)):
+                if any(file_signature(audio.path) != audio.signature for audio in (duplicate, keeper)):
+                    raise ValueError("A file changed since the scan. Scan again before deleting it.")
+                if os.path.samefile(duplicate.path, keeper.path):
+                    raise ValueError("These paths refer to the same file.")
+                os.remove(duplicate.path)
+                deleted.append(duplicate.path)
+        except Exception as exc:
+            errors.append(f"{duplicate.path}: {exc}")
+    return deleted, errors
 
 
 def quarantine_selected(root, selections):

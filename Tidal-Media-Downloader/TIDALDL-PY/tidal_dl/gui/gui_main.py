@@ -6,6 +6,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 from contextlib import suppress
 from typing import Optional, List, Any, Dict, Union, Callable, TYPE_CHECKING
 
@@ -74,9 +75,10 @@ from .gui_download import DownloadHandler
 from .gui_linking_handler import LinkingGuiHandler
 from .gui_spotify_handler import SpotifyGuiHandler
 from .gui_navigation import NavigationHandler
+from .gui_performance import UIStallWatchdog
 from .gui_search import SearchBarWidget, KeywordSearchResultsController
 from .gui_playlist_tree import PlaylistTreeWidget
-from .gui_utils import enableGui, EmittingStream, append_text_to_output
+from .gui_utils import enableGui, EmittingStream, append_text_to_output, GUI_PROGRESS_PATTERN
 from .gui_quality_menu import DOWNLOAD_QUALITY_MENU_ITEMS
 from .gui_custom_dialog import CustomQMessageBox, ModernDarkProgressDialog
 from .gui_resize_handler import ResizeHandler
@@ -158,12 +160,21 @@ class MainView(QWidget):
         self.link_persistence_manager = LinkPersistenceManager()
         self._ui_freeze_last_tick = time.perf_counter()
         self._ui_freeze_monitor_timer: Optional[QTimer] = None
+        self._ui_stall_watchdog = UIStallWatchdog(logger_gui)
+        self._ui_gap_next_report = 0.0
+        self._ui_gap_count = 0
+        self._ui_gap_max_ms = 0.0
         self._deferred_linking_save_active = False
         self._busy_operation_depth = 0
         self._busy_cursor_active = False
         self._gui_closing = False
         self._original_stdout = sys.stdout
         self._gui_log_handler: Optional[logging.Handler] = None
+        self._pending_gui_logs: deque[str] = deque(maxlen=1000)
+        self._gui_log_flush_timer = QTimer(self)
+        self._gui_log_flush_timer.setSingleShot(True)
+        self._gui_log_flush_timer.setInterval(100)
+        self._gui_log_flush_timer.timeout.connect(self._flush_gui_logs)
         self.cover_cache = CoverCache()
         self.spotify_api = SpotifyAPI()
         self.player_logic = PlayerLogic(TIDAL_API, self)
@@ -174,6 +185,10 @@ class MainView(QWidget):
         self.setAutoFillBackground(False)
 
         self.initView()
+        log_document = self.c_printTextEdit.document()
+        if log_document is not None:
+            log_document.setMaximumBlockCount(2000)
+        self.c_printTextEdit.setUndoRedoEnabled(False)
 
         # FIX: Remove local imports since they're now at module level
         self.auth_handler = AuthHandler(self.spotify_api, parent=self)
@@ -280,6 +295,7 @@ class MainView(QWidget):
         self.table_handler.set_download_handler(self.download_handler)
         self.tree_handler.set_linking_handler(self.linking_gui_handler)
         self.stackedLayout.addWidget(self.settingsPage)
+        self.stackedLayout.currentChanged.connect(self._schedule_gui_log_flush)
 
         self.setMinimumSize(1000, 600)
         current_screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
@@ -312,6 +328,7 @@ class MainView(QWidget):
 
         app = QApplication.instance()
         if app:
+            app.aboutToQuit.connect(self._ui_stall_watchdog.stop)
             app.aboutToQuit.connect(self.cover_cache._save_cache)
             app.aboutToQuit.connect(self._flushDeferredLinkingPersistence)
             logger_gui.debug(
@@ -379,6 +396,8 @@ class MainView(QWidget):
         self._ui_freeze_monitor_timer.setInterval(250)
         self._ui_freeze_monitor_timer.timeout.connect(self._check_ui_responsiveness)
         self._ui_freeze_monitor_timer.start()
+        self._ui_stall_watchdog.heartbeat()
+        self._ui_stall_watchdog.start()
 
     def _current_visible_playlist_label(self) -> str:
         try:
@@ -409,9 +428,18 @@ class MainView(QWidget):
         now = time.perf_counter()
         elapsed_ms = (now - self._ui_freeze_last_tick) * 1000.0
         self._ui_freeze_last_tick = now
+        self._ui_stall_watchdog.heartbeat()
 
         if elapsed_ms < 900.0:
             return
+
+        self._ui_gap_count += 1
+        self._ui_gap_max_ms = max(self._ui_gap_max_ms, elapsed_ms)
+        if now < self._ui_gap_next_report:
+            return
+        self._ui_gap_next_report = now + 5.0
+        page = self.stackedLayout.currentWidget()
+        page_name = type(page).__name__ if page is not None else "none"
 
         queue_manager = getattr(self, "task_queue_manager", None)
         current_job = getattr(queue_manager, "current_job", None) if queue_manager else None
@@ -423,7 +451,8 @@ class MainView(QWidget):
 
         logger_gui.warning(
             "UI responsiveness gap detected | elapsed_ms=%.1f download_active=%s linking_active=%s "
-            "spotify_mutation_active=%s task_running=%s queued_jobs=%d current_job=%r visible_playlist=%s",
+            "spotify_mutation_active=%s task_running=%s queued_jobs=%d current_job=%r visible_playlist=%s "
+            "page=%s gaps_since_report=%d max_gap_ms=%.1f pending_gui_logs=%d",
             elapsed_ms,
             getattr(self, "download_active", None),
             getattr(self, "linking_active", None),
@@ -432,7 +461,13 @@ class MainView(QWidget):
             queued_jobs,
             current_job_description,
             self._current_visible_playlist_label(),
+            page_name,
+            self._ui_gap_count,
+            self._ui_gap_max_ms,
+            len(self._pending_gui_logs),
         )
+        self._ui_gap_count = 0
+        self._ui_gap_max_ms = 0.0
 
     def initView(self):
         self.title_bar = CustomTitleBar(self)
@@ -1574,15 +1609,44 @@ class MainView(QWidget):
         if getattr(self, "_gui_closing", False):
             return
 
+        # Filter individual records before batching, preserving progress settings.
+        if not SETTINGS.showProgress and GUI_PROGRESS_PATTERN.search(text):
+            return
+        self._pending_gui_logs.append(text[:16384])
+        if not self._gui_log_flush_timer.isActive():
+            self._gui_log_flush_timer.start()
+
+    @pyqtSlot()
+    def _schedule_gui_log_flush(self) -> None:
+        if not self._gui_closing and self._pending_gui_logs:
+            self._gui_log_flush_timer.start()
+
+    @pyqtSlot()
+    def _flush_gui_logs(self) -> None:
+        if self._gui_closing or not self._pending_gui_logs:
+            return
         log_widget = getattr(self, "c_printTextEdit", None)
         try:
             if log_widget is None or sip.isdeleted(log_widget):
                 return
-            append_text_to_output(log_widget, text)
+            # Keep a bounded tail in memory while Settings/the log is hidden.
+            if not log_widget.isVisible():
+                return
+            chunks = []
+            length = 0
+            while self._pending_gui_logs and length < 32768 and len(chunks) < 64:
+                chunk = self._pending_gui_logs.popleft()
+                chunks.append(chunk)
+                length += len(chunk)
+            append_text_to_output(log_widget, "".join(chunks), filter_progress=False)
+            if self._pending_gui_logs:
+                self._gui_log_flush_timer.start()
         except RuntimeError:
             return
 
     def _disconnect_gui_logging(self) -> None:
+        self._gui_log_flush_timer.stop()
+        self._pending_gui_logs.clear()
         stream = getattr(self, "stdout_stream", None)
         if stream is not None:
             with suppress(TypeError, RuntimeError):
@@ -1617,6 +1681,7 @@ class MainView(QWidget):
                     )
         else:
             self.c_printTextEdit.setVisible(True)
+            self._schedule_gui_log_flush()
             self.toggleLogButton.setText("Hide Log")
             if hasattr(self, "verticalSplitter"):
                 total_height = self.verticalSplitter.height()
@@ -1750,6 +1815,9 @@ class MainView(QWidget):
         Handles the window close event to ensure graceful shutdown of background threads.
         """
         self._gui_closing = True
+        self._ui_stall_watchdog.stop()
+        if self._ui_freeze_monitor_timer is not None:
+            self._ui_freeze_monitor_timer.stop()
         self._disconnect_gui_logging()
 
         if self.table_handler:

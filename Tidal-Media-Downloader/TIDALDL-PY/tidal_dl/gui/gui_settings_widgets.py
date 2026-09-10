@@ -155,58 +155,15 @@ class CollapsibleSection(QWidget):
         self.animation.finished.connect(self._animation_finished_update)
 
     def _calculate_target_expanded_height(self) -> int:
-        """Calculates the ideal height when fully expanded, ensuring child widgets are sized."""
-        # Iterate through items in content_layout to ensure their individual sizeHints are correct.
-        # This is especially important for QLabels with wordWrap.
-        for i in range(self.content_layout.count()):
-            item = self.content_layout.itemAt(i)
-            if item:
-                widget = item.widget()
-                # Add a check to ensure widget is not None before accessing isVisible or adjustSize
-                if widget is not None:
-                    if widget.isVisible():  # Only consider visible widgets
-                        widget.adjustSize()  # Crucial for word-wrapped QLabels or complex widgets
-
-                layout_item = (
-                    item.layout()
-                )  # Check if the item is a sub-layout (e.g., spotify_layout)
-                if layout_item:
-                    # **** CRITICAL MODIFICATION ****
-                    # 1. Activate the sub-layout first. This allows it to propose/set initial
-                    #    widths for its child widgets. This is vital for word-wrapped QLabels,
-                    #    as their heightHint depends on their width.
-                    layout_item.activate()
-
-                    # 2. Now, iterate through the sub-layout's widgets.
-                    for j in range(layout_item.count()):
-                        sub_widget_item = layout_item.itemAt(j)
-                        actual_sub_widget = (
-                            sub_widget_item.widget() if sub_widget_item else None
-                        )
-                        if actual_sub_widget is not None:
-                            if actual_sub_widget.isVisible():
-                                # adjustSize() will now use the width set by the activated layout
-                                # to correctly calculate the height for word-wrapped content.
-                                actual_sub_widget.adjustSize()
-
-                    # 3. Activate the sub-layout again. Its own sizeHint might have changed
-                    #    now that its children's sizes are finalized.
-                    layout_item.activate()
-                    # **** END OF CRITICAL MODIFICATION ****
-
-        self.content_layout.activate()  # Ensure main content_layout is up-to-date
+        """Measure wrapped content at its available width without resizing children."""
         margins = self.content_area.contentsMargins()
-        buffer = 10  # Increased buffer slightly for safety with complex layouts
-        calculated_height = (
-            self.content_layout.sizeHint().height()
-            + margins.top()
-            + margins.bottom()
-            + buffer
-        )
-        logger.debug(
-            f"[{self.toggle_button.text()}] _calculate_target_expanded_height: content_layout.sizeHint={self.content_layout.sizeHint().height()}, margins={margins.top()}+{margins.bottom()}, buffer={buffer}, total={calculated_height}"
-        )
-        return max(0, calculated_height)  # Ensure non-negative
+        width = max(1, self.content_area.contentsRect().width())
+        content_height = self.content_layout.sizeHint().height()
+        if self.content_layout.hasHeightForWidth():
+            wrapped_height = self.content_layout.heightForWidth(width)
+            if wrapped_height >= 0:
+                content_height = wrapped_height
+        return max(0, content_height + margins.top() + margins.bottom() + 10)
 
     def _update_button_text(self):
         """
@@ -304,7 +261,7 @@ class CollapsibleSection(QWidget):
             f"[{self.toggle_button.text()}] updateContentHeight called while expanded."
         )
 
-        # Recalculate the target height. This internally calls adjustSize on children.
+        # Measure content without forcing child geometry changes.
         new_target_height = self._calculate_target_expanded_height()
         current_content_height = (
             self.content_area.height()
