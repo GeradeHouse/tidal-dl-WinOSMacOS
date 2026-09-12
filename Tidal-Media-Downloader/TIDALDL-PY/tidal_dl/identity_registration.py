@@ -390,6 +390,36 @@ def scan(
                 elif not fingerprint:
                     fingerprints_deferred += 1
 
+                fully_registered = bool(
+                    current_cached
+                    and content_known
+                    and has_embedded_identity
+                    and embedded.uid == identity.uid
+                    and embedded.spotify_id == identity.spotify_id
+                    and embedded.tidal_id == identity.tidal_id
+                )
+                if fully_registered:
+                    proposals.append(
+                        Proposal(
+                            path=path,
+                            signature=before,
+                            fingerprint=fingerprint,
+                            identity=identity,
+                            status="Registered",
+                            evidence=(
+                                "Dedicated identity tags and "
+                                "the content index agree."
+                            ),
+                        )
+                    )
+                    logger.debug(
+                        "IDENTITY_SCAN_ROW path=%r status=Registered "
+                        "fingerprint_kind=%s choices=0",
+                        path,
+                        index.fingerprint_kind(fingerprint),
+                    )
+                    continue
+
                 local = read_local_audio(path)
                 if local is None:
                     raise ValueError(
@@ -667,7 +697,7 @@ def apply_one(
         backup = os.path.join(recovery, os.path.basename(path))
         original_hash = _file_hash(path, cancelled)
         shutil.copy2(path, backup)
-        with open(backup, "rb") as handle:
+        with open(backup, "rb+") as handle:
             os.fsync(handle.fileno())
         if _file_hash(backup, cancelled) != original_hash or index.signature(path) != proposal.signature:
             raise index.IdentityConflict("Backup verification failed or source changed; source was not modified.")
@@ -713,7 +743,7 @@ def apply_one(
                     "Staged audio verification failed; "
                     "original untouched."
                 )
-            with open(staged, "rb") as handle:
+            with open(staged, "rb+") as handle:
                 os.fsync(handle.fileno())
             record["registered_sha256"] = _file_hash(staged, cancelled)
             with open(os.path.join(recovery, "recovery.json"), "x", encoding="utf-8") as handle:

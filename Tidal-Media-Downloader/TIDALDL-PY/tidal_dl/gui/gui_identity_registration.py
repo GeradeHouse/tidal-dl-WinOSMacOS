@@ -242,20 +242,29 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
         selection_help = QtWidgets.QLabel(
             "Highlighted rows are selected for registration. Ctrl-click toggles rows; "
             "Shift-click selects a range; Ctrl+Shift-click adds a range; Ctrl+A selects "
-            "all available rows when the table has focus. Only Identified and Review "
-            "association rows are selectable. Changing an association does not select the row."
+            "all registerable rows when the table has focus. Select identified only excludes "
+            "already Registered rows and metadata-only Review association rows."
         )
         selection_help.setWordWrap(True)
         layout.addWidget(selection_help)
 
         selection_bar = QtWidgets.QHBoxLayout()
-        self.select_all = QtWidgets.QPushButton("Select all")
+        self.select_identified = QtWidgets.QPushButton(
+            "Select identified only"
+        )
+        self.select_identified.clicked.connect(
+            self._select_identified_only
+        )
+        self.select_all = QtWidgets.QPushButton(
+            "Select all registerable"
+        )
         self.select_all.clicked.connect(self.table.selectAll)
         self.clear_selection = QtWidgets.QPushButton("Clear selection")
         self.clear_selection.clicked.connect(self.table.clearSelection)
         self.selection_count = QtWidgets.QLabel(
             "0 files selected · 0 available to register"
         )
+        selection_bar.addWidget(self.select_identified)
         selection_bar.addWidget(self.select_all)
         selection_bar.addWidget(self.clear_selection)
         selection_bar.addWidget(self.selection_count, 1)
@@ -468,10 +477,11 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
 
     @staticmethod
     def _proposal_is_registerable(proposal) -> bool:
-        return (
-            proposal.status in ("Review association", "Identified")
-            and bool(proposal.choices or proposal.identity is not None)
-        )
+        if proposal.status == "Identified":
+            return proposal.identity is not None
+        if proposal.status == "Review association":
+            return bool(proposal.choices)
+        return False
 
     def _collect_selections(self):
         selections = []
@@ -483,9 +493,12 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
             if not self._proposal_is_registerable(proposal):
                 continue
 
-            combo = self.table.cellWidget(row, 4)
-            if proposal.choices:
-                if not isinstance(combo, QtWidgets.QComboBox):
+            if proposal.status == "Review association":
+                combo = self.table.cellWidget(row, 4)
+                if (
+                    not proposal.choices
+                    or not isinstance(combo, QtWidgets.QComboBox)
+                ):
                     continue
                 identity, _ = proposal.choices[combo.currentIndex()]
             else:
@@ -495,6 +508,35 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
                 selections.append((proposal, identity))
 
         return selections
+
+    def _select_identified_only(self):
+        if self._busy:
+            return
+
+        model = self.table.model()
+        selection_model = self.table.selectionModel()
+        if model is None or selection_model is None:
+            return
+
+        selection = QtCore.QItemSelection()
+        last_column = self.table.columnCount() - 1
+
+        for row, proposal in enumerate(self.proposals):
+            if (
+                proposal.status == "Identified"
+                and self._proposal_is_registerable(proposal)
+            ):
+                selection.select(
+                    model.index(row, 0),
+                    model.index(row, last_column),
+                )
+
+        self.table.clearSelection()
+        selection_model.select(
+            selection,
+            QtCore.QItemSelectionModel.SelectionFlag.Select
+            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
+        )
 
     def _selection_changed(self, *_args):
         model = self.table.selectionModel()
@@ -525,11 +567,19 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
             for proposal in self.proposals
             if self._proposal_is_registerable(proposal)
         )
+        identified_available = any(
+            proposal.status == "Identified"
+            and self._proposal_is_registerable(proposal)
+            for proposal in self.proposals
+        )
 
         self.selection_count.setText(
             f"{len(selections)} files selected · {available} available to register"
         )
         self.apply_button.setEnabled(bool(selections) and not self._busy)
+        self.select_identified.setEnabled(
+            identified_available and not self._busy
+        )
         self.select_all.setEnabled(bool(available) and not self._busy)
         self.clear_selection.setEnabled(bool(rows) and not self._busy)
 
@@ -602,21 +652,31 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
                 item.setToolTip(text)
                 self.table.setItem(row, column, item)
 
-            association_item = QtWidgets.QTableWidgetItem()
+            association_text = (
+                "Existing identity (verified)"
+                if (
+                    proposal.status in ("Registered", "Identified")
+                    and proposal.identity is not None
+                )
+                else "—"
+            )
+            association_item = QtWidgets.QTableWidgetItem(
+                association_text
+            )
             association_item.setFlags(flags)
             self.table.setItem(row, 4, association_item)
 
-            combo = QtWidgets.QComboBox()
-            if proposal.choices:
+            if (
+                proposal.status == "Review association"
+                and proposal.choices
+            ):
+                combo = QtWidgets.QComboBox()
                 for _, description in proposal.choices:
                     combo.addItem(description)
-                combo.setEnabled(proposal.status == "Review association")
-            else:
-                combo.addItem("Existing identity (verified)")
-                combo.setEnabled(False)
-
-            self.table.setCellWidget(row, 4, combo)
-            combo.currentIndexChanged.connect(self._selection_changed)
+                self.table.setCellWidget(row, 4, combo)
+                combo.currentIndexChanged.connect(
+                    self._selection_changed
+                )
 
         counts = registration.summary(self.proposals)
         self.status.setText(
