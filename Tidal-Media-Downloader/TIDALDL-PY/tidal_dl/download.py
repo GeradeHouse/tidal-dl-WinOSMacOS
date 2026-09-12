@@ -35,6 +35,7 @@ from mutagen import File as MutagenFile
 from . import identity_index
 from .decryption import *
 from .format import getAlbumPath, getAudioTypeFolder, getTrackPath
+from .playlist_folders import get_linked_playlist_folder, validate_linked_playlist_folder
 from .metadata.album import AlbumMetadata
 from .metadata.track import TrackMetadata
 from .metadata.tagger import tag_file
@@ -476,6 +477,17 @@ def _find_existing_playlist_track_path(
                 "Existing audio occupies the intended output path but does not match "
                 f"the requested recording. No file was overwritten: {candidate_path}"
             )
+
+    linked_folder = get_linked_playlist_folder(playlist_context)
+    if linked_folder:
+        if read_audio_tags:
+            matched = find_existing_recording(linked_folder, target_recordings, expected_extensions)
+        else:
+            matched = _scan_single_playlist_folder_for_track(
+                linked_folder, expected_stems, expected_extensions,
+                str(getattr(track, "id", "") or ""), allow_stem_match=True,
+            )
+        return _finish(matched, "explicit_playlist_folder")
 
     download_root, computed_relative_playlist_dir = _extract_download_root_and_relative_playlist_dir(
         candidate_paths[0]
@@ -1190,6 +1202,8 @@ def downloadTrack(
     check = False
     actual_download_part_path = None
     destination_lock = None
+    conversion_workspace = None
+    linked_final_output = None
     try:
         track = __validateTrackObject__(track)
         if isinstance(download_item, DownloadItem):
@@ -1446,6 +1460,7 @@ def downloadTrack(
             stream,
             AudioQuality.MP3 if requested_mp3 else intended_quality,
         )
+        linked_folder = validate_linked_playlist_folder(playlist_context)
         path = getTrackPath(
             track,
             stream,
@@ -1534,7 +1549,11 @@ def downloadTrack(
             f"path={path!r} url_host={str(url_list[0]).split('/')[2] if '://' in str(url_list[0]) else '-'}",
         )
         try:
-            should_skip_existing_file = __isSkip__(path, url_list[0])
+            skip_path = (
+                os.path.splitext(path)[0] + final_extension
+                if linked_folder else path
+            )
+            should_skip_existing_file = __isSkip__(skip_path, url_list[0])
             _log_phase_end(
                 "final_file_skip_check",
                 phase_started,
@@ -1554,6 +1573,15 @@ def downloadTrack(
         if should_skip_existing_file:
             logger.info(f"{os.path.basename(path)} (skip:already exists!)")
             return True, ""
+
+        if linked_folder and os.path.splitext(path)[1].lower() != final_extension:
+            # Linked folders can mix formats. Never overwrite or delete a
+            # user's FLAC/M4A while producing an MP3 with the same basename.
+            linked_final_output = os.path.splitext(path)[0] + final_extension
+            conversion_workspace = tempfile.TemporaryDirectory(
+                prefix=".tidal-convert-", dir=os.path.dirname(path)
+            )
+            path = os.path.join(conversion_workspace.name, os.path.basename(path))
 
         actual_download_part_path = path + ".part"
         if main_view_instance.cancel_requested:
@@ -1619,6 +1647,14 @@ def downloadTrack(
             except Exception as e:
                 logger.error(f"Demuxing of FLAC stream failed: {e}")
                 return False, str(e)
+
+        if linked_final_output:
+            if os.path.splitext(path)[1].lower() != final_extension:
+                raise ValueError("Audio conversion failed; no file was added to the linked folder.")
+            if os.path.exists(linked_final_output):
+                raise FileExistsError(f"Output appeared during conversion; it was not overwritten: {linked_final_output}")
+            os.replace(path, linked_final_output)
+            path = linked_final_output
 
         contributors = None
         if track.id:
@@ -1703,8 +1739,12 @@ def downloadTrack(
             if (not check or interrupted) and actual_download_part_path and os.path.exists(actual_download_part_path):
                 os.remove(actual_download_part_path)
         finally:
-            if destination_lock is not None:
-                destination_lock.release()
+            try:
+                if conversion_workspace is not None:
+                    conversion_workspace.cleanup()
+            finally:
+                if destination_lock is not None:
+                    destination_lock.release()
 
 
 # Modify signature to accept playlist_context (including Album)

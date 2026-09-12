@@ -65,6 +65,10 @@ from tidal_dl.gui.gui_playlist_tree import PlaylistTreeWidget
 from tidal_dl.gui.gui_linking_handler import LinkingGuiHandler
 from tidal_dl.gui.gui_playlist_item_widget import PlaylistItemProgressWidget
 from tidal_dl.gui.gui_quality_menu import DOWNLOAD_QUALITY_MENU_ITEMS
+from tidal_dl.format import getPlaylistPath
+from tidal_dl.paths import get_user_download_path
+from tidal_dl.playlist_folders import get_linked_playlist_folder
+from tidal_dl.gui.gui_playlist_folders import PlaylistFolderController
 
 if TYPE_CHECKING:
     from tidal_dl.gui.gui_main import MainView
@@ -416,6 +420,7 @@ class PlaylistTreeHandler(QObject):
 
         self._setup_tree_widget()
         self._connect_tree_signals()
+        self.folder_controller = PlaylistFolderController(self)
 
     def _playlist_tree_selected_count(self) -> int:
         try:
@@ -734,6 +739,125 @@ class PlaylistTreeHandler(QObject):
         self.filter_input_widget.textChanged.connect(self._apply_playlist_filter)
 
     # --- Helper Methods ---
+    def _connect_playlist_folder_button(
+        self, widget: PlaylistItemProgressWidget, playlist_id: str
+    ) -> None:
+        if not self.folder_icon.isNull():
+            widget.folder_button.setIcon(self.folder_icon)
+        widget.openFolderRequested.connect(
+            partial(self._open_playlist_folder, playlist_id)
+        )
+        widget.folder_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+        def show_folder_menu(position: QPoint) -> None:
+            menu = QMenu(widget.folder_button)
+            menu.setStyleSheet(MENU_STYLESHEET)
+            self.folder_controller.add_menu(menu, playlist_id)
+            self._popup_context_menu(menu, widget.folder_button.mapToGlobal(position))
+
+        widget.folder_button.customContextMenuRequested.connect(show_folder_menu)
+        QTimer.singleShot(0, partial(self.folder_controller.update_tooltip, playlist_id))
+
+    def _open_playlist_folder(self, playlist_id: str) -> None:
+        """Open this row's local folder without changing the selected playlist."""
+        item = self.id_to_item.get(playlist_id)
+        if item is None:
+            return
+        descriptor = self._get_playlist_download_count_descriptor(item)
+        if descriptor is None:
+            return
+        _, _, playlist_name, _, playlist_context = descriptor
+
+        try:
+            linked_folder = get_linked_playlist_folder(playlist_context)
+            if linked_folder:
+                if os.path.isdir(linked_folder):
+                    self._open_local_folder(linked_folder)
+                else:
+                    self.folder_controller.offer_missing(playlist_id, linked_folder)
+                return
+            download_root = os.path.abspath(
+                get_user_download_path(SETTINGS.downloadPath)
+            )
+            candidates: List[str] = []
+            persistence_manager = getattr(
+                self.main_view, "link_persistence_manager", None
+            )
+            if persistence_manager is not None:
+                folder_hint = persistence_manager.get_playlist_folder_hint(playlist_id)
+                if folder_hint:
+                    candidates.append(os.path.join(download_root, folder_hint))
+
+            # Match current audio-type folders as well as the legacy layout.
+            # Use the download formatter so custom names and UUIDs are respected.
+            for audio_type in ("flac", "mp3", "m4a", "mp4", "aac", "unknown", ""):
+                folder = getPlaylistPath(
+                    playlist_context, os.path.join(download_root, audio_type)
+                )
+                if folder:
+                    candidates.append(folder)
+
+            folders: List[str] = []
+            seen: Set[str] = set()
+            for candidate in candidates:
+                folder = os.path.abspath(candidate)
+                key = os.path.normcase(os.path.realpath(folder))
+                if key not in seen and os.path.isdir(folder):
+                    seen.add(key)
+                    folders.append(folder)
+        except Exception:
+            logger.exception("Could not resolve folder for playlist %s", playlist_id)
+            QtWidgets.QMessageBox.warning(
+                self.tree_widget,
+                "Open playlist folder",
+                "Could not find the local playlist folder. Check your download location settings.",
+            )
+            return
+
+        if not folders:
+            self.folder_controller.offer_missing(playlist_id)
+            return
+
+        if len(folders) == 1:
+            self._open_local_folder(folders[0])
+            return
+
+        # A playlist can have separate FLAC/MP3/etc. folders. Let the user choose
+        # instead of opening several file-manager windows or an arbitrary format.
+        menu = QMenu(self.tree_widget)
+        menu.setStyleSheet(MENU_STYLESHEET)
+        menu.addSection("Open playlist folder")
+        for folder in folders:
+            try:
+                label = os.path.relpath(folder, download_root)
+            except ValueError:
+                label = folder
+            action = menu.addAction(self.folder_icon, label.replace("&", "&&"))
+            if action is None:
+                continue
+            action.setToolTip(folder)
+            action.triggered.connect(partial(self._open_local_folder, folder))
+        widget = self.item_widgets.get(playlist_id)
+        position = (
+            widget.folder_button.mapToGlobal(widget.folder_button.rect().bottomLeft())
+            if widget is not None
+            else QtGui.QCursor.pos()
+        )
+        menu.exec(position)
+        menu.deleteLater()
+
+    def _open_local_folder(self, folder: str) -> None:
+        # Qt uses Explorer on Windows, Finder on macOS, and the default file
+        # manager on Linux. Local-file URLs safely handle spaces and Unicode.
+        if not os.path.isdir(folder) or not QtGui.QDesktopServices.openUrl(
+            QtCore.QUrl.fromLocalFile(folder)
+        ):
+            QtWidgets.QMessageBox.warning(
+                self.tree_widget,
+                "Open playlist folder",
+                f"Could not open the folder:\n{folder}",
+            )
+
     def _get_name_from_item(self, item: QTreeWidgetItem) -> str:
         """Safely retrieves the playlist name without sidebar status text."""
         descriptor = self._get_playlist_download_count_descriptor(item)
@@ -1281,6 +1405,7 @@ class PlaylistTreeHandler(QObject):
                 self.tree_widget.setItemWidget(item, 0, widget)
                 self.id_to_item[str(playlist_uuid)] = item
                 self.item_widgets[str(playlist_uuid)] = widget
+                self._connect_playlist_folder_button(widget, str(playlist_uuid))
                 widget_count += 1
                 
                 # Force widget layout update after setting as item widget
@@ -1604,6 +1729,7 @@ class PlaylistTreeHandler(QObject):
                 self.tree_widget.setItemWidget(item, 0, widget)
                 self.id_to_item[str(playlist_id)] = item
                 self.item_widgets[str(playlist_id)] = widget
+                self._connect_playlist_folder_button(widget, str(playlist_id))
                 widget_count += 1
 
                 # Force widget layout update after setting as item widget
@@ -2072,6 +2198,12 @@ class PlaylistTreeHandler(QObject):
 
         num_selected = len(playlist_items)
         plural_s = "s" if num_selected > 1 else ""
+
+        if num_selected == 1:
+            descriptor = self._get_playlist_download_count_descriptor(playlist_items[0])
+            if descriptor:
+                self.folder_controller.add_menu(menu, descriptor[0])
+                menu.addSeparator()
 
         def do_copy():
             names = [self._get_name_from_item(item) for item in playlist_items]

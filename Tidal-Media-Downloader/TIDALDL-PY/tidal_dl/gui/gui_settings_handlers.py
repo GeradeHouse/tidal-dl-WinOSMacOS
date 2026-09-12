@@ -59,6 +59,7 @@ def load_initial_settings(self: "SettingsPage"):
     assert self.spotifyClientSecretInput is not None
     assert self.chkAutoSpotifyLogin is not None
     assert self.chkSpotifyUsePlaylistFolders is not None
+    assert self.cmbSpotifyAudioFeaturesMode is not None
     assert self.downloadPathInput is not None
     assert self.downloadPathEdit is not None
     assert self.albumFolderFormatEdit is not None
@@ -103,6 +104,21 @@ def load_initial_settings(self: "SettingsPage"):
             bool(getattr(SETTINGS, "autoSpotifyLogin", False))
         )
         self.chkSpotifyUsePlaylistFolders.setChecked(bool(getattr(SETTINGS, "spotifyUsePlaylistFolders", True)))
+        spotify_audio_features_mode = str(
+            getattr(SETTINGS, "spotifyAudioFeaturesMode", "auto") or "auto"
+        ).strip().lower()
+        spotify_audio_features_mode_index = (
+            self.cmbSpotifyAudioFeaturesMode.findData(
+                spotify_audio_features_mode
+            )
+        )
+        if spotify_audio_features_mode_index < 0:
+            spotify_audio_features_mode_index = (
+                self.cmbSpotifyAudioFeaturesMode.findData("auto")
+            )
+        self.cmbSpotifyAudioFeaturesMode.setCurrentIndex(
+            spotify_audio_features_mode_index
+        )
 
         # Paths & Formats
         self.downloadPathInput.setText(SETTINGS.downloadPath)
@@ -356,6 +372,7 @@ def save_settings(self: "SettingsPage"):
     assert self.spotifyClientSecretInput is not None
     assert self.chkAutoSpotifyLogin is not None
     assert self.chkSpotifyUsePlaylistFolders is not None
+    assert self.cmbSpotifyAudioFeaturesMode is not None
     assert self.downloadPathEdit is not None
     assert self.albumFolderFormatEdit is not None
     assert self.playlistFolderFormatEdit is not None
@@ -383,6 +400,9 @@ def save_settings(self: "SettingsPage"):
         # Store current Spotify credentials before updating
         old_spotify_client_id = getattr(SETTINGS, "spotifyClientId", "")
         old_spotify_client_secret = getattr(SETTINGS, "spotifyClientSecret", "")
+        old_spotify_audio_features_mode = str(
+            getattr(SETTINGS, "spotifyAudioFeaturesMode", "auto") or "auto"
+        ).strip().lower()
 
         old_api_key_index_raw = getattr(SETTINGS, "apiKeyIndex", 0)
         old_api_key_index = old_api_key_index_raw if isinstance(old_api_key_index_raw, int) else 0
@@ -404,6 +424,21 @@ def save_settings(self: "SettingsPage"):
         # Auto Spotify Login
         SETTINGS.autoSpotifyLogin = self.chkAutoSpotifyLogin.isChecked()
         SETTINGS.spotifyUsePlaylistFolders = self.chkSpotifyUsePlaylistFolders.isChecked()
+        selected_spotify_audio_features_mode = (
+            self.cmbSpotifyAudioFeaturesMode.currentData()
+        )
+        if selected_spotify_audio_features_mode not in {
+            "auto",
+            "force_on",
+            "off",
+        }:
+            selected_spotify_audio_features_mode = "auto"
+        new_spotify_audio_features_mode = str(
+            selected_spotify_audio_features_mode
+        )
+        SETTINGS.spotifyAudioFeaturesMode = (
+            new_spotify_audio_features_mode
+        )
 
         # --- Download Paths & Format Settings ---
         SETTINGS.downloadPath = self.downloadPathEdit.text()
@@ -464,6 +499,26 @@ def save_settings(self: "SettingsPage"):
 
         # Persist settings to storage
         SETTINGS.save()
+        spotify_audio_features_mode_changed = (
+            new_spotify_audio_features_mode
+            != old_spotify_audio_features_mode
+        )
+        if (
+            spotify_audio_features_mode_changed
+            and new_spotify_audio_features_mode != "off"
+        ):
+            spotify_api = getattr(
+                self.auth_handler,
+                "spotify_api",
+                None,
+            )
+            reset_detection = getattr(
+                spotify_api,
+                "reset_audio_features_detection",
+                None,
+            )
+            if callable(reset_detection):
+                reset_detection()
         logger.debug("Settings saved to storage")
         logger.debug(f"Saved download path: {SETTINGS.downloadPath}")
 

@@ -32,6 +32,7 @@ from tidal_dl.gui.gui_utils import format_duration_ms
 from tidal_dl.gui.gui_custom_dialog import CustomQMessageBox
 from tidal_dl.gui.gui_cover_cache import CoverArtWorker
 from tidal_dl.persistence import LinkPersistenceManager
+from tidal_dl.playlist_folders import get_linked_playlist_folder
 from tidal_dl.format import getAudioTypeFolder, getTrackPath
 from tidal_dl.paths import get_user_download_path
 from tidal_dl.model import Artist, StreamUrl
@@ -2004,16 +2005,20 @@ class TableHandler(QObject):
         if not candidate_paths:
             return set(), set()
 
-        download_root, computed_relative_playlist_dir = self._extract_download_root_and_relative_playlist_dir(
-            candidate_paths[0]
-        )
+        linked_folder = get_linked_playlist_folder(playlist_context)
+        if linked_folder:
+            download_root, computed_relative_playlist_dir = os.path.split(linked_folder)
+        else:
+            download_root, computed_relative_playlist_dir = self._extract_download_root_and_relative_playlist_dir(
+                candidate_paths[0]
+            )
         if not download_root or not computed_relative_playlist_dir:
             return set(), set()
 
         playlist_id, _ = self._extract_playlist_identity(playlist_context)
         persisted_relative_playlist_dir = (
             self.persistence_manager.get_playlist_folder_hint(playlist_id)
-            if playlist_id
+            if playlist_id and not linked_folder
             else None
         )
 
@@ -2195,6 +2200,9 @@ class TableHandler(QObject):
         if isinstance(playlist_context, dict):
             context_type = str(playlist_context.get("type") or context_type)
 
+        linked_folder = get_linked_playlist_folder(playlist_context)
+        if linked_folder:
+            return f"{context_type}:{playlist_id}:folder:{linked_folder}"
         if playlist_id:
             return f"{context_type}:{playlist_id}"
         if playlist_name:
@@ -2209,6 +2217,16 @@ class TableHandler(QObject):
         candidate_paths = self._build_candidate_track_paths(track, playlist_context)
         if not candidate_paths:
             return None
+
+        linked_folder = get_linked_playlist_folder(playlist_context)
+        if linked_folder:
+            return self._scan_single_playlist_folder_for_track(
+                linked_folder,
+                {os.path.splitext(os.path.basename(path))[0] for path in candidate_paths},
+                {os.path.splitext(path)[1].lower() for path in candidate_paths},
+                str(getattr(track, "id", "") or ""),
+                allow_stem_match=True,
+            )
 
         download_root, computed_relative_playlist_dir = self._extract_download_root_and_relative_playlist_dir(
             candidate_paths[0]

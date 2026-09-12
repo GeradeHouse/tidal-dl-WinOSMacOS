@@ -264,8 +264,14 @@ def getAlbumPath(album: Album, artistName: str, albumArtistName: str, flag: str)
     return full_path
 
 
-def getPlaylistPath(playlist: Union[Playlist, Dict[str, Any]], base_path: Optional[str] = None) -> Optional[str]:
+def getPlaylistPath(playlist: Union[Playlist, Dict[str, Any]], base_path: Optional[str] = None, *, use_folder_link: bool = True) -> Optional[str]:
     """Generates the directory path for a playlist based on settings."""
+    from .playlist_folders import get_linked_playlist_folder
+
+    if use_folder_link:
+        linked_folder = get_linked_playlist_folder(playlist)
+        if linked_folder:
+            return linked_folder
     playlistName = "Unknown Playlist"
     playlistUUID = "UnknownUUID"
 
@@ -439,6 +445,17 @@ def getTrackPath(track: Track, stream: Optional[StreamUrl], artist: str, artists
     # Construct the full, absolute path
     filename_with_ext = f"{filename_format.strip()}{extension}"
     final_path = os.path.join(base_path, sub_folder, filename_with_ext)
+
+    # Explicit destinations are final playlist folders, not relative templates.
+    # Do not collapse paths outside the download root or append audio-type dirs.
+    from .playlist_folders import get_linked_playlist_folder
+    linked_folder = get_linked_playlist_folder(playlist_context)
+    if linked_folder:
+        final_path = os.path.abspath(os.path.join(linked_folder, filename_with_ext))
+        from .playlist_folders import canonical_folder
+        canonical_root = canonical_folder(linked_folder)
+        if os.path.commonpath([canonical_root, canonical_folder(final_path)]) != canonical_root:
+            raise ValueError("The track filename format must stay inside the linked playlist folder.")
 
     logger.debug(f"getTrackPath final path: '{final_path}'")
     return final_path

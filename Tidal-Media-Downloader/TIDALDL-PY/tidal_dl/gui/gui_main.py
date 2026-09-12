@@ -176,7 +176,7 @@ class MainView(QWidget):
         self._gui_log_flush_timer.setInterval(100)
         self._gui_log_flush_timer.timeout.connect(self._flush_gui_logs)
         self.cover_cache = CoverCache()
-        self.spotify_api = SpotifyAPI()
+        self.spotify_api = SpotifyAPI(self.link_persistence_manager)
         self.player_logic = PlayerLogic(TIDAL_API, self)
         self._toast_timer: Optional[QTimer] = None
 

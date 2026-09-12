@@ -29,6 +29,7 @@ class PlaylistItemProgressWidget(QWidget):
     
     # Signal emitted when the widget changes size (e.g., showing/hiding progress bar)
     geometryRequest = pyqtSignal()
+    openFolderRequested = pyqtSignal()
 
     def __init__(self, name: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -63,12 +64,42 @@ class PlaylistItemProgressWidget(QWidget):
         font = self.name_label.font()
         font.setWeight(QFont.Weight.Medium)
         self.name_label.setFont(font)
+        self.name_label.setMinimumWidth(0)
         self.name_label.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Fixed
         )
-        top_row_layout.addWidget(self.name_label)
-        top_row_layout.addStretch()
+        top_row_layout.addWidget(self.name_label, 1)
+
+        # Keep the folder action visible even when a playlist title is long.
+        self.folder_button = QtWidgets.QToolButton(top_row_widget)
+        self.folder_button.setAutoRaise(True)
+        self.folder_button.setFixedSize(22, 22)
+        self.folder_button.setIconSize(QSize(14, 14))
+        widget_style = self.style()
+        if widget_style is not None:
+            self.folder_button.setIcon(
+                widget_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon)
+            )
+        self.folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.folder_button.setToolTip("Open local playlist folder")
+        self.folder_button.setAccessibleName(f"Open local folder for {name}")
+        self.folder_button.setStyleSheet("""
+            QToolButton {
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 2px;
+            }
+            QToolButton:hover, QToolButton:focus {
+                background-color: rgba(128, 128, 128, 70);
+            }
+            QToolButton:pressed {
+                background-color: rgba(128, 128, 128, 110);
+            }
+        """)
+        self.folder_button.clicked.connect(lambda: self.openFolderRequested.emit())
+        top_row_layout.addWidget(self.folder_button)
 
         self.main_layout.addWidget(top_row_widget)
 

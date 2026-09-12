@@ -116,15 +116,30 @@ class DownloadStructureMigrationWorker(QObject):
         if not os.path.isdir(root_path):
             return []
 
+        from tidal_dl.playlist_folders import PLAYLIST_FOLDERS, canonical_folder
+
+        linked_folders = tuple(canonical_folder(path) for path in PLAYLIST_FOLDERS.snapshot().values())
+
+        def inside_linked_folder(path: str) -> bool:
+            candidate = canonical_folder(path)
+            return any(
+                candidate == linked or candidate.startswith(linked + os.sep)
+                for linked in linked_folders
+            )
+
         plan: List[DownloadMigrationPlanItem] = []
         legacy_lyrics_paths: List[str] = []
         planned_audio_folders_by_relative_stem: Dict[str, str] = {}
 
         for current_root, dirnames, filenames in os.walk(root_path):
+            if inside_linked_folder(current_root):
+                dirnames[:] = []
+                continue
             dirnames[:] = [
                 dirname
                 for dirname in dirnames
                 if dirname.lower() not in MANAGED_TOP_LEVEL_FOLDERS
+                and not inside_linked_folder(os.path.join(current_root, dirname))
             ]
 
             for filename in filenames:

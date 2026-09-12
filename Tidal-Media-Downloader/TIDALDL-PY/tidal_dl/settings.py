@@ -90,6 +90,7 @@ class Settings(aigpy.model.ModelBase):
     spotifyClientId = ""
     spotifyClientSecret = ""
     spotifyRedirectUri = "http://127.0.0.1:8888/callback"  # Use loopback IP literal
+    spotifyAudioFeaturesMode = "auto"
 
     # Playlist Cover Cache Settings
     playlistCoverCachePath: Optional[str] = None  # Type hint allows str or None
@@ -143,6 +144,12 @@ class Settings(aigpy.model.ModelBase):
             self.spotifyClientSecret = ""
         if not hasattr(self, "spotifyRedirectUri") or not self.spotifyRedirectUri:
             self.spotifyRedirectUri = "http://127.0.0.1:8888/callback"
+        spotify_audio_features_mode = str(
+            getattr(self, "spotifyAudioFeaturesMode", "auto") or "auto"
+        ).strip().lower()
+        if spotify_audio_features_mode not in {"auto", "force_on", "off"}:
+            spotify_audio_features_mode = "auto"
+        self.spotifyAudioFeaturesMode = spotify_audio_features_mode
         if not hasattr(self, "autoSpotifyLogin"):
             self.autoSpotifyLogin = False
         if not hasattr(self, "spotifyUsePlaylistFolders"):
@@ -245,6 +252,7 @@ class Settings(aigpy.model.ModelBase):
             if hasattr(self, "spotifyRedirectUri")
             else "http://127.0.0.1:8888/callback"
         )
+        data["spotifyAudioFeaturesMode"] = self.spotifyAudioFeaturesMode
         data["autoSpotifyLogin"] = self.autoSpotifyLogin
         data["spotifyUsePlaylistFolders"] = self.spotifyUsePlaylistFolders
         data["tidalStartCollapsed"] = self.tidalStartCollapsed

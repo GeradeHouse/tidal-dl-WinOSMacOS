@@ -30,6 +30,7 @@ from ..tidal import TIDAL_API, AudioQuality, Track, Album, Playlist, Artist
 from ..download import downloadTrack as core_downloadTrack
 from ..download_item import DownloadItem
 from ..format import getAudioTypeFolder, getTrackPath
+from ..playlist_folders import validate_linked_playlist_folder
 from ..model import StreamUrl
 from ..settings import SETTINGS
 from .gui_utils import show_in_folder
@@ -84,8 +85,11 @@ class DownloadWorker(QObject):
         failures: List[tuple[str, str, str]] = []
         completed_source_ids = set()
         try:
+            # Fail once for an unavailable explicit destination, rather than
+            # failing every track or creating a replacement folder elsewhere.
+            linked_folder = validate_linked_playlist_folder(self.playlist_context)
             # Set working directory on Windows if needed
-            if platform.system() == "Windows":
+            if platform.system() == "Windows" and not linked_folder:
                 download_path = get_user_download_path(SETTINGS.downloadPath)
                 os.makedirs(download_path, exist_ok=True)
                 # os.chdir(download_path) #removed this line, this was causing the issue

@@ -353,8 +353,12 @@ class TaskQueueManager(QObject):
 
         def worker() -> None:
             missing_count = 0
+            preview_start = time.perf_counter()
             try:
-                all_tracks_meta = self.main_view.spotify_api.get_playlist_tracks(playlist_id)
+                all_tracks_meta = self.main_view.spotify_api.get_playlist_tracks(
+                    playlist_id,
+                    include_audio_features=False,
+                )
                 if all_tracks_meta:
                     persisted_links = self.main_view.link_persistence_manager.get_links_for_playlist(playlist_id)
                     persisted_tracks = persisted_links.get("tracks", {})
@@ -396,6 +400,8 @@ class TaskQueueManager(QObject):
                         filtered_tracks = self.main_view.table_handler.filter_non_completed_tracks(
                             linked_tracks_for_download,
                             playlist_data,
+                            allow_slow_fallback=False,
+                            reason="queued_spotify_non_completed_preview",
                         )
                         missing_count = len(filtered_tracks)
             except Exception as ex:
@@ -404,6 +410,13 @@ class TaskQueueManager(QObject):
                     playlist_id,
                     ex,
                     exc_info=True,
+                )
+            finally:
+                logger.info(
+                    "Spotify non-completed preview finished | playlist_id=%s missing=%d elapsed_ms=%.1f",
+                    playlist_id,
+                    missing_count,
+                    (time.perf_counter() - preview_start) * 1000.0,
                 )
 
             QtCore.QMetaObject.invokeMethod(
@@ -665,9 +678,27 @@ class TaskQueueManager(QObject):
                     playlist_id,
                     non_completed_only,
                 )
+                include_audio_features = not non_completed_only
                 spotify_fetch_start = time.perf_counter()
-                all_tracks_meta = self.main_view.spotify_api.get_playlist_tracks(playlist_id)
-                spotify_fetch_elapsed_ms = (time.perf_counter() - spotify_fetch_start) * 1000.0
+                logger.info(
+                    "Spotify playlist metadata fetch starting | playlist_id=%s include_audio_features=%s",
+                    playlist_id,
+                    include_audio_features,
+                )
+                all_tracks_meta = self.main_view.spotify_api.get_playlist_tracks(
+                    playlist_id,
+                    include_audio_features=include_audio_features,
+                )
+                spotify_fetch_elapsed_ms = (
+                    time.perf_counter() - spotify_fetch_start
+                ) * 1000.0
+                logger.info(
+                    "Spotify playlist metadata fetch finished | playlist_id=%s track_count=%d include_audio_features=%s elapsed_ms=%.1f",
+                    playlist_id,
+                    len(all_tracks_meta or []),
+                    include_audio_features,
+                    spotify_fetch_elapsed_ms,
+                )
                 if spotify_fetch_elapsed_ms > SLOW_QUEUE_PHASE_MS:
                     logger.warning(
                         "Spotify playlist track fetch was slow | playlist_id=%s playlist_name=%s "
@@ -698,6 +729,7 @@ class TaskQueueManager(QObject):
                 skipped_not_found_or_none_match = 0
                 skipped_deserialize_error = 0
                 skipped_missing_track_id = 0
+                link_resolution_start = time.perf_counter()
 
                 for i, meta in enumerate(all_tracks_meta):
                     spotify_id = meta.get("id")
@@ -764,8 +796,13 @@ class TaskQueueManager(QObject):
                         # Not in persistence at all -> Needs linking
                         unlinked_tracks_for_worker.append((i, meta))
 
+                link_resolution_elapsed_ms = (
+                    time.perf_counter() - link_resolution_start
+                ) * 1000.0
                 logger.info(
-                    "Spotify pre-download summary | playlist_id=%s total=%d persisted=%d linked_ready=%d unlinked=%d skipped_manual_review=%d skipped_not_found=%d skipped_deserialize_error=%d skipped_missing_track_id=%d",
+                    "Spotify pre-download summary | playlist_id=%s total=%d persisted=%d linked_ready=%d "
+                    "unlinked=%d skipped_manual_review=%d skipped_not_found=%d skipped_deserialize_error=%d "
+                    "skipped_missing_track_id=%d link_resolution_elapsed_ms=%.1f",
                     playlist_id,
                     len(all_tracks_meta),
                     persisted_track_hits,
@@ -775,6 +812,7 @@ class TaskQueueManager(QObject):
                     skipped_not_found_or_none_match,
                     skipped_deserialize_error,
                     skipped_missing_track_id,
+                    link_resolution_elapsed_ms,
                 )
                 logger.info(
                     "Spotify queued download preparation checkpoint | playlist_id=%s elapsed_ms=%.1f",
@@ -783,7 +821,35 @@ class TaskQueueManager(QObject):
                 )
                 
                 if unlinked_tracks_for_worker:
-                    logger.info(f"Found {len(unlinked_tracks_for_worker)} unlinked tracks in playlist. Linking them first...")
+                    if non_completed_only:
+                        unlinked_metadata = [
+                            meta
+                            for _, meta in unlinked_tracks_for_worker
+                            if isinstance(meta, dict)
+                        ]
+                        audio_features_started = time.perf_counter()
+                        try:
+                            self.main_view.spotify_api.enrich_tracks_with_audio_features(
+                                unlinked_metadata
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Selective Spotify Audio Features enrichment failed | playlist_id=%s tracks=%d",
+                                playlist_id,
+                                len(unlinked_metadata),
+                                exc_info=True,
+                            )
+                        finally:
+                            logger.info(
+                                "Selective Spotify Audio Features enrichment finished | playlist_id=%s tracks=%d elapsed_ms=%.1f",
+                                playlist_id,
+                                len(unlinked_metadata),
+                                (time.perf_counter() - audio_features_started) * 1000.0,
+                            )
+
+                    logger.info(
+                        f"Found {len(unlinked_tracks_for_worker)} unlinked tracks in playlist. Linking them first..."
+                    )
                     # Emit a separate jobStarted for the linking sub-task
                     QtCore.QMetaObject.invokeMethod(self, "jobStarted", Qt.ConnectionType.QueuedConnection,
                                                     QtCore.Q_ARG(str, playlist_id),

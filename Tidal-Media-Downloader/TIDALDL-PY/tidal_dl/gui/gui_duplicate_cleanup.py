@@ -77,7 +77,7 @@ class DuplicateWorker(QtCore.QThread):
                 if hint:
                     candidates.append(os.path.join(download_root, hint))
                 # Support a user-selected Playlists root outside the saved location.
-                relative = getPlaylistPath(context, "__playlist_root__") if playlist["name"] else None
+                relative = getPlaylistPath(context, "__playlist_root__", use_folder_link=False) if playlist["name"] else None
                 if relative:
                     relative = os.path.relpath(relative, "__playlist_root__")
                     parts = relative.split(os.sep)

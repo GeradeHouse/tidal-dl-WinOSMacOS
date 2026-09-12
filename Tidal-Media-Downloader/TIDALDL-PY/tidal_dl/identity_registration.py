@@ -148,6 +148,7 @@ def playlist_catalog(persistence, root, playlist_names, progress, cancelled):
             relative_candidate = getPlaylistPath(
                 context,
                 "__identity_root__",
+                use_folder_link=False,
             )
             if relative_candidate:
                 relative = os.path.relpath(

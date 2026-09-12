@@ -250,6 +250,7 @@ def initialize_controls(self: "SettingsPage"):
     )
     self.chkAutoSpotifyLogin = QtWidgets.QCheckBox()
     self.chkSpotifyUsePlaylistFolders = QtWidgets.QCheckBox()
+    self.cmbSpotifyAudioFeaturesMode = QtWidgets.QComboBox()
 
     # Cache Settings Controls
     self.cache_path_label = QLabel("Playlist Cover Cache Path:")
@@ -398,6 +399,7 @@ def create_spotify_section(self: "SettingsPage"):
     assert self.spotifyClientSecretVisibilityButton is not None
     assert self.chkAutoSpotifyLogin is not None
     assert self.chkSpotifyUsePlaylistFolders is not None
+    assert self.cmbSpotifyAudioFeaturesMode is not None
     assert self.mainLayout is not None
 
     spotify_icon_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons", "Spotify_Primary_Logo_RGB_White.png"))
@@ -415,6 +417,36 @@ def create_spotify_section(self: "SettingsPage"):
     spotify_layout.addRow("Spotify Client Secret:", spotify_secret_layout)
     spotify_layout.addRow("Automatically login on startup:", self.chkAutoSpotifyLogin)
     spotify_layout.addRow("Use Folders for Playlist Names ('Folder - Name'):", self.chkSpotifyUsePlaylistFolders)
+
+    self.cmbSpotifyAudioFeaturesMode.addItem(
+        "Automatic (recommended)",
+        "auto",
+    )
+    self.cmbSpotifyAudioFeaturesMode.addItem(
+        "Force on (always attempt)",
+        "force_on",
+    )
+    self.cmbSpotifyAudioFeaturesMode.addItem(
+        "Off (never use)",
+        "off",
+    )
+    spotify_layout.addRow(
+        "Spotify Audio Features:",
+        self.cmbSpotifyAudioFeaturesMode,
+    )
+
+    spotify_audio_features_help = QLabel(
+        "Automatic stops requesting Spotify Audio Features for the remainder "
+        "of the session when the endpoint is clearly unsupported or repeatedly "
+        "returns no usable key data. Force on overrides that automatic "
+        "disablement. Off prevents both API requests and use of cached Spotify "
+        "Audio Features, leaving TIDAL key metadata as the fallback."
+    )
+    spotify_audio_features_help.setWordWrap(True)
+    spotify_audio_features_help.setStyleSheet(
+        "QLabel { color: #aaa; font-style: italic; }"
+    )
+    spotify_layout.addRow("", spotify_audio_features_help)
 
     self.btnSpotifyHelp = QPushButton("How to get Spotify Client ID and Secret? (Show)")
     self.btnSpotifyHelp.setStyleSheet("""

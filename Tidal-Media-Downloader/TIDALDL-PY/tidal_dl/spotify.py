@@ -17,7 +17,7 @@ import requests
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.ERROR)  # Set specific level for this module
+logger.setLevel(logging.INFO)
 
 # Set up GUI logging with INFO level for this module (API operations)
 # Set up GUI logging with INFO level for this modul- LAZY LOADED
@@ -109,6 +109,15 @@ SPOTIFY_SCOPES = " ".join(SPOTIFY_REQUIRED_SCOPES)
 SPOTIFY_MUTATION_BATCH_SIZE = 100
 SPOTIFY_INVALID_CLIENT = "SPOTIFY_INVALID_CLIENT"
 SPOTIFY_AUDIO_FEATURES_BATCH_SIZE = 100
+SPOTIFY_AUDIO_FEATURES_MODE_AUTO = "auto"
+SPOTIFY_AUDIO_FEATURES_MODE_FORCE_ON = "force_on"
+SPOTIFY_AUDIO_FEATURES_MODE_OFF = "off"
+SPOTIFY_AUDIO_FEATURES_VALID_MODES = {
+    SPOTIFY_AUDIO_FEATURES_MODE_AUTO,
+    SPOTIFY_AUDIO_FEATURES_MODE_FORCE_ON,
+    SPOTIFY_AUDIO_FEATURES_MODE_OFF,
+}
+SPOTIFY_AUDIO_FEATURES_AUTO_DISABLE_MIN_SAMPLE = 10
 
 
 def _redact_secret(value: Any, visible_prefix: int = 4) -> str:
@@ -126,7 +135,7 @@ class SpotifyAPI:
     Manages connection and data retrieval from Spotify API.
     """
 
-    def __init__(self):
+    def __init__(self, persistence_manager: Optional[Any] = None):
         logger.debug("Initializing SpotifyAPI")
         self.sp: Any = None
         self.auth_manager: Any = None
@@ -136,6 +145,9 @@ class SpotifyAPI:
         self.current_user_display_name: Optional[str] = None
         self.current_user_profile: Dict[str, Any] = {}
         self.audio_features_supported: Optional[bool] = None
+        self.audio_features_disabled_reason: Optional[str] = None
+        self._audio_features_unusable_sample_count = 0
+        self._persistence_manager = persistence_manager
         try:
             # Ensure the directory for the cache file exists
             aigpy.path.mkdirs(getProfilePath())
@@ -219,35 +231,160 @@ class SpotifyAPI:
     def _chunked(self, values: Sequence[Any], size: int = SPOTIFY_MUTATION_BATCH_SIZE) -> List[List[Any]]:
         return [list(values[index:index + size]) for index in range(0, len(values), size)]
 
+    def _get_persistence_manager(self) -> Any:
+        if self._persistence_manager is None:
+            from tidal_dl.persistence import LinkPersistenceManager
+
+            self._persistence_manager = LinkPersistenceManager()
+        return self._persistence_manager
+
+    def _get_audio_features_mode(self) -> str:
+        mode = str(
+            getattr(
+                SETTINGS,
+                "spotifyAudioFeaturesMode",
+                SPOTIFY_AUDIO_FEATURES_MODE_AUTO,
+            )
+            or SPOTIFY_AUDIO_FEATURES_MODE_AUTO
+        ).strip().lower()
+        if mode not in SPOTIFY_AUDIO_FEATURES_VALID_MODES:
+            return SPOTIFY_AUDIO_FEATURES_MODE_AUTO
+        return mode
+
+    def reset_audio_features_detection(self) -> None:
+        self.audio_features_supported = None
+        self.audio_features_disabled_reason = None
+        self._audio_features_unusable_sample_count = 0
+        logger.info("Spotify Audio Features session capability state was reset.")
+
+    def _mark_audio_features_unavailable(self, reason: str) -> None:
+        self.audio_features_supported = False
+        self.audio_features_disabled_reason = reason
+
+    @staticmethod
+    def _audio_feature_has_usable_key(feature: Any) -> bool:
+        if not isinstance(feature, dict):
+            return False
+        if str(feature.get("status") or "").lower() != "available":
+            return False
+        key_raw = feature.get("key")
+        mode_raw = feature.get("mode")
+        if key_raw is None or mode_raw is None:
+            return False
+        try:
+            key_value = int(key_raw)
+            mode_value = int(mode_raw)
+        except (TypeError, ValueError):
+            return False
+        return 0 <= key_value <= 11 and mode_value in (0, 1)
+
+    def _record_audio_features_batch_result(
+        self,
+        features_map: Dict[str, Dict[str, Any]],
+        sample_size: int,
+        mode: str,
+    ) -> bool:
+        usable_count = sum(
+            1
+            for feature in features_map.values()
+            if self._audio_feature_has_usable_key(feature)
+        )
+
+        if usable_count:
+            self.audio_features_supported = True
+            self.audio_features_disabled_reason = None
+            self._audio_features_unusable_sample_count = 0
+            return False
+
+        self._audio_features_unusable_sample_count += max(sample_size, 0)
+
+        if (
+            self.audio_features_supported is True
+            or self._audio_features_unusable_sample_count
+            < SPOTIFY_AUDIO_FEATURES_AUTO_DISABLE_MIN_SAMPLE
+        ):
+            return False
+
+        reason = (
+            "no usable Spotify key/mode values were returned for "
+            f"{self._audio_features_unusable_sample_count} sampled track(s)"
+        )
+        self._mark_audio_features_unavailable(reason)
+
+        if mode == SPOTIFY_AUDIO_FEATURES_MODE_AUTO:
+            logger.info(
+                "Spotify Audio Features auto-disabled for the remainder of this session: %s. "
+                "TIDAL key metadata will remain the fallback.",
+                reason,
+            )
+            return True
+
+        logger.info(
+            "Spotify Audio Features currently appears unavailable: %s. "
+            "Force-on mode will continue attempting later requests.",
+            reason,
+        )
+        return False
+
     def _normalize_audio_feature(self, feature: Any, track_id: str) -> Dict[str, Any]:
         if not isinstance(feature, dict):
-            return {"id": track_id, "key": None, "mode": None, "tempo": None, "status": "unavailable"}
+            return {
+                "id": track_id,
+                "key": None,
+                "mode": None,
+                "tempo": None,
+                "status": "unavailable",
+            }
+
         key_value: object = feature.get("key")
+        mode_value: object = feature.get("mode")
         status = "available"
+
         try:
-            if not isinstance(key_value, (int, float, str)):
-                raise TypeError("Spotify Audio Features key is not numeric")
-            if int(key_value) == -1:
+            if key_value is None:
+                raise TypeError("Spotify Audio Features key is missing")
+            key_int = int(key_value)
+            if key_int == -1:
                 status = "no_key"
+            elif key_int < 0 or key_int > 11:
+                status = "unavailable"
         except (TypeError, ValueError):
             status = "unavailable"
+
+        if status == "available":
+            try:
+                if mode_value is None:
+                    raise TypeError("Spotify Audio Features mode is missing")
+                mode_int = int(mode_value)
+                if mode_int not in (0, 1):
+                    status = "unavailable"
+            except (TypeError, ValueError):
+                status = "unavailable"
+
         return {
             "id": feature.get("id") or track_id,
             "key": key_value,
-            "mode": feature.get("mode"),
+            "mode": mode_value,
             "tempo": feature.get("tempo"),
             "status": status,
         }
 
     def _get_cached_audio_features_map(self, track_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+        started = time.perf_counter()
         try:
-            from tidal_dl.persistence import LinkPersistenceManager
-            manager = LinkPersistenceManager()
+            manager = self._get_persistence_manager()
             cached: Dict[str, Dict[str, Any]] = {}
             for track_id in track_ids:
                 features = manager.get_cached_spotify_audio_features(track_id)
                 if features:
                     cached[track_id] = features
+
+            logger.info(
+                "Spotify Audio Features cache lookup | requested=%d hits=%d elapsed_ms=%.1f",
+                len(track_ids),
+                len(cached),
+                (time.perf_counter() - started) * 1000.0,
+            )
             return cached
         except Exception:
             logger.debug("Failed to read Spotify Audio Features cache.", exc_info=True)
@@ -256,11 +393,16 @@ class SpotifyAPI:
     def _set_cached_audio_features_map(self, features_map: Dict[str, Dict[str, Any]]) -> None:
         if not features_map:
             return
+
+        started = time.perf_counter()
         try:
-            from tidal_dl.persistence import LinkPersistenceManager
-            manager = LinkPersistenceManager()
-            for track_id, features in features_map.items():
-                manager.set_cached_spotify_audio_features(track_id, features)
+            manager = self._get_persistence_manager()
+            manager.set_cached_spotify_audio_features_bulk(features_map)
+            logger.info(
+                "Spotify Audio Features cache batch stored | tracks=%d elapsed_ms=%.1f",
+                len(features_map),
+                (time.perf_counter() - started) * 1000.0,
+            )
         except Exception:
             logger.debug("Failed to write Spotify Audio Features cache.", exc_info=True)
 
@@ -270,7 +412,7 @@ class SpotifyAPI:
         *,
         use_cache: bool = True,
     ) -> Dict[str, Dict[str, Any]]:
-        """Fetch raw Spotify Audio Features by track ID without failing playlist loading."""
+        """Fetch optional Spotify Audio Features according to the configured policy."""
         clean_ids: List[str] = []
         seen: set[str] = set()
         for raw_id in track_ids or []:
@@ -283,13 +425,50 @@ class SpotifyAPI:
         if not clean_ids:
             return {}
 
+        mode = self._get_audio_features_mode()
+        if mode == SPOTIFY_AUDIO_FEATURES_MODE_OFF:
+            logger.info(
+                "Spotify Audio Features skipped because the configured mode is Off."
+            )
+            return {}
+
         cached = self._get_cached_audio_features_map(clean_ids) if use_cache else {}
-        missing_ids = [track_id for track_id in clean_ids if track_id not in cached]
+
+        if mode == SPOTIFY_AUDIO_FEATURES_MODE_FORCE_ON:
+            missing_ids = [
+                track_id
+                for track_id in clean_ids
+                if not self._audio_feature_has_usable_key(cached.get(track_id))
+            ]
+        else:
+            missing_ids = []
+            for track_id in clean_ids:
+                cached_feature = cached.get(track_id)
+                cached_status = (
+                    str(cached_feature.get("status") or "").lower()
+                    if isinstance(cached_feature, dict)
+                    else ""
+                )
+                if (
+                    not self._audio_feature_has_usable_key(cached_feature)
+                    and cached_status != "no_key"
+                ):
+                    missing_ids.append(track_id)
+
         if not missing_ids:
             return cached
 
-        if self.audio_features_supported is False:
+        if (
+            mode == SPOTIFY_AUDIO_FEATURES_MODE_AUTO
+            and self.audio_features_supported is False
+        ):
+            logger.info(
+                "Spotify Audio Features request skipped because automatic detection "
+                "disabled the feature for this session: %s",
+                self.audio_features_disabled_reason or "unsupported",
+            )
             return cached
+
         if not self._ensure_client():
             return cached
         sp = self.sp
@@ -297,35 +476,74 @@ class SpotifyAPI:
             return cached
 
         fetched: Dict[str, Dict[str, Any]] = {}
-        for chunk in self._chunked(missing_ids, SPOTIFY_AUDIO_FEATURES_BATCH_SIZE):
+
+        for chunk in self._chunked(
+            missing_ids,
+            SPOTIFY_AUDIO_FEATURES_BATCH_SIZE,
+        ):
             try:
                 if hasattr(sp, "audio_features"):
                     response = sp.audio_features(chunk)
                     features_list = response if isinstance(response, list) else []
                 else:
                     response = sp._get("audio-features", ids=",".join(chunk))
-                    features_list = response.get("audio_features", []) if isinstance(response, dict) else []
+                    features_list = (
+                        response.get("audio_features", [])
+                        if isinstance(response, dict)
+                        else []
+                    )
 
                 by_id: Dict[str, Any] = {}
                 for feature in features_list or []:
                     if isinstance(feature, dict):
                         by_id[str(feature.get("id") or "")] = feature
 
-                for track_id in chunk:
-                    fetched[track_id] = self._normalize_audio_feature(by_id.get(track_id), track_id)
-                self.audio_features_supported = True
+                normalized_chunk = {
+                    track_id: self._normalize_audio_feature(
+                        by_id.get(track_id),
+                        track_id,
+                    )
+                    for track_id in chunk
+                }
+                fetched.update(normalized_chunk)
+
+                if self._record_audio_features_batch_result(
+                    normalized_chunk,
+                    len(chunk),
+                    mode,
+                ):
+                    break
+
             except spotipy.SpotifyException as exc:
                 http_status = getattr(exc, "http_status", None)
+
                 if http_status in (403, 404):
-                    self.audio_features_supported = False
-                    logger.info(
-                        "Spotify Audio Features are unavailable for this app/session (HTTP %s); "
-                        "this optional endpoint is now disabled for the remainder of the session and TIDAL keys will be used.",
-                        http_status,
-                    )
+                    reason = f"Spotify returned HTTP {http_status} for Audio Features"
+                    self._mark_audio_features_unavailable(reason)
+
                     for track_id in chunk:
-                        fetched[track_id] = {"id": track_id, "key": None, "mode": None, "tempo": None, "status": "unsupported"}
+                        fetched[track_id] = {
+                            "id": track_id,
+                            "key": None,
+                            "mode": None,
+                            "tempo": None,
+                            "status": "unsupported",
+                        }
+
+                    if mode == SPOTIFY_AUDIO_FEATURES_MODE_AUTO:
+                        logger.info(
+                            "Spotify Audio Features auto-disabled for the remainder "
+                            "of this session: %s. TIDAL key metadata will remain the fallback.",
+                            reason,
+                        )
+                    else:
+                        logger.warning(
+                            "%s. Force-on mode will attempt Audio Features again "
+                            "during later operations.",
+                            reason,
+                        )
                     break
+
                 if http_status == 429:
                     retry_after = None
                     headers = getattr(exc, "headers", None)
@@ -335,25 +553,108 @@ class SpotifyAPI:
                         wait_seconds = min(max(int(retry_after or 1), 1), 10)
                     except (TypeError, ValueError):
                         wait_seconds = 1
-                    logger.info("Spotify Audio Features rate-limited. Waiting %s second(s).", wait_seconds)
+
+                    logger.info(
+                        "Spotify Audio Features rate-limited. Waiting %s second(s).",
+                        wait_seconds,
+                    )
                     time.sleep(wait_seconds)
+
                     try:
-                        response = sp._get("audio-features", ids=",".join(chunk))
-                        features_list = response.get("audio_features", []) if isinstance(response, dict) else []
-                        by_id = {str(feature.get("id") or ""): feature for feature in features_list or [] if isinstance(feature, dict)}
-                        for track_id in chunk:
-                            fetched[track_id] = self._normalize_audio_feature(by_id.get(track_id), track_id)
+                        response = sp._get(
+                            "audio-features",
+                            ids=",".join(chunk),
+                        )
+                        features_list = (
+                            response.get("audio_features", [])
+                            if isinstance(response, dict)
+                            else []
+                        )
+                        by_id = {
+                            str(feature.get("id") or ""): feature
+                            for feature in features_list or []
+                            if isinstance(feature, dict)
+                        }
+                        normalized_chunk = {
+                            track_id: self._normalize_audio_feature(
+                                by_id.get(track_id),
+                                track_id,
+                            )
+                            for track_id in chunk
+                        }
+                        fetched.update(normalized_chunk)
+
+                        if self._record_audio_features_batch_result(
+                            normalized_chunk,
+                            len(chunk),
+                            mode,
+                        ):
+                            break
                     except Exception:
-                        logger.warning("Spotify Audio Features retry failed; leaving keys unavailable.", exc_info=True)
+                        logger.warning(
+                            "Spotify Audio Features retry failed; leaving keys unavailable.",
+                            exc_info=True,
+                        )
                     continue
-                logger.warning("Spotify Audio Features fetch failed: %s", exc, exc_info=True)
+
+                logger.warning(
+                    "Spotify Audio Features fetch failed: %s",
+                    exc,
+                    exc_info=True,
+                )
             except Exception as exc:
-                logger.warning("Spotify Audio Features fetch failed: %s", exc, exc_info=True)
+                logger.warning(
+                    "Spotify Audio Features fetch failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         self._set_cached_audio_features_map(fetched)
         merged = dict(cached)
         merged.update(fetched)
         return merged
+
+    def enrich_tracks_with_audio_features(
+        self,
+        tracks_data: Sequence[Dict[str, Any]],
+    ) -> None:
+        """Enrich Spotify track dictionaries in place with optional Audio Features."""
+        track_ids = [
+            str(track.get("id"))
+            for track in tracks_data
+            if isinstance(track, dict)
+            and track.get("id")
+            and not track.get("is_local")
+        ]
+        features_by_id = (
+            self.get_audio_features_for_tracks(track_ids)
+            if track_ids
+            else {}
+        )
+
+        for track in tracks_data:
+            if not isinstance(track, dict):
+                continue
+
+            spotify_id = str(track.get("id") or "")
+            if track.get("is_local"):
+                track["spotify_audio_features"] = {
+                    "id": spotify_id,
+                    "key": None,
+                    "mode": None,
+                    "tempo": None,
+                    "status": "local",
+                }
+                continue
+
+            features = features_by_id.get(spotify_id)
+            if not features:
+                continue
+
+            track["spotify_audio_features"] = features
+            track["spotify_key"] = features.get("key")
+            track["spotify_mode"] = features.get("mode")
+            track["spotify_tempo"] = features.get("tempo")
 
     def _spotify_success_result(
         self,
@@ -871,16 +1172,30 @@ class SpotifyAPI:
             )
             return None
 
-    def get_playlist_tracks(self, playlist_id):
-        """Fetches all tracks for a given Spotify playlist ID."""
-        logger.debug(f"get_playlist_tracks called for playlist_id: {playlist_id}")
+    def get_playlist_tracks(
+        self,
+        playlist_id,
+        *,
+        include_audio_features: bool = True,
+    ):
+        """Fetch all tracks for a Spotify playlist, optionally enriching Audio Features."""
+        logger.debug(
+            "get_playlist_tracks called | playlist_id=%s include_audio_features=%s",
+            playlist_id,
+            include_audio_features,
+        )
         if not self._ensure_client():
             logger.error("Authentication failed within get_playlist_tracks.")
             return None
 
         tracks_data = []
+        playlist_fetch_started = time.perf_counter()
         try:
-            logger.info(f"Fetching tracks for Spotify playlist ID: {playlist_id}...")
+            logger.info(
+                "Fetching Spotify playlist tracks | playlist_id=%s include_audio_features=%s",
+                playlist_id,
+                include_audio_features,
+            )
             offset = 0
             limit = 100
 
@@ -888,6 +1203,7 @@ class SpotifyAPI:
                 logger.debug(
                     f"Fetching playlist items for {playlist_id}, limit={limit}, offset={offset}"
                 )
+                page_started = time.perf_counter()
                 results = self.sp.playlist_items(
                     playlist_id,
                     fields=(
@@ -897,6 +1213,12 @@ class SpotifyAPI:
                     limit=limit,
                     offset=offset,
                     additional_types=["track"],
+                )
+                logger.info(
+                    "Spotify playlist page fetched | playlist_id=%s offset=%d elapsed_ms=%.1f",
+                    playlist_id,
+                    offset,
+                    (time.perf_counter() - page_started) * 1000.0,
                 )
 
                 if not results:
@@ -992,27 +1314,43 @@ class SpotifyAPI:
                     )
                     break  # No more pages
 
+            playlist_items_elapsed_ms = (
+                time.perf_counter() - playlist_fetch_started
+            ) * 1000.0
             logger.info(
-                f"Processed {len(tracks_data)} tracks for playlist {playlist_id}."
+                "Spotify playlist items fetched | playlist_id=%s tracks=%d elapsed_ms=%.1f",
+                playlist_id,
+                len(tracks_data),
+                playlist_items_elapsed_ms,
             )
-            try:
-                track_ids = [str(track.get("id")) for track in tracks_data if isinstance(track, dict) and track.get("id") and not track.get("is_local")]
-                features_by_id = self.get_audio_features_for_tracks(track_ids)
-                for track in tracks_data:
-                    if not isinstance(track, dict):
-                        continue
-                    spotify_id = str(track.get("id") or "")
-                    features = features_by_id.get(spotify_id)
-                    if features:
-                        track["spotify_audio_features"] = features
-                        track["spotify_key"] = features.get("key")
-                        track["spotify_mode"] = features.get("mode")
-                        track["spotify_tempo"] = features.get("tempo")
-                    elif track.get("is_local"):
-                        track["spotify_audio_features"] = {"id": spotify_id, "key": None, "mode": None, "tempo": None, "status": "local"}
-            except Exception:
-                logger.warning("Spotify playlist loaded, but Audio Features enrichment failed.", exc_info=True)
-            logger.info(f"Found {len(tracks_data)} tracks in playlist {playlist_id}.")
+
+            if include_audio_features:
+                audio_features_started = time.perf_counter()
+                try:
+                    self.enrich_tracks_with_audio_features(tracks_data)
+                except Exception:
+                    logger.warning(
+                        "Spotify playlist loaded, but Audio Features enrichment failed.",
+                        exc_info=True,
+                    )
+                finally:
+                    logger.info(
+                        "Spotify Audio Features enrichment finished | playlist_id=%s elapsed_ms=%.1f",
+                        playlist_id,
+                        (time.perf_counter() - audio_features_started) * 1000.0,
+                    )
+            else:
+                logger.info(
+                    "Spotify Audio Features enrichment skipped | playlist_id=%s reason=caller_requested_basic_metadata",
+                    playlist_id,
+                )
+
+            logger.info(
+                "Spotify playlist fetch complete | playlist_id=%s tracks=%d total_elapsed_ms=%.1f",
+                playlist_id,
+                len(tracks_data),
+                (time.perf_counter() - playlist_fetch_started) * 1000.0,
+            )
             return tracks_data
         except spotipy.SpotifyException as e:
             logger.error(

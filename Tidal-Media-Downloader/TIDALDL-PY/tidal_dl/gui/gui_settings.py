@@ -124,6 +124,7 @@ class SettingsPage(QtWidgets.QWidget):
         self.spotifyClientSecretVisibilityButton: Optional[QPushButton] = None
         self.chkAutoSpotifyLogin: Optional[QCheckBox] = None
         self.chkSpotifyUsePlaylistFolders: Optional[QCheckBox] = None
+        self.cmbSpotifyAudioFeaturesMode: Optional[QComboBox] = None
         self.cache_path_label: Optional[QLabel] = None
         self.cache_path_lineEdit: Optional[QLineEdit] = None
         self.browse_cache_button: Optional[QPushButton] = None
