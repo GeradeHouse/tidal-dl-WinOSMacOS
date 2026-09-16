@@ -21,7 +21,15 @@ from mutagen.mp4 import MP4
 from . import identity_index as index
 from .duplicate_cleanup import inside
 from .format import getPlaylistPath
-from .local_identity import _tags, _first, read_local_audio, match_recording, spotify_recording, folder_lock
+from .local_identity import (
+    Recording,
+    _tags,
+    _first,
+    local_audio_from_metadata,
+    match_recording,
+    spotify_recording,
+    folder_lock,
+)
 from .paths import getProfilePath, get_user_download_path
 from .settings import SETTINGS
 
@@ -45,6 +53,10 @@ class Proposal:
 
 def embedded_identity(path):
     audio = MutagenFile(path)
+    return _embedded_identity_from_audio(audio)
+
+
+def _embedded_identity_from_audio(audio):
     if not isinstance(audio, (FLAC, MP3, MP4)):
         raise ValueError("Identity-only writing supports FLAC, MP3 and M4A/MP4 audio.")
     tags = _tags(audio)
@@ -238,10 +250,18 @@ def scan(
     progress=lambda text: None,
     cancelled=lambda: False,
 ):
+    with index.read_session():
+        return _scan(root, catalog, progress, cancelled)
+
+
+def _scan(root, catalog, progress, cancelled):
     proposals = []
     warnings = []
     root = os.path.realpath(root)
     cache_hits = 0
+    scan_cache_hits = 0
+    scan_cache_updates = []
+    scan_cache_writable = True
     fingerprints_computed = 0
     fingerprints_deferred = 0
     legacy_migrations = 0
@@ -257,6 +277,28 @@ def scan(
             f"Could not inspect folder: {exc}"
         )
 
+    def flush_scan_cache():
+        nonlocal scan_cache_writable
+        if not scan_cache_updates:
+            return
+        if not scan_cache_writable:
+            scan_cache_updates.clear()
+            return
+        try:
+            index.cache_scans(tuple(scan_cache_updates))
+        except Exception as exc:
+            scan_cache_writable = False
+            warnings.append(
+                f"Could not update the unchanged-file scan cache: {exc}"
+            )
+            logger.warning(
+                "IDENTITY_SCAN_CACHE_WRITE_FAILED error=%s",
+                exc,
+                exc_info=logger.isEnabledFor(logging.DEBUG),
+            )
+        finally:
+            scan_cache_updates.clear()
+
     for directory, dirnames, filenames in os.walk(
         root,
         topdown=True,
@@ -270,10 +312,12 @@ def scan(
         ]
 
         if cancelled():
+            flush_scan_cache()
             raise index.IdentityCancelled()
 
         for filename in filenames:
             if cancelled():
+                flush_scan_cache()
                 raise index.IdentityCancelled()
 
             path = os.path.join(
@@ -288,14 +332,46 @@ def scan(
 
             file_number = len(proposals) + 1
             progress(
-                f"Checking local audio "
+                f"Checking file state "
                 f"({file_number}): {path}"
             )
             before = ()
+            audio = None
 
             try:
                 before = index.signature(path)
-                embedded = embedded_identity(path)
+                scan_cached = index.cached_scan(path, before)
+                if scan_cached is not None:
+                    (
+                        embedded,
+                        cached_isrc,
+                        cached_title,
+                        cached_artist,
+                        cached_duration,
+                    ) = scan_cached
+                    cached_recording = Recording(
+                        uid=embedded.uid,
+                        spotify_id=embedded.spotify_id,
+                        tidal_id=embedded.tidal_id,
+                        isrc=cached_isrc,
+                        title=cached_title,
+                        artist=cached_artist,
+                        duration=cached_duration,
+                    )
+                    scan_cache_hits += 1
+                    progress(
+                        "Using cached file metadata "
+                        f"({file_number}): {path}"
+                    )
+                else:
+                    progress(
+                        "Reading local audio metadata "
+                        f"({file_number}): {path}"
+                    )
+                    audio = MutagenFile(path)
+                    embedded = _embedded_identity_from_audio(audio)
+                    cached_recording = None
+
                 has_embedded_identity = bool(
                     embedded.uid
                     or embedded.spotify_id
@@ -399,6 +475,8 @@ def scan(
                     and embedded.tidal_id == identity.tidal_id
                 )
                 if fully_registered:
+                    if index.signature(path) != before:
+                        raise index.IdentityConflict("File changed while reading metadata; scan again.")
                     proposals.append(
                         Proposal(
                             path=path,
@@ -412,6 +490,12 @@ def scan(
                             ),
                         )
                     )
+                    if scan_cached is None and scan_cache_writable:
+                        scan_cache_updates.append(
+                            (path, before, embedded, None)
+                        )
+                        if len(scan_cache_updates) >= 250:
+                            flush_scan_cache()
                     logger.debug(
                         "IDENTITY_SCAN_ROW path=%r status=Registered "
                         "fingerprint_kind=%s choices=0",
@@ -420,11 +504,30 @@ def scan(
                     )
                     continue
 
-                local = read_local_audio(path)
-                if local is None:
-                    raise ValueError(
-                        "Audio tags could not be read."
-                    )
+                if (
+                    cached_recording is not None
+                    and cached_recording.duration > 0
+                ):
+                    local_recording = cached_recording
+                else:
+                    if os.path.islink(path):
+                        raise ValueError("Symbolic links cannot be registered.")
+                    if audio is None:
+                        audio = MutagenFile(path)
+                    local = local_audio_from_metadata(path, before, audio)
+                    if local is None:
+                        raise ValueError(
+                            "Audio tags could not be read."
+                        )
+                    local_recording = local.recording
+                    if index.signature(path) != before:
+                        raise index.IdentityConflict("File changed while reading metadata; scan again.")
+                    if scan_cache_writable:
+                        scan_cache_updates.append(
+                            (path, before, embedded, local_recording)
+                        )
+                        if len(scan_cache_updates) >= 250:
+                            flush_scan_cache()
 
                 choices = []
                 evidence = ""
@@ -435,7 +538,7 @@ def scan(
                         (),
                     ):
                         reason = match_recording(
-                            local.recording,
+                            local_recording,
                             target,
                             allow_legacy=True,
                         )
@@ -546,6 +649,7 @@ def scan(
                     len(choices),
                 )
             except index.IdentityCancelled:
+                flush_scan_cache()
                 raise
             except Exception as exc:
                 warnings.append(
@@ -571,16 +675,18 @@ def scan(
                     ),
                 )
 
+    flush_scan_cache()
     logger.info(
         "IDENTITY_SCAN_DONE root=%r files=%d "
         "warnings=%d fingerprint_cache_hits=%d "
-        "fingerprints_computed=%d "
+        "scan_cache_hits=%d fingerprints_computed=%d "
         "fingerprints_deferred=%d "
         "legacy_migrations=%d",
         root,
         len(proposals),
         len(warnings),
         cache_hits,
+        scan_cache_hits,
         fingerprints_computed,
         fingerprints_deferred,
         legacy_migrations,

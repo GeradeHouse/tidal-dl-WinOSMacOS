@@ -40,6 +40,7 @@ class RegistrationWorker(QtCore.QThread):
         self.mode = mode  # "scan" or "apply"
         self.selections = selections or []
         self.write_tags = write_tags
+        self._last_progress = 0.0
 
         # QWidget/tree data stays on the GUI thread. Only this detached
         # playlist ID/name snapshot is handed to the worker.
@@ -49,6 +50,12 @@ class RegistrationWorker(QtCore.QThread):
             for playlist in getattr(tree_handler, "_spotify_playlist_cache", [])
             if isinstance(playlist, dict) and playlist.get("id")
         }
+
+    def _report_progress(self, text):
+        now = time.monotonic()
+        if now - self._last_progress >= 0.1:
+            self._last_progress = now
+            self.progress.emit(text)
 
     def run(self):
         started = time.monotonic()
@@ -63,7 +70,7 @@ class RegistrationWorker(QtCore.QThread):
                     self.selections,
                     self.root,
                     self.write_tags,
-                    self.progress.emit,
+                    self._report_progress,
                     self.isInterruptionRequested,
                 )
                 logger.info(
@@ -82,7 +89,7 @@ class RegistrationWorker(QtCore.QThread):
                 self.main_view.link_persistence_manager,
                 self.root,
                 self.playlist_names,
-                self.progress.emit,
+                self._report_progress,
                 self.isInterruptionRequested,
             )
 
@@ -92,7 +99,7 @@ class RegistrationWorker(QtCore.QThread):
             proposals, warnings = registration.scan(
                 self.root,
                 catalog,
-                self.progress.emit,
+                self._report_progress,
                 self.isInterruptionRequested,
             )
             warnings = catalog_warnings + warnings
@@ -142,6 +149,13 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
         self.scan_root = ""
         self._busy = False
         self._selected_rows: set[int] = set()
+        self._ready_count = 0
+        self._review_count = 0
+        self._rendering = False
+        self._render_row = 0
+        self._render_timer = QtCore.QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._render_batch)
 
         self.setWindowTitle("Register existing files / repair identity tags")
         self._apply_theme(self)
@@ -240,29 +254,36 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
         layout.addWidget(self.table, 1)
 
         selection_help = QtWidgets.QLabel(
-            "Highlighted rows are selected for registration. Ctrl-click toggles rows; "
-            "Shift-click selects a range; Ctrl+Shift-click adds a range; Ctrl+A selects "
-            "all registerable rows when the table has focus. Select identified only excludes "
-            "already Registered rows and metadata-only Review association rows."
+            "Highlighted rows are selected for registration. Ready rows have a confirmed "
+            "identity and are not registered yet. Review rows are metadata-only matches and "
+            "require manual verification. Registered rows are already complete and cannot be "
+            "selected. Ctrl-click toggles rows; Shift-click selects a range; Ctrl+A selects "
+            "all actionable rows when the table has focus."
         )
         selection_help.setWordWrap(True)
         layout.addWidget(selection_help)
 
         selection_bar = QtWidgets.QHBoxLayout()
         self.select_identified = QtWidgets.QPushButton(
-            "Select identified only"
+            "Select ready to register"
+        )
+        self.select_identified.setToolTip(
+            "Select only confirmed, unregistered files. Manual-review rows stay unselected."
         )
         self.select_identified.clicked.connect(
             self._select_identified_only
         )
         self.select_all = QtWidgets.QPushButton(
-            "Select all registerable"
+            "Select ready + review"
+        )
+        self.select_all.setToolTip(
+            "Select confirmed files plus metadata-only review rows. Disabled when no review rows exist."
         )
         self.select_all.clicked.connect(self.table.selectAll)
         self.clear_selection = QtWidgets.QPushButton("Clear selection")
         self.clear_selection.clicked.connect(self.table.clearSelection)
         self.selection_count = QtWidgets.QLabel(
-            "0 files selected · 0 available to register"
+            "0 selected · 0 ready · 0 review"
         )
         selection_bar.addWidget(self.select_identified)
         selection_bar.addWidget(self.select_all)
@@ -520,31 +541,39 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
 
         selection = QtCore.QItemSelection()
         last_column = self.table.columnCount() - 1
-
+        first = None
         for row, proposal in enumerate(self.proposals):
-            if (
+            ready = (
                 proposal.status == "Identified"
                 and self._proposal_is_registerable(proposal)
-            ):
+            )
+            if ready and first is None:
+                first = row
+            elif not ready and first is not None:
                 selection.select(
-                    model.index(row, 0),
-                    model.index(row, last_column),
+                    model.index(first, 0), model.index(row - 1, last_column),
                 )
+                first = None
+        if first is not None:
+            selection.select(
+                model.index(first, 0),
+                model.index(len(self.proposals) - 1, last_column),
+            )
 
-        self.table.clearSelection()
         selection_model.select(
             selection,
-            QtCore.QItemSelectionModel.SelectionFlag.Select
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
             | QtCore.QItemSelectionModel.SelectionFlag.Rows,
         )
 
     def _selection_changed(self, *_args):
         model = self.table.selectionModel()
-        selected_rows = (
-            {index.row() for index in model.selectedRows()}
-            if model is not None
-            else set()
-        )
+        # selectedRows() performs expensive per-index selection checks for
+        # fragmented selections. Row selection lets us expand ranges directly.
+        selected_rows = set()
+        if model is not None:
+            for selected_range in model.selection():
+                selected_rows.update(range(selected_range.top(), selected_range.bottom() + 1))
         rows = {
             row
             for row in selected_rows
@@ -561,27 +590,19 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
                 item.setFont(font)
 
         self._selected_rows = rows
-        selections = self._collect_selections()
-        available = sum(
-            1
-            for proposal in self.proposals
-            if self._proposal_is_registerable(proposal)
-        )
-        identified_available = any(
-            proposal.status == "Identified"
-            and self._proposal_is_registerable(proposal)
-            for proposal in self.proposals
-        )
+        self._update_selection_controls()
 
+    def _update_selection_controls(self):
+        count = len(self._selected_rows)
+        ready = self._ready_count
+        review = self._review_count
         self.selection_count.setText(
-            f"{len(selections)} files selected · {available} available to register"
+            f"{count} selected · {ready} ready · {review} review"
         )
-        self.apply_button.setEnabled(bool(selections) and not self._busy)
-        self.select_identified.setEnabled(
-            identified_available and not self._busy
-        )
-        self.select_all.setEnabled(bool(available) and not self._busy)
-        self.clear_selection.setEnabled(bool(rows) and not self._busy)
+        self.apply_button.setEnabled(bool(count) and not self._busy)
+        self.select_identified.setEnabled(bool(ready) and not self._busy)
+        self.select_all.setEnabled(bool(review) and not self._busy)
+        self.clear_selection.setEnabled(bool(count) and not self._busy)
 
     def choose_root(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose playlist root", self.root_edit.text())
@@ -589,13 +610,14 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
             self.root_edit.setText(folder)
 
     def _set_busy(self, busy: bool):
+        busy = busy or self._rendering
         self._busy = busy
         self.scan_button.setEnabled(not busy)
         self.browse.setEnabled(not busy)
         self.root_edit.setEnabled(not busy)
         self.table.setEnabled(not busy)
         self.write_tags_box.setEnabled(not busy)
-        self._selection_changed()
+        self._update_selection_controls()
 
     def _start(self, mode, selections=None, write_tags=True):
         self._set_busy(True)
@@ -619,6 +641,7 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
 
         self.scan_root = root
         self.proposals = []
+        self._ready_count = self._review_count = 0
         self._selected_rows.clear()
         self.table.clearSelection()
         self.table.setRowCount(0)
@@ -628,12 +651,51 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
 
     def scanned(self, result):
         self.proposals, warnings = result
+        self._render_started = time.monotonic()
+        self._rendering = True
+        self._set_busy(True)
+        self._render_row = 0
+        self._scan_warnings = warnings
+        self._ready_count = self._review_count = 0
         self._selected_rows.clear()
         self.table.clearSelection()
         self.table.setRowCount(len(self.proposals))
+        self._render_timer.start(0)
 
-        for row, proposal in enumerate(self.proposals):
+    def _render_batch(self):
+        # Yield between bounded batches instead of blocking Qt for the entire
+        # library. The timer belongs to the dialog and cannot outlive it.
+        self.table.setUpdatesEnabled(False)
+        try:
+            self._render_rows()
+        except Exception as exc:
+            logger.exception("IDENTITY_REVIEW_RENDER_FAILED")
+            self._rendering = False
+            self.proposals = []
+            self._selected_rows.clear()
+            self._ready_count = self._review_count = 0
+            self.table.setRowCount(0)
+            self.failed(str(exc))
+            self._set_busy(False)
+            return
+        finally:
+            self.table.setUpdatesEnabled(True)
+        if self._render_row < len(self.proposals):
+            self.status.setText(f"Preparing review: {self._render_row}/{len(self.proposals)} files")
+            self._render_timer.start(1)
+        else:
+            self._finish_render()
+
+    def _render_rows(self):
+        deadline = time.monotonic() + 0.012
+        end = min(self._render_row + 100, len(self.proposals))
+        while self._render_row < end:
+            row = self._render_row
+            proposal = self.proposals[row]
             selectable = self._proposal_is_registerable(proposal)
+            if selectable:
+                self._ready_count += proposal.status == "Identified"
+                self._review_count += proposal.status == "Review association"
             flags = QtCore.Qt.ItemFlag.ItemIsEnabled
             if selectable:
                 flags |= QtCore.Qt.ItemFlag.ItemIsSelectable
@@ -643,8 +705,12 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
             marker.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row, 0, marker)
 
+            status_text = {
+                "Identified": "Ready to register",
+                "Review association": "Needs review",
+            }.get(proposal.status, proposal.status)
             for column, text in enumerate(
-                (proposal.status, proposal.evidence, proposal.path),
+                (status_text, proposal.evidence, proposal.path),
                 1,
             ):
                 item = QtWidgets.QTableWidgetItem(text)
@@ -674,21 +740,29 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
                 for _, description in proposal.choices:
                     combo.addItem(description)
                 self.table.setCellWidget(row, 4, combo)
-                combo.currentIndexChanged.connect(
-                    self._selection_changed
-                )
+            self._render_row += 1
+            if time.monotonic() >= deadline:
+                break
 
+    def _finish_render(self):
+        self._rendering = False
+        logger.info(
+            "IDENTITY_REVIEW_RENDER_DONE rows=%d elapsed_ms=%.1f",
+            len(self.proposals),
+            (time.monotonic() - self._render_started) * 1000,
+        )
         counts = registration.summary(self.proposals)
         self.status.setText(
-            "Scan complete. Select only rows intended for registration; "
-            "Review association rows are metadata-only and should be verified by listening. "
-            "No files have changed. "
-            + " | ".join(
-                f"{name}: {count}"
-                for name, count in counts.items()
-            )
+            "Scan complete. Ready rows are confirmed but not registered yet. "
+            "Needs review rows are metadata-only and should be verified by listening; "
+            "Registered rows need no action. No files have changed. "
+            f"Registered: {counts.get('Registered', 0)} | "
+            f"Ready to register: {counts.get('Identified', 0)} | "
+            f"Needs review: {counts.get('Review association', 0)} | "
+            f"Unmatched: {counts.get('Unmatched', 0)} | "
+            f"Conflicts/errors: {counts.get('Conflict / error', 0)}"
         )
-        self.details.setPlainText("\n".join(warnings))
+        self.details.setPlainText("\n".join(self._scan_warnings))
         self._selection_changed()
         self._set_busy(False)
 
@@ -759,6 +833,7 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
             else "Identity registration completed. Full backups are created only for audio files whose tags are modified."
         )
         self.proposals = []
+        self._ready_count = self._review_count = 0
         self._selected_rows.clear()
         self.table.clearSelection()
         self.table.setRowCount(0)
@@ -779,6 +854,7 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
             self.worker.requestInterruption()
             self.status.setText("Finishing the current file safely before closing; press Close again when it completes.")
             return
+        self._render_timer.stop()
         super().reject()
 
     def closeEvent(self, a0):
@@ -787,6 +863,7 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
             if a0 is not None:
                 a0.ignore()
         else:
+            self._render_timer.stop()
             super().closeEvent(a0)
 
 

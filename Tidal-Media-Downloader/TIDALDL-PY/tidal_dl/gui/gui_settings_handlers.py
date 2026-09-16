@@ -404,6 +404,12 @@ def save_settings(self: "SettingsPage"):
             getattr(SETTINGS, "spotifyAudioFeaturesMode", "auto") or "auto"
         ).strip().lower()
 
+        old_font_size_raw = getattr(SETTINGS, "fontSize", 11)
+        try:
+            old_font_size = int(old_font_size_raw)
+        except (TypeError, ValueError):
+            old_font_size = 11
+
         old_api_key_index_raw = getattr(SETTINGS, "apiKeyIndex", 0)
         old_api_key_index = old_api_key_index_raw if isinstance(old_api_key_index_raw, int) else 0
 
@@ -522,8 +528,8 @@ def save_settings(self: "SettingsPage"):
         logger.debug("Settings saved to storage")
         logger.debug(f"Saved download path: {SETTINGS.downloadPath}")
 
-        # Emit the fontSizeChanged signal with the new font size
-        self.fontSizeChanged.emit(SETTINGS.fontSize)
+        if SETTINGS.fontSize != old_font_size:
+            self.fontSizeChanged.emit(SETTINGS.fontSize)
         if key_notation_changed or playlist_display_settings_changed:
             self.playlistDisplaySettingsChanged.emit()
         # --- Debugging: Log saved boolean values ---

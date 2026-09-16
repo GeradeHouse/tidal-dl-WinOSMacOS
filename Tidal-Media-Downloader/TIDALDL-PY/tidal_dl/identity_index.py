@@ -1,7 +1,9 @@
-"""Durable, audio-backed identities. No descriptive tags are stored or written.
+ li"""Durable, audio-backed identities with a persistent unchanged-file scan cache.
 
-Set TIDAL_DL_IDENTITY_LOG_LEVEL=DEBUG before launch for detailed diagnostics.
-SQLite connections are short-lived and thread-local; all writes are transactional.
+Descriptive metadata is never written by this module. A minimal read-only snapshot
+of matching fields may be stored locally so unchanged files need not be reopened on
+every maintenance scan. Workers may reuse read connections; writes remain
+independent, fully synchronous transactions.
 """
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -85,6 +88,21 @@ def _create_schema_v2(db):
         """
     )
     db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scan_cache (
+            path TEXT PRIMARY KEY,
+            signature TEXT NOT NULL,
+            uid TEXT NOT NULL,
+            spotify_id TEXT NOT NULL,
+            tidal_id TEXT NOT NULL,
+            isrc TEXT NOT NULL,
+            title TEXT NOT NULL,
+            artist TEXT NOT NULL,
+            duration REAL NOT NULL
+        )
+        """
+    )
+    db.execute(
         "CREATE INDEX IF NOT EXISTS fingerprints_uid "
         "ON fingerprints(uid)"
     )
@@ -135,8 +153,33 @@ def _migrate_v1_to_v2(db):
         raise
 
 
+_read_session = threading.local()
+
+
+@contextmanager
+def read_session():
+    """Reuse a worker's read connection, without holding a read transaction.
+
+    Writes still use independent, fully synchronous transactions. Closing the
+    scope releases the connection even when a scan fails or is cancelled.
+    """
+    if getattr(_read_session, "db", None) is not None:
+        yield
+        return
+    with connection() as db:
+        _read_session.db = db
+        try:
+            yield
+        finally:
+            _read_session.db = None
+
+
 @contextmanager
 def connection(create=False):
+    shared = getattr(_read_session, "db", None)
+    if not create and shared is not None:
+        yield shared
+        return
     path = index_path()
     if not create and not os.path.isfile(path):
         yield None
@@ -220,6 +263,79 @@ def cache_fingerprint(path, fingerprint, expected_signature):
                 "IDENTITY_HASH_CACHE_WRITE path=%r fingerprint=%s",
                 path,
                 fingerprint,
+            )
+        except Exception:
+            db.rollback()
+            raise
+
+
+def cached_scan(path, expected_signature):
+    """Return cached read-only scan facts when the file is unchanged."""
+    expected = json.dumps(expected_signature)
+    with connection() as db:
+        if db is None:
+            return None
+        try:
+            row = db.execute(
+                "SELECT signature, uid, spotify_id, tidal_id, "
+                "isrc, title, artist, duration "
+                "FROM scan_cache WHERE path=?",
+                (path_key(path),),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # Existing schema-v2 databases gain this additive cache lazily.
+            return None
+
+        if row and row[0] == expected:
+            return (
+                Identity(row[1], row[2], row[3]),
+                str(row[4] or ""),
+                str(row[5] or ""),
+                str(row[6] or ""),
+                float(row[7] or 0),
+            )
+    return None
+
+
+def cache_scans(entries):
+    """Persist read-only scan facts in one transaction for future scans."""
+    rows = []
+    for path, expected_signature, embedded, recording in entries:
+        rows.append(
+            (
+                path_key(path),
+                json.dumps(expected_signature),
+                embedded.uid,
+                embedded.spotify_id,
+                embedded.tidal_id,
+                str(getattr(recording, "isrc", "") or ""),
+                str(getattr(recording, "title", "") or ""),
+                str(getattr(recording, "artist", "") or ""),
+                float(getattr(recording, "duration", 0) or 0),
+            )
+        )
+
+    if not rows:
+        return
+
+    with connection(create=True) as db:
+        if db is None:
+            raise RuntimeError(
+                "Identity index could not be opened for scan caching."
+            )
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.executemany(
+                "INSERT OR REPLACE INTO scan_cache("
+                "path, signature, uid, spotify_id, tidal_id, "
+                "isrc, title, artist, duration"
+                ") VALUES(?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+            db.commit()
+            logger.debug(
+                "IDENTITY_SCAN_CACHE_WRITE files=%d",
+                len(rows),
             )
         except Exception:
             db.rollback()

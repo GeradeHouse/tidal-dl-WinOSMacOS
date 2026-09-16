@@ -909,7 +909,10 @@ class TableHandler(QObject):
     def _flush_deferred_metadata_cache_save_in_background(self) -> None:
         start = time.perf_counter()
         try:
-            self.persistence_manager.end_deferred_save("lazy_table_metadata_cache")
+            self.persistence_manager.end_deferred_save(
+                "lazy_table_metadata_cache",
+                create_backup=False,
+            )
         finally:
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             self._metadata_cache_flush_inflight = False

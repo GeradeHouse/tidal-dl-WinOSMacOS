@@ -1606,6 +1606,8 @@ class PlaylistTreeHandler(QObject):
     # --- Spotify Playlist Handling ---
     @pyqtSlot(list)
     def populate_spotify_playlists(self, playlists: List[Dict[str, Any]], refresh_cache: bool = True) -> None:
+        updates_enabled = self.tree_widget.updatesEnabled()
+        self.tree_widget.setUpdatesEnabled(False)
         try:
             self._clear_spotify_playlist_drop_target()
 
@@ -1732,28 +1734,6 @@ class PlaylistTreeHandler(QObject):
                 self._connect_playlist_folder_button(widget, str(playlist_id))
                 widget_count += 1
 
-                # Force widget layout update after setting as item widget
-                widget.updateGeometry()
-                try:
-                    layout = widget.layout()
-                    if layout is not None:
-                        layout.invalidate()
-                        layout.activate()
-                except (AttributeError, RuntimeError):
-                    # Layout might not be available during initial widget setup
-                    # but we still need to trigger layout recalculation through updateGeometry()
-                    pass
-                
-                # Update item size hint and force tree widget refresh
-                item.setSizeHint(0, widget.sizeHint())
-                try:
-                    viewport = self.tree_widget.viewport()
-                    if viewport is not None:
-                        viewport.update()
-                except (AttributeError, RuntimeError):
-                    # Viewport might not be available during initial setup
-                    pass
-
                 # Connect geometry signal to resize handler
                 widget.geometryRequest.connect(partial(self._on_widget_geometry_request, str(playlist_id)))
 
@@ -1801,6 +1781,8 @@ class PlaylistTreeHandler(QObject):
         except Exception as e:
             logger.error(f"Error updating Spotify playlist tree: {e}", exc_info=True)
             self.update_spotify_root_item(logged_in=False, error=True)
+        finally:
+            self.tree_widget.setUpdatesEnabled(updates_enabled)
 
     def update_spotify_root_item(
         self, logged_in: Optional[bool], error: bool = False, attention: bool = False

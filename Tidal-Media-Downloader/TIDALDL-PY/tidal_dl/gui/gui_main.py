@@ -331,8 +331,9 @@ class MainView(QWidget):
             app.aboutToQuit.connect(self._ui_stall_watchdog.stop)
             app.aboutToQuit.connect(self.cover_cache._save_cache)
             app.aboutToQuit.connect(self._flushDeferredLinkingPersistence)
+            app.aboutToQuit.connect(self.link_persistence_manager.shutdown)
             logger_gui.debug(
-                "Connected app aboutToQuit signal to cover cache and linking persistence flush handlers."
+                "Connected app aboutToQuit signal to cover cache and persistence flush handlers."
             )
 
         QTimer.singleShot(1500, lambda: self.start_download_structure_reorganization())
@@ -1789,10 +1790,13 @@ class MainView(QWidget):
 
         self._deferred_linking_save_active = False
         try:
-            self.link_persistence_manager.end_deferred_save("linking_worker")
+            self.link_persistence_manager.end_deferred_save(
+                "linking_worker",
+                background=True,
+            )
         except Exception:
             logger_gui.warning(
-                "Failed to flush deferred linking persistence save.",
+                "Failed to queue deferred linking persistence save.",
                 exc_info=True,
             )
 
@@ -1856,6 +1860,16 @@ class MainView(QWidget):
                 self.linking_thread.terminate() # Use as a last resort
 
         self._flushDeferredLinkingPersistence()
+        try:
+            if not self.link_persistence_manager.shutdown():
+                logger_gui.warning(
+                    "One or more pending persistence writes could not be flushed during shutdown."
+                )
+        except Exception:
+            logger_gui.warning(
+                "Failed to shut down link persistence cleanly.",
+                exc_info=True,
+            )
 
         logger_gui.info("All background tasks signaled to stop. Proceeding with shutdown.")
         

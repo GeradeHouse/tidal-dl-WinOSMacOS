@@ -97,6 +97,11 @@ def file_signature(path):
 @lru_cache(maxsize=20000)
 def _read_cached(path, signature):
     audio = MutagenFile(path)
+    return local_audio_from_metadata(path, signature, audio)
+
+
+def local_audio_from_metadata(path, signature, audio):
+    """Extract matching facts from an already opened audio container."""
     info = getattr(audio, "info", None)
     duration = float(getattr(info, "length", 0) or 0)
     if audio is None or duration <= 0 or signature[0] <= 0:

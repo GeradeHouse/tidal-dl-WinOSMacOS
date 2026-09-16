@@ -103,41 +103,51 @@ class PlaylistItemProgressWidget(QWidget):
 
         self.main_layout.addWidget(top_row_widget)
 
-        # --- Status Container Widget (to be shown/hidden) ---
-        self.status_container = QWidget()
-        self.status_container.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Minimum
-        )
-        self.status_layout = QVBoxLayout(self.status_container)
-        self.status_layout.setContentsMargins(35, 3, 6, 0)
-        self.status_layout.setSpacing(2)
+        self.status_container: Optional[QWidget] = None
+        self.status_layout: Optional[QVBoxLayout] = None
+        self.status_label: Optional[QLabel] = None
+        self.progress_bar: Optional[QProgressBar] = None
+        self.percentage_label: Optional[QLabel] = None
 
-        # Status Label
-        self.status_label = QLabel("Status")
-        font = self.status_label.font()
-        font.setPointSize(font.pointSize() - 2)
-        self.status_label.setFont(font)
-        self.status_label.setStyleSheet("color: #bbb;")
-        self.status_label.setWordWrap(False)
-        self.status_label.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed
-        )
-        self.status_layout.addWidget(self.status_label)
+    def _ensure_status_widgets(self) -> None:
+        if self.status_container is not None:
+            return
 
-        # Progress Bar and Percentage Layout
+        status_container = QWidget(self)
+        status_container.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Minimum,
+        )
+
+        status_layout = QVBoxLayout(status_container)
+        status_layout.setContentsMargins(35, 3, 6, 0)
+        status_layout.setSpacing(2)
+
+        status_label = QLabel("Status", status_container)
+        font = status_label.font()
+        point_size = font.pointSize()
+        if point_size > 2:
+            font.setPointSize(point_size - 2)
+        status_label.setFont(font)
+        status_label.setStyleSheet("color: #bbb;")
+        status_label.setWordWrap(False)
+        status_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        status_layout.addWidget(status_label)
+
         progress_layout = QHBoxLayout()
         progress_layout.setSpacing(5)
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setFixedHeight(8)
-        self.progress_bar.setSizePolicy(
+        progress_bar = QProgressBar(status_container)
+        progress_bar.setTextVisible(False)
+        progress_bar.setFixedHeight(8)
+        progress_bar.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed
+            QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self.progress_bar.setStyleSheet("""
+        progress_bar.setStyleSheet("""
             QProgressBar {
                 border: 1px solid #555;
                 border-radius: 4px;
@@ -148,26 +158,35 @@ class PlaylistItemProgressWidget(QWidget):
                 border-radius: 3px;
             }
         """)
-        progress_layout.addWidget(self.progress_bar)
+        progress_layout.addWidget(progress_bar)
 
-        self.percentage_label = QLabel("0%")
-        font = self.percentage_label.font()
-        font.setPointSize(font.pointSize() - 2)
-        self.percentage_label.setFont(font)
-        self.percentage_label.setFixedWidth(35)
-        self.percentage_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.percentage_label.setStyleSheet("color: #bbb;")
-        self.percentage_label.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Fixed,
-            QtWidgets.QSizePolicy.Policy.Fixed
+        percentage_label = QLabel("0%", status_container)
+        font = percentage_label.font()
+        point_size = font.pointSize()
+        if point_size > 2:
+            font.setPointSize(point_size - 2)
+        percentage_label.setFont(font)
+        percentage_label.setFixedWidth(35)
+        percentage_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        progress_layout.addWidget(self.percentage_label)
+        percentage_label.setStyleSheet("color: #bbb;")
+        percentage_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        progress_layout.addWidget(percentage_label)
 
-        self.status_layout.addLayout(progress_layout)
-        self.main_layout.addWidget(self.status_container)
+        status_layout.addLayout(progress_layout)
+        self.main_layout.addWidget(status_container)
 
-        # Initially hide the status part
-        self.status_container.setVisible(False)
+        self.status_container = status_container
+        self.status_layout = status_layout
+        self.status_label = status_label
+        self.progress_bar = progress_bar
+        self.percentage_label = percentage_label
+
+        status_container.setVisible(False)
 
     def _refresh_geometry(self) -> None:
         """Refresh local layout metrics and request parent row relayout."""
@@ -225,6 +244,12 @@ class PlaylistItemProgressWidget(QWidget):
 
     def set_progress(self, current: int, total: int, action_text: str):
         """Updates the displayed status and progress."""
+        self._ensure_status_widgets()
+        assert self.status_container is not None
+        assert self.status_label is not None
+        assert self.progress_bar is not None
+        assert self.percentage_label is not None
+
         visibility_changed = False
         progress_was_visible = self.progress_bar.isVisible()
         percentage_was_visible = self.percentage_label.isVisible()
@@ -279,6 +304,12 @@ class PlaylistItemProgressWidget(QWidget):
 
     def set_queued(self):
         """Sets the widget to a 'Queued' state."""
+        self._ensure_status_widgets()
+        assert self.status_container is not None
+        assert self.status_label is not None
+        assert self.progress_bar is not None
+        assert self.percentage_label is not None
+
         visibility_changed = False
         progress_was_visible = self.progress_bar.isVisible()
         percentage_was_visible = self.percentage_label.isVisible()
@@ -297,6 +328,13 @@ class PlaylistItemProgressWidget(QWidget):
 
     def reset_state(self):
         """Hides the progress indicators and restores the default view."""
+        if (
+            self.status_container is None
+            or self.progress_bar is None
+            or self.percentage_label is None
+        ):
+            return
+
         visibility_changed = False
         
         if self.status_container.isVisible():

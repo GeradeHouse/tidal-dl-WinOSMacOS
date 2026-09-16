@@ -44,6 +44,7 @@ import os
 import re
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import logging
 from threading import RLock
@@ -121,6 +122,17 @@ class LinkPersistenceManager:
         self._deferred_save_reason: Optional[str] = None
         self._deferred_save_mutations_since_flush = 0
         self._deferred_save_last_flush_monotonic = time.monotonic()
+
+        self._async_save_lock = RLock()
+        self._async_save_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="link-persistence",
+        )
+        self._async_save_future: Optional[Any] = None
+        self._async_save_running = False
+        self._async_save_pending = False
+        self._async_save_pending_create_backup = False
+        self._async_save_shutdown = False
 
     # --- Private Helper Methods ---
 
@@ -441,12 +453,6 @@ class LinkPersistenceManager:
 
         return None
 
-    def _validate_temp_json_file(self, temp_path: str) -> bool:
-        try:
-            return self._load_and_validate_json_file(temp_path) is not None
-        except Exception:
-            return False
-
     def _write_links_data_atomic(
         self,
         links_data_to_save: Dict[str, Any],
@@ -462,21 +468,26 @@ class LinkPersistenceManager:
         )
 
         try:
-            with open(temp_path, "w", encoding="utf-8") as f:
+            with open(
+                temp_path,
+                "w",
+                encoding="utf-8",
+                newline="\n",
+            ) as f:
                 json.dump(
                     links_data_to_save,
                     f,
-                    indent=4,
                     ensure_ascii=False,
                     sort_keys=False,
+                    separators=(",", ":"),
                 )
                 f.write("\n")
                 f.flush()
                 os.fsync(f.fileno())
 
-            if not self._validate_temp_json_file(temp_path):
+            if not os.path.exists(temp_path) or os.path.getsize(temp_path) <= 0:
                 logger.error(
-                    "Refusing to replace links file because temp JSON validation failed: %s",
+                    "Refusing to replace links file because the flushed temp JSON file is empty or missing: %s",
                     temp_path,
                 )
                 return False
@@ -579,40 +590,39 @@ class LinkPersistenceManager:
         """
         Saves a stable snapshot of the in-memory links data to the JSON file.
 
-        The in-memory structure is copied while the persistence lock is held.
-        Slow JSON serialization, validation, backup, replace, and fsync work then
-        run outside that lock so GUI-thread cache mutations are not blocked by
-        disk I/O.
+        The disk-write lock is acquired before snapshot creation so concurrently
+        requested saves are serialized in snapshot-and-write order.
         """
-        with self._io_lock:
-            if self.links_data is None:
-                logger.warning("Attempted to save links before loading. Loading first.")
-                self.load_links()
-
-            links_data_to_save = cast(Dict[str, Any], self.links_data)
-
-            if (
-                self._load_failed_due_to_unresolved_corruption
-                and links_data_to_save == self._default_links_structure()
-                and os.path.exists(self.file_path)
-            ):
-                logger.critical(
-                    "Refusing to overwrite unresolved corrupt links file with an empty default structure: %s",
-                    self.file_path,
-                )
-                return False
-
-            normalized = self._normalize_loaded_links_data(links_data_to_save)
-            if normalized is None:
-                logger.error(
-                    "Refusing to save links because in-memory data does not contain a valid 'playlists' dictionary."
-                )
-                return False
-
-            snapshot_to_save = copy.deepcopy(normalized)
-
         max_retries = 3
+
         with self._disk_write_lock:
+            with self._io_lock:
+                if self.links_data is None:
+                    logger.warning("Attempted to save links before loading. Loading first.")
+                    self.load_links()
+
+                links_data_to_save = cast(Dict[str, Any], self.links_data)
+
+                if (
+                    self._load_failed_due_to_unresolved_corruption
+                    and links_data_to_save == self._default_links_structure()
+                    and os.path.exists(self.file_path)
+                ):
+                    logger.critical(
+                        "Refusing to overwrite unresolved corrupt links file with an empty default structure: %s",
+                        self.file_path,
+                    )
+                    return False
+
+                normalized = self._normalize_loaded_links_data(links_data_to_save)
+                if normalized is None:
+                    logger.error(
+                        "Refusing to save links because in-memory data does not contain a valid 'playlists' dictionary."
+                    )
+                    return False
+
+                snapshot_to_save = copy.deepcopy(normalized)
+
             for attempt in range(max_retries):
                 try:
                     if self._write_links_data_atomic(
@@ -652,6 +662,127 @@ class LinkPersistenceManager:
 
             return False
 
+    def request_save(self, *, create_backup: bool = True) -> bool:
+        """
+        Queue persistence on the dedicated writer thread.
+
+        Multiple requests arriving while a write is active are coalesced into one
+        additional save of the latest in-memory state.
+        """
+        fallback_to_sync = False
+        fallback_create_backup = bool(create_backup)
+
+        with self._async_save_lock:
+            if self._async_save_shutdown:
+                fallback_to_sync = True
+            else:
+                self._async_save_pending = True
+                self._async_save_pending_create_backup = (
+                    self._async_save_pending_create_backup or bool(create_backup)
+                )
+
+                if self._async_save_running:
+                    return True
+
+                self._async_save_running = True
+                try:
+                    self._async_save_future = self._async_save_executor.submit(
+                        self._drain_async_save_requests
+                    )
+                    return True
+                except RuntimeError:
+                    fallback_create_backup = self._async_save_pending_create_backup
+                    self._async_save_pending = False
+                    self._async_save_pending_create_backup = False
+                    self._async_save_running = False
+                    self._async_save_future = None
+                    fallback_to_sync = True
+
+        if fallback_to_sync:
+            return self.save_links(create_backup=fallback_create_backup)
+
+        return False
+
+    def _drain_async_save_requests(self) -> bool:
+        overall_result = True
+
+        while True:
+            with self._async_save_lock:
+                if not self._async_save_pending:
+                    self._async_save_running = False
+                    self._async_save_future = None
+                    return overall_result
+
+                create_backup = self._async_save_pending_create_backup
+                self._async_save_pending = False
+                self._async_save_pending_create_backup = False
+
+            result = self.save_links(create_backup=create_backup)
+            overall_result = bool(result) and overall_result
+
+            if not result:
+                with self._async_save_lock:
+                    self._async_save_pending = True
+                    self._async_save_pending_create_backup = (
+                        self._async_save_pending_create_backup or create_backup
+                    )
+                    self._async_save_running = False
+                    self._async_save_future = None
+                return False
+
+    def flush_pending_saves(self) -> bool:
+        """Wait for queued persistence and synchronously retry any unsaved request."""
+        overall_result = True
+
+        while True:
+            with self._async_save_lock:
+                running = self._async_save_running
+                future = self._async_save_future
+
+            if running and future is not None:
+                try:
+                    overall_result = bool(future.result()) and overall_result
+                except Exception:
+                    logger.error(
+                        "Background links persistence failed unexpectedly.",
+                        exc_info=True,
+                    )
+                    overall_result = False
+                continue
+
+            with self._async_save_lock:
+                if self._async_save_running:
+                    continue
+
+                if not self._async_save_pending:
+                    return overall_result
+
+                create_backup = self._async_save_pending_create_backup
+                self._async_save_pending = False
+                self._async_save_pending_create_backup = False
+
+            result = self.save_links(create_backup=create_backup)
+            overall_result = bool(result) and overall_result
+
+            if not result:
+                with self._async_save_lock:
+                    self._async_save_pending = True
+                    self._async_save_pending_create_backup = (
+                        self._async_save_pending_create_backup or create_backup
+                    )
+                return False
+
+    def shutdown(self) -> bool:
+        """Flush queued persistence and stop the dedicated writer thread."""
+        with self._async_save_lock:
+            if self._async_save_shutdown:
+                return self.flush_pending_saves()
+            self._async_save_shutdown = True
+
+        result = self.flush_pending_saves()
+        self._async_save_executor.shutdown(wait=True)
+        return result
+
     def get_recovery_status(self) -> Dict[str, Any]:
         """
         Returns diagnostic information about the most recent persistence recovery state.
@@ -680,7 +811,13 @@ class LinkPersistenceManager:
                 self._deferred_save_depth,
             )
 
-    def end_deferred_save(self, reason: str = "bulk") -> bool:
+    def end_deferred_save(
+        self,
+        reason: str = "bulk",
+        *,
+        create_backup: bool = True,
+        background: bool = False,
+    ) -> bool:
         """
         Ends one deferred-save scope and flushes one atomic save if pending.
         """
@@ -711,7 +848,19 @@ class LinkPersistenceManager:
             return True
 
         start = time.perf_counter()
-        result = self.save_links()
+
+        if background:
+            result = self.request_save(create_backup=create_backup)
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            logger.info(
+                "Deferred persistence save queued | reason=%s elapsed_ms=%.1f result=%s",
+                flush_reason,
+                elapsed_ms,
+                result,
+            )
+            return result
+
+        result = self.save_links(create_backup=create_backup)
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         logger.info(
             "Deferred persistence save flushed | reason=%s elapsed_ms=%.1f result=%s",
@@ -721,7 +870,12 @@ class LinkPersistenceManager:
         )
         return result
 
-    def _save_or_defer(self) -> bool:
+    def _save_or_defer(
+        self,
+        *,
+        create_backup: bool = True,
+        background: bool = False,
+    ) -> bool:
         """
         Saves immediately unless a bulk/deferred-save scope is active.
         Deferred scopes also write periodic crash-recovery checkpoints.
@@ -772,7 +926,10 @@ class LinkPersistenceManager:
                         self._deferred_save_pending = True
             return result
 
-        return self.save_links()
+        if background:
+            return self.request_save(create_backup=create_backup)
+
+        return self.save_links(create_backup=create_backup)
 
     # --- Public Data Access and Modification Methods ---
 
@@ -924,7 +1081,7 @@ class LinkPersistenceManager:
             "timestamp": self._get_current_timestamp(),
         }
 
-        if not self._save_or_defer():
+        if not self._save_or_defer(create_backup=False):
             logger.error(
                 f"Failed to save track quality cache for track {track_id}"
             )
@@ -1013,6 +1170,8 @@ class LinkPersistenceManager:
     def set_cached_spotify_audio_features_bulk(
         self,
         features_map: Dict[str, Dict[str, Any]],
+        *,
+        background: bool = False,
     ) -> None:
         """Store raw Spotify Audio Features values with one persistence save."""
         if not isinstance(features_map, dict) or not features_map:
@@ -1059,7 +1218,10 @@ class LinkPersistenceManager:
         if not stored:
             return
 
-        if not self._save_or_defer():
+        if not self._save_or_defer(
+            create_backup=False,
+            background=background,
+        ):
             logger.error(
                 "Failed to save Spotify Audio Features cache batch | tracks=%d",
                 stored,
@@ -1121,7 +1283,7 @@ class LinkPersistenceManager:
             "timestamp": self._get_current_timestamp(),
         }
 
-        if not self._save_or_defer():
+        if not self._save_or_defer(create_backup=False):
             logger.error(
                 f"Failed to save track metadata cache for track {track_id}"
             )
@@ -1208,7 +1370,7 @@ class LinkPersistenceManager:
             "last_seen": self._get_current_timestamp(),
         }
 
-        if not self._save_or_defer():
+        if not self._save_or_defer(create_backup=False):
             logger.error(
                 f"Failed to save playlist folder hint for playlist {normalized_playlist_id}"
             )

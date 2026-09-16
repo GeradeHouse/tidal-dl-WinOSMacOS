@@ -397,14 +397,17 @@ class SpotifyAPI:
         started = time.perf_counter()
         try:
             manager = self._get_persistence_manager()
-            manager.set_cached_spotify_audio_features_bulk(features_map)
+            manager.set_cached_spotify_audio_features_bulk(
+                features_map,
+                background=True,
+            )
             logger.info(
-                "Spotify Audio Features cache batch stored | tracks=%d elapsed_ms=%.1f",
+                "Spotify Audio Features cache batch queued | tracks=%d elapsed_ms=%.1f",
                 len(features_map),
                 (time.perf_counter() - started) * 1000.0,
             )
         except Exception:
-            logger.debug("Failed to write Spotify Audio Features cache.", exc_info=True)
+            logger.debug("Failed to queue Spotify Audio Features cache write.", exc_info=True)
 
     def get_audio_features_for_tracks(
         self,

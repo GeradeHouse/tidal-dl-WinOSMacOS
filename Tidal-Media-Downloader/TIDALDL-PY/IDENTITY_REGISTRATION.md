@@ -17,10 +17,12 @@ layers provide this:
    separate custom fields. Registration may read descriptive tags as matching
    evidence and to verify preservation, but it only writes missing identity fields.
 
-2. **A persistent recording and audio-content index**
+2. **A persistent recording, audio-content and scan index**
    [`identity_index.py`](tidal_dl/identity_index.py) stores durable recording
    UIDs separately from exact audio fingerprints. One recording can therefore
-   accumulate multiple fingerprint forms over time.
+   accumulate multiple fingerprint forms over time. The same local SQLite file
+   also keeps a signature-keyed read-only snapshot of identity and matching
+   fields so unchanged files do not need to be reopened on every maintenance scan.
 
    FLAC uses the native STREAMINFO decoded-PCM MD5 together with sample rate,
    channel count, bit depth and total sample count. Reading this identity does
@@ -51,18 +53,24 @@ The scan ([`identity_registration.py`](tidal_dl/identity_registration.py)) then
 walks the selected playlist root and, for each supported audio file (FLAC,
 MP3, M4A/MP4):
 
-1. Reads existing dedicated identity tags and resolves them against locally
-   stored recording identities.
-2. Reuses a valid path/fingerprint cache when available.
-3. Defers content fingerprinting when dedicated identity fields already provide
+1. Checks the persistent unchanged-file scan cache using normalized path plus
+   file size, modification time, creation/change time and inode/file ID.
+2. On a cache hit, reuses the previously read identity and matching fields without
+   reopening the audio container. On a miss, reads the local audio metadata and
+   stores those facts for later scans.
+3. Reuses a valid path/fingerprint cache when available.
+4. Defers content fingerprinting when dedicated identity fields already provide
    sufficient identity evidence.
-4. When embedded identity is unavailable, computes the fast format-specific
+5. When embedded identity is unavailable, computes the fast format-specific
    fingerprint: FLAC STREAMINFO MD5 or encoded-audio stream-copy SHA-256.
-5. Transparently maps a current fast fingerprint to an existing version-1
+6. Transparently maps a current fast fingerprint to an existing version-1
    identity when an unchanged legacy cache entry proves that association.
-6. Uses locally cached Spotify playlist metadata only as legacy association
+7. Uses locally cached Spotify playlist metadata only as legacy association
    evidence. Metadata-only candidates remain review-required.
 
+The first scan after this cache is introduced will populate it. Later scans will
+reuse it for unchanged paths. Renames, tag edits, file replacement or any stored
+signature change will invalidate the entry automatically and force a fresh read.
 Missing local Spotify cache data never triggers an online refresh.
 
 Each row shows one status:
@@ -70,12 +78,15 @@ Each row shows one status:
 | Status | Meaning | Action |
 |---|---|---|
 | Registered | Already indexed and tagged consistently | None needed |
-| Identified | Verified via the audio index or consistent tags; association confirmed | Select explicitly to add missing identity data |
-| Review association | Metadata-only legacy match; not audio proof | Choose the association explicitly, or keep as-is |
+| Ready to register | Verified via the audio index or consistent tags; association confirmed | Select explicitly to add missing identity data |
+| Needs review | Metadata-only legacy match; not audio proof | Choose the association explicitly, or keep as-is |
 | Unmatched | No reliable association found | Left untouched |
 | Conflict / error | Conflicting IDs, unreadable audio, changed file | Reported; nothing changed |
 
-Nothing is selected automatically. Metadata-only candidates require manual judgment.
+Nothing is selected automatically. **Select ready to register** selects only
+confirmed, unregistered rows. **Select ready + review** also includes metadata-only
+**Needs review** rows and is disabled when there are no review rows.
+**Registered** rows are never selectable.
 
 ## Registration safety
 
@@ -128,8 +139,9 @@ is valid and the backup exists; re-running the scan repairs the index.
 
 High-level identity operations log at `INFO` by default, including worker
 start/completion, cache-only catalog counts, mapped folders, scan totals,
-fingerprint cache hits, computed fingerprints, deferred fingerprints, legacy
-migrations and elapsed time. Per-file fingerprint details remain at `DEBUG`.
+unchanged-file scan-cache hits, fingerprint cache hits, computed fingerprints,
+deferred fingerprints, legacy migrations and elapsed time. Per-file fingerprint
+details remain at `DEBUG`.
 
 Set `TIDAL_DL_IDENTITY_LOG_LEVEL=DEBUG` before launch for detailed identity
 diagnostics.
@@ -137,7 +149,8 @@ diagnostics.
 Useful detailed events include `IDENTITY_FINGERPRINT_CACHE_HIT`,
 `IDENTITY_FINGERPRINT_LEGACY_CACHE`,
 `IDENTITY_FINGERPRINT_STREAMCOPY_START`,
-`IDENTITY_FINGERPRINT_DONE`, `IDENTITY_SCAN_ROW`,
+`IDENTITY_FINGERPRINT_DONE`, `IDENTITY_SCAN_CACHE_WRITE`,
+`IDENTITY_SCAN_ROW`,
 `IDENTITY_INDEX_REGISTER`, `DL_IDENTITY_INDEXED`,
 `IDENTITY_REGISTERED`, and failure tracebacks.
 
@@ -157,7 +170,8 @@ Useful detailed events include `IDENTITY_FINGERPRINT_CACHE_HIT`,
   identity.
 - SQLite schema version 2 stores recording identity independently of
   fingerprints, allowing legacy decoded-PCM fingerprints and newer fast
-  fingerprints to resolve to the same recording UID.
+  fingerprints to resolve to the same recording UID. The additive `scan_cache`
+  table is only an acceleration layer; a signature mismatch makes its row unusable.
 - Cached Spotify metadata can be incomplete or outdated. Identity maintenance
   never contacts Spotify to fill those gaps automatically.
 - Restoring a registration backup restores all tags to their pre-registration
