@@ -233,6 +233,8 @@ class Worker(QRunnable):
 # --- Global Stylesheet ---
 def apply_global_stylesheet(app: QApplication, font_size: int = 11):
     """Applies the global dark theme stylesheet to the application."""
+    operation_started = time.perf_counter()
+
     stylesheet = """
         /* General Window and Text */
         QWidget {{
@@ -379,8 +381,32 @@ def apply_global_stylesheet(app: QApplication, font_size: int = 11):
             background-color: #3a3a3f;
         }}
     """
-    app.setStyleSheet(stylesheet.format(font_size=font_size))
-    logger.info(f"Global dark stylesheet applied with font size {font_size}pt.")
+
+    format_started = time.perf_counter()
+    formatted_stylesheet = stylesheet.format(font_size=font_size)
+    format_ms = (time.perf_counter() - format_started) * 1000.0
+
+    qt_apply_started = time.perf_counter()
+    app.setStyleSheet(formatted_stylesheet)
+    qt_apply_ms = (time.perf_counter() - qt_apply_started) * 1000.0
+    total_ms = (time.perf_counter() - operation_started) * 1000.0
+
+    if total_ms >= 250.0:
+        logger.warning(
+            "PERF global stylesheet slow | total_ms=%.1f format_ms=%.1f "
+            "qt_apply_ms=%.1f font_size=%d top_level_widgets=%d",
+            total_ms,
+            format_ms,
+            qt_apply_ms,
+            font_size,
+            len(app.topLevelWidgets()),
+        )
+
+    logger.info(
+        "Global dark stylesheet applied with font size %dpt | elapsed_ms=%.1f",
+        font_size,
+        total_ms,
+    )
 
 
 # --- Main Application Runner ---

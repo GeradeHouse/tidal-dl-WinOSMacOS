@@ -47,7 +47,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import logging
-from threading import RLock
+from threading import RLock, current_thread
 from typing import Dict, Optional, List, Any, cast
 from . import paths
 import aigpy  # type: ignore
@@ -89,6 +89,7 @@ LINKS_BACKUP_SUFFIX = ".bak"
 LINKS_CORRUPT_SUFFIX = ".corrupt"
 DEFERRED_SAVE_CHECKPOINT_MUTATION_COUNT = 25
 DEFERRED_SAVE_CHECKPOINT_SECONDS = 20.0
+PERSISTENCE_SLOW_OPERATION_MS = 500.0
 
 # ########## CLASS DEFINITIONS ##########
 
@@ -133,6 +134,8 @@ class LinkPersistenceManager:
         self._async_save_pending = False
         self._async_save_pending_create_backup = False
         self._async_save_shutdown = False
+        self._async_save_requests_total = 0
+        self._async_save_coalesced_total = 0
 
     # --- Private Helper Methods ---
 
@@ -467,6 +470,14 @@ class LinkPersistenceManager:
             f"{os.getpid()}.{self._timestamp_for_filename()}"
         )
 
+        write_started = time.perf_counter()
+        json_ms = 0.0
+        file_fsync_ms = 0.0
+        backup_ms = 0.0
+        replace_ms = 0.0
+        directory_fsync_ms = 0.0
+        bytes_written = 0
+
         try:
             with open(
                 temp_path,
@@ -474,6 +485,7 @@ class LinkPersistenceManager:
                 encoding="utf-8",
                 newline="\n",
             ) as f:
+                json_started = time.perf_counter()
                 json.dump(
                     links_data_to_save,
                     f,
@@ -482,8 +494,12 @@ class LinkPersistenceManager:
                     separators=(",", ":"),
                 )
                 f.write("\n")
+                json_ms = (time.perf_counter() - json_started) * 1000.0
+
+                fsync_started = time.perf_counter()
                 f.flush()
                 os.fsync(f.fileno())
+                file_fsync_ms = (time.perf_counter() - fsync_started) * 1000.0
 
             if not os.path.exists(temp_path) or os.path.getsize(temp_path) <= 0:
                 logger.error(
@@ -492,11 +508,18 @@ class LinkPersistenceManager:
                 )
                 return False
 
+            bytes_written = os.path.getsize(temp_path)
+
             if create_backup:
+                backup_started = time.perf_counter()
                 self._copy_current_file_to_backup_if_valid()
+                backup_ms = (time.perf_counter() - backup_started) * 1000.0
 
+            replace_started = time.perf_counter()
             os.replace(temp_path, self.file_path)
+            replace_ms = (time.perf_counter() - replace_started) * 1000.0
 
+            directory_fsync_started = time.perf_counter()
             try:
                 directory_fd = os.open(directory, os.O_RDONLY)
                 try:
@@ -508,6 +531,28 @@ class LinkPersistenceManager:
                     "Directory fsync was not available for '%s'.",
                     directory,
                     exc_info=True,
+                )
+            finally:
+                directory_fsync_ms = (
+                    time.perf_counter() - directory_fsync_started
+                ) * 1000.0
+
+            total_ms = (time.perf_counter() - write_started) * 1000.0
+            if total_ms >= PERSISTENCE_SLOW_OPERATION_MS:
+                logger.warning(
+                    "PERF persistence atomic write slow | total_ms=%.1f "
+                    "json_ms=%.1f file_fsync_ms=%.1f backup_ms=%.1f "
+                    "replace_ms=%.1f directory_fsync_ms=%.1f bytes=%d "
+                    "create_backup=%s thread=%s",
+                    total_ms,
+                    json_ms,
+                    file_fsync_ms,
+                    backup_ms,
+                    replace_ms,
+                    directory_fsync_ms,
+                    bytes_written,
+                    create_backup,
+                    current_thread().name,
                 )
 
             logger.debug("Atomically saved links to '%s'.", self.file_path)
@@ -533,6 +578,7 @@ class LinkPersistenceManager:
         if self.links_data is not None:
             return self.links_data
 
+        load_started = time.perf_counter()
         default_structure = self._default_links_structure()
         loaded_data: Dict[str, Any] = default_structure
 
@@ -584,6 +630,30 @@ class LinkPersistenceManager:
                 loaded_data = default_structure
 
             self.links_data = loaded_data
+
+            elapsed_ms = (time.perf_counter() - load_started) * 1000.0
+            if elapsed_ms >= PERSISTENCE_SLOW_OPERATION_MS:
+                try:
+                    file_bytes = (
+                        os.path.getsize(self.file_path)
+                        if os.path.exists(self.file_path)
+                        else 0
+                    )
+                except OSError:
+                    file_bytes = -1
+
+                logger.warning(
+                    "PERF persistence load slow | elapsed_ms=%.1f bytes=%d "
+                    "top_level_keys=%d playlists=%d thread=%s",
+                    elapsed_ms,
+                    file_bytes,
+                    len(loaded_data),
+                    len(loaded_data.get("playlists", {}))
+                    if isinstance(loaded_data.get("playlists"), dict)
+                    else 0,
+                    current_thread().name,
+                )
+
             return loaded_data
 
     def save_links(self, *, create_backup: bool = True) -> bool:
@@ -594,9 +664,22 @@ class LinkPersistenceManager:
         requested saves are serialized in snapshot-and-write order.
         """
         max_retries = 3
+        save_started = time.perf_counter()
 
+        disk_lock_wait_started = time.perf_counter()
         with self._disk_write_lock:
+            disk_lock_wait_ms = (
+                time.perf_counter() - disk_lock_wait_started
+            ) * 1000.0
+
+            io_lock_wait_started = time.perf_counter()
             with self._io_lock:
+                io_lock_wait_ms = (
+                    time.perf_counter() - io_lock_wait_started
+                ) * 1000.0
+
+                snapshot_started = time.perf_counter()
+
                 if self.links_data is None:
                     logger.warning("Attempted to save links before loading. Loading first.")
                     self.load_links()
@@ -622,6 +705,9 @@ class LinkPersistenceManager:
                     return False
 
                 snapshot_to_save = copy.deepcopy(normalized)
+                snapshot_ms = (time.perf_counter() - snapshot_started) * 1000.0
+
+            write_phase_started = time.perf_counter()
 
             for attempt in range(max_retries):
                 try:
@@ -629,6 +715,32 @@ class LinkPersistenceManager:
                         snapshot_to_save,
                         create_backup=create_backup,
                     ):
+                        write_phase_ms = (
+                            time.perf_counter() - write_phase_started
+                        ) * 1000.0
+                        total_ms = (time.perf_counter() - save_started) * 1000.0
+
+                        if (
+                            total_ms >= PERSISTENCE_SLOW_OPERATION_MS
+                            or disk_lock_wait_ms >= PERSISTENCE_SLOW_OPERATION_MS
+                            or io_lock_wait_ms >= PERSISTENCE_SLOW_OPERATION_MS
+                            or snapshot_ms >= PERSISTENCE_SLOW_OPERATION_MS
+                        ):
+                            logger.warning(
+                                "PERF persistence save slow | total_ms=%.1f "
+                                "disk_lock_wait_ms=%.1f io_lock_wait_ms=%.1f "
+                                "snapshot_ms=%.1f write_phase_ms=%.1f "
+                                "create_backup=%s attempt=%d thread=%s",
+                                total_ms,
+                                disk_lock_wait_ms,
+                                io_lock_wait_ms,
+                                snapshot_ms,
+                                write_phase_ms,
+                                create_backup,
+                                attempt + 1,
+                                current_thread().name,
+                            )
+
                         with self._io_lock:
                             self._load_failed_due_to_unresolved_corruption = False
                         return True
@@ -673,6 +785,8 @@ class LinkPersistenceManager:
         fallback_create_backup = bool(create_backup)
 
         with self._async_save_lock:
+            self._async_save_requests_total += 1
+
             if self._async_save_shutdown:
                 fallback_to_sync = True
             else:
@@ -682,6 +796,7 @@ class LinkPersistenceManager:
                 )
 
                 if self._async_save_running:
+                    self._async_save_coalesced_total += 1
                     return True
 
                 self._async_save_running = True
@@ -740,6 +855,7 @@ class LinkPersistenceManager:
                 future = self._async_save_future
 
             if running and future is not None:
+                wait_started = time.perf_counter()
                 try:
                     overall_result = bool(future.result()) and overall_result
                 except Exception:
@@ -748,6 +864,15 @@ class LinkPersistenceManager:
                         exc_info=True,
                     )
                     overall_result = False
+                finally:
+                    wait_ms = (time.perf_counter() - wait_started) * 1000.0
+                    if wait_ms >= PERSISTENCE_SLOW_OPERATION_MS:
+                        logger.warning(
+                            "PERF persistence blocking flush wait slow | "
+                            "wait_ms=%.1f thread=%s",
+                            wait_ms,
+                            current_thread().name,
+                        )
                 continue
 
             with self._async_save_lock:
@@ -793,6 +918,18 @@ class LinkPersistenceManager:
             "last_recovery_source": self._last_recovery_source,
             "backup_count": len(self._backup_candidates()),
         }
+
+    def get_performance_state(self) -> Dict[str, Any]:
+        """Return lightweight persistence state without waiting for disk I/O."""
+        with self._async_save_lock:
+            return {
+                "async_running": self._async_save_running,
+                "async_pending": self._async_save_pending,
+                "async_requests_total": self._async_save_requests_total,
+                "async_coalesced_total": self._async_save_coalesced_total,
+                "deferred_depth": self._deferred_save_depth,
+                "deferred_pending": self._deferred_save_pending,
+            }
 
     def begin_deferred_save(self, reason: str = "bulk") -> None:
         """

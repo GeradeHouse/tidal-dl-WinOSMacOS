@@ -3417,11 +3417,19 @@ class TableHandler(QObject):
                 )
 
         if not context_menu.isEmpty():
-            viewport = table.viewport()
-            if viewport:
-                context_menu.exec(viewport.mapToGlobal(pos))
-            else:
-                context_menu.exec(QtGui.QCursor.pos())
+            watchdog = getattr(self.main_view, "_ui_stall_watchdog", None)
+            if watchdog is not None:
+                watchdog.set_expected_block("table_context_menu")
+
+            try:
+                viewport = table.viewport()
+                if viewport:
+                    context_menu.exec(viewport.mapToGlobal(pos))
+                else:
+                    context_menu.exec(QtGui.QCursor.pos())
+            finally:
+                if watchdog is not None:
+                    watchdog.set_expected_block(None)
 
     def update_linking_status(
         self,

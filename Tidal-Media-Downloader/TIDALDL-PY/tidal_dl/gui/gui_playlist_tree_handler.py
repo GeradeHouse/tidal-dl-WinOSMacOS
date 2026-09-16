@@ -1606,6 +1606,15 @@ class PlaylistTreeHandler(QObject):
     # --- Spotify Playlist Handling ---
     @pyqtSlot(list)
     def populate_spotify_playlists(self, playlists: List[Dict[str, Any]], refresh_cache: bool = True) -> None:
+        operation_started = time.perf_counter()
+        prepare_ms = 0.0
+        render_ms = 0.0
+        render_started: Optional[float] = None
+        post_started: Optional[float] = None
+        playlists_to_render: List[Dict[str, Any]] = []
+        folder_items: Dict[str, QTreeWidgetItem] = {}
+        widget_count = 0
+
         updates_enabled = self.tree_widget.updatesEnabled()
         self.tree_widget.setUpdatesEnabled(False)
         try:
@@ -1636,6 +1645,8 @@ class PlaylistTreeHandler(QObject):
                 ]
 
             playlists_to_render = self._get_ordered_spotify_playlists()
+            prepare_ms = (time.perf_counter() - operation_started) * 1000.0
+            render_started = time.perf_counter()
 
             while self.spotify_root_item.childCount() > 0:
                 self.spotify_root_item.removeChild(self.spotify_root_item.child(0))
@@ -1644,7 +1655,7 @@ class PlaylistTreeHandler(QObject):
             self.spotify_root_item.setText(0, f"Spotify Playlists ({playlist_count})")
             self.spotify_root_item.setHidden(False)
 
-            folder_items: Dict[str, QTreeWidgetItem] = {}
+            folder_items = {}
             widget_count = 0
 
             for p_data in playlists_to_render:
@@ -1768,6 +1779,10 @@ class PlaylistTreeHandler(QObject):
                     else:
                         widget.set_icon(self.default_music_icon)
             
+            if render_started is not None:
+                render_ms = (time.perf_counter() - render_started) * 1000.0
+            post_started = time.perf_counter()
+
             self._loadVisibleSpotifyIcons()
             if playlists_to_render:
                 def _expand_spotify_root():
@@ -1783,6 +1798,31 @@ class PlaylistTreeHandler(QObject):
             self.update_spotify_root_item(logged_in=False, error=True)
         finally:
             self.tree_widget.setUpdatesEnabled(updates_enabled)
+
+            finished_at = time.perf_counter()
+            total_ms = (finished_at - operation_started) * 1000.0
+            post_ms = (
+                (finished_at - post_started) * 1000.0
+                if post_started is not None
+                else 0.0
+            )
+
+            log_method = logger.warning if total_ms >= 500.0 else logger.info
+            log_method(
+                "PERF Spotify playlist tree population | total_ms=%.1f "
+                "prepare_ms=%.1f render_ms=%.1f post_ms=%.1f "
+                "input_playlists=%d rendered_playlists=%d widgets=%d "
+                "folders=%d refresh_cache=%s",
+                total_ms,
+                prepare_ms,
+                render_ms,
+                post_ms,
+                len(playlists),
+                len(playlists_to_render),
+                widget_count,
+                len(folder_items),
+                refresh_cache,
+            )
 
     def update_spotify_root_item(
         self, logged_in: Optional[bool], error: bool = False, attention: bool = False

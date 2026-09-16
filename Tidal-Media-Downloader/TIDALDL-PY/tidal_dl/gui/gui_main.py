@@ -450,11 +450,24 @@ class MainView(QWidget):
         queued_jobs = len(getattr(queue_manager, "task_queue", [])) if queue_manager else 0
         task_running = bool(getattr(queue_manager, "is_running_task", False)) if queue_manager else False
 
+        persistence_state = self.link_persistence_manager.get_performance_state()
+        timer_interval_ms = (
+            self._ui_freeze_monitor_timer.interval()
+            if self._ui_freeze_monitor_timer is not None
+            else 250
+        )
+        overrun_ms = max(0.0, elapsed_ms - float(timer_interval_ms))
+
         logger_gui.warning(
-            "UI responsiveness gap detected | elapsed_ms=%.1f download_active=%s linking_active=%s "
-            "spotify_mutation_active=%s task_running=%s queued_jobs=%d current_job=%r visible_playlist=%s "
-            "page=%s gaps_since_report=%d max_gap_ms=%.1f pending_gui_logs=%d",
+            "UI responsiveness gap detected | elapsed_ms=%.1f overrun_ms=%.1f "
+            "download_active=%s linking_active=%s spotify_mutation_active=%s "
+            "task_running=%s queued_jobs=%d current_job=%r visible_playlist=%s "
+            "page=%s gaps_since_report=%d max_gap_ms=%.1f pending_gui_logs=%d "
+            "threads=%d persistence_running=%s persistence_pending=%s "
+            "persistence_deferred_depth=%s persistence_deferred_pending=%s "
+            "persistence_requests=%s persistence_coalesced=%s",
             elapsed_ms,
+            overrun_ms,
             getattr(self, "download_active", None),
             getattr(self, "linking_active", None),
             getattr(self, "spotify_mutation_active", None),
@@ -466,6 +479,13 @@ class MainView(QWidget):
             self._ui_gap_count,
             self._ui_gap_max_ms,
             len(self._pending_gui_logs),
+            threading.active_count(),
+            persistence_state.get("async_running"),
+            persistence_state.get("async_pending"),
+            persistence_state.get("deferred_depth"),
+            persistence_state.get("deferred_pending"),
+            persistence_state.get("async_requests_total"),
+            persistence_state.get("async_coalesced_total"),
         )
         self._ui_gap_count = 0
         self._ui_gap_max_ms = 0.0

@@ -320,9 +320,20 @@ def toggle_account(self: "SettingsPage"):
 def _browse_cache_path(self: "SettingsPage"):
     """Opens a dialog to select the cache directory."""
     assert self.cache_path_lineEdit is not None
-    directory = QFileDialog.getExistingDirectory(
-        self, "Select Cache Directory", os.path.expanduser("~")
-    )
+
+    main_window = self.window()
+    watchdog = getattr(main_window, "_ui_stall_watchdog", None)
+    if watchdog is not None:
+        watchdog.set_expected_block("native_cache_directory_dialog")
+
+    try:
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select Cache Directory", os.path.expanduser("~")
+        )
+    finally:
+        if watchdog is not None:
+            watchdog.set_expected_block(None)
+
     if directory:
         self.cache_path_lineEdit.setText(directory)
 
@@ -338,16 +349,22 @@ def browse_directory(self: "SettingsPage"):
     """
     assert self.downloadPathInput is not None
     assert self.downloadPathEdit is not None
-    # Open the system's native folder selection dialog
-    # Start at the current download directory if one is set
-    current_path = self.downloadPathInput.text() or os.path.expanduser("~")
-    directory = QtWidgets.QFileDialog.getExistingDirectory(
-        self, "Select Download Directory", current_path
-    )
 
-    # Only update paths if the user selected a directory (not canceled)
+    current_path = self.downloadPathInput.text() or os.path.expanduser("~")
+    main_window = self.window()
+    watchdog = getattr(main_window, "_ui_stall_watchdog", None)
+    if watchdog is not None:
+        watchdog.set_expected_block("native_download_directory_dialog")
+
+    try:
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select Download Directory", current_path
+        )
+    finally:
+        if watchdog is not None:
+            watchdog.set_expected_block(None)
+
     if directory:
-        # Update both the display-only field and the editable path field
         self.downloadPathInput.setText(directory)
         self.downloadPathEdit.setText(directory)
 
