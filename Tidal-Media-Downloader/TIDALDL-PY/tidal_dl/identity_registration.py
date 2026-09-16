@@ -1,4 +1,4 @@
-"""Review plans and identity-only writes with full-file recovery backups."""
+"""Review plans and identity-only writes with crash-recoverable staged replacement."""
 from __future__ import annotations
 
 import hashlib
@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import shutil
-import tempfile
+import sys
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, replace
@@ -30,13 +30,16 @@ from .local_identity import (
     spotify_recording,
     folder_lock,
 )
-from .paths import getProfilePath, get_user_download_path
+from .paths import get_user_download_path
 from .settings import SETTINGS
 
 logger = logging.getLogger(__name__)
 logger.setLevel(getattr(logging, index.LOG_LEVEL, logging.WARNING))
 SUPPORTED = {".flac", ".mp3", ".m4a", ".mp4"}
 PRIVATE_TAG = "TIDAL_DL_ID"
+STAGE_PREFIX = ".tidal-identity-"
+STAGE_JOURNAL_DIR = "identity-staging"
+STAGE_PENDING_PREFIX = ".pending-"
 EXCLUDED = {".tidal-dl-duplicates", ".tidal-dl-identity-backups", "identity-backups"}
 
 
@@ -735,8 +738,352 @@ def _add_missing(audio, identity):
             raise ValueError("Unsupported identity-tag container.")
 
 
-def backup_root():
-    return os.path.join(getProfilePath(), "identity-backups")
+def _staging_journal_root():
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(
+            os.path.expanduser("~"),
+            "AppData",
+            "Local",
+        )
+    elif sys.platform == "darwin":
+        base = os.path.join(
+            os.path.expanduser("~"),
+            "Library",
+            "Application Support",
+        )
+    else:
+        base = os.environ.get("XDG_STATE_HOME") or os.path.join(
+            os.path.expanduser("~"),
+            ".local",
+            "state",
+        )
+    return os.path.join(base, "Tidal-DL", STAGE_JOURNAL_DIR)
+
+
+def _fsync_directory(path):
+    if os.name == "nt":
+        return
+
+    try:
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+    except OSError:
+        return
+
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _process_is_running(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+
+    if pid <= 0:
+        return False
+
+    if pid == os.getpid():
+        return True
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL(
+                "kernel32",
+                use_last_error=True,
+            )
+            kernel32.OpenProcess.argtypes = (
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+            )
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+            kernel32.CloseHandle.restype = wintypes.BOOL
+
+            handle = kernel32.OpenProcess(
+                0x1000,
+                False,
+                pid,
+            )
+            if not handle:
+                return False
+
+            kernel32.CloseHandle(handle)
+            return True
+        except Exception:
+            # Failure to determine process state must be conservative:
+            # never delete a possibly active staging transaction.
+            return True
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+    return True
+
+
+def _remove_journal_file(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        logger.warning(
+            "IDENTITY_STAGE_JOURNAL_REMOVE_FAILED "
+            "path=%r error=%s",
+            path,
+            exc,
+        )
+        return False
+
+    _fsync_directory(os.path.dirname(path))
+    return True
+
+
+def _validated_staged_path(record):
+    staged = record.get("staged_path")
+    source = record.get("source_path")
+
+    if not isinstance(staged, str) or not isinstance(source, str):
+        return None
+
+    staged = os.path.abspath(staged)
+    source = os.path.abspath(source)
+
+    if os.path.normcase(staged) == os.path.normcase(source):
+        return None
+
+    if os.path.normcase(os.path.dirname(staged)) != os.path.normcase(
+        os.path.dirname(source)
+    ):
+        return None
+
+    if not os.path.basename(staged).startswith(STAGE_PREFIX):
+        return None
+
+    staged_ext = os.path.splitext(staged)[1].lower()
+    source_ext = os.path.splitext(source)[1].lower()
+    if staged_ext != source_ext or staged_ext not in SUPPORTED:
+        return None
+
+    return staged
+
+
+def _begin_stage_transaction(path):
+    token = uuid.uuid4().hex
+    source = os.path.abspath(path)
+    staged = os.path.join(
+        os.path.dirname(source),
+        f"{STAGE_PREFIX}{token}{os.path.splitext(source)[1]}",
+    )
+
+    journal_root = _staging_journal_root()
+    os.makedirs(journal_root, exist_ok=True)
+
+    manifest = os.path.join(
+        journal_root,
+        f"{token}.json",
+    )
+    pending = os.path.join(
+        journal_root,
+        f"{STAGE_PENDING_PREFIX}{os.getpid()}-{token}.tmp",
+    )
+
+    record = {
+        "version": 1,
+        "pid": os.getpid(),
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "source_path": source,
+        "staged_path": staged,
+    }
+
+    try:
+        with open(
+            pending,
+            "x",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                record,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.replace(pending, manifest)
+        _fsync_directory(journal_root)
+    except Exception:
+        for candidate in (pending, manifest):
+            try:
+                if os.path.lexists(candidate):
+                    os.remove(candidate)
+            except OSError:
+                pass
+        _fsync_directory(journal_root)
+        raise
+
+    return staged, manifest
+
+
+def _finish_stage_transaction(staged, manifest):
+    try:
+        if os.path.lexists(staged):
+            os.remove(staged)
+            _fsync_directory(os.path.dirname(staged))
+    except OSError as exc:
+        logger.warning(
+            "IDENTITY_STAGE_CLEANUP_DEFERRED "
+            "path=%r manifest=%r error=%s",
+            staged,
+            manifest,
+            exc,
+        )
+        return
+
+    _remove_journal_file(manifest)
+
+
+def cleanup_stale_identity_staging():
+    journal_root = _staging_journal_root()
+
+    if not os.path.isdir(journal_root):
+        return 0
+
+    try:
+        names = os.listdir(journal_root)
+    except OSError as exc:
+        logger.warning(
+            "IDENTITY_STAGE_STARTUP_CLEANUP_FAILED "
+            "journal_root=%r error=%s",
+            journal_root,
+            exc,
+        )
+        return 0
+
+    removed_stages = 0
+    deferred = 0
+
+    for name in names:
+        candidate = os.path.join(journal_root, name)
+
+        if (
+            name.startswith(STAGE_PENDING_PREFIX)
+            and name.endswith(".tmp")
+        ):
+            payload = name[
+                len(STAGE_PENDING_PREFIX):-4
+            ]
+            pid_text, separator, _token = payload.partition("-")
+
+            owner_pid = None
+            if separator:
+                try:
+                    owner_pid = int(pid_text)
+                except ValueError:
+                    owner_pid = None
+
+            if (
+                owner_pid is not None
+                and _process_is_running(owner_pid)
+            ):
+                deferred += 1
+                continue
+
+            if not _remove_journal_file(candidate):
+                deferred += 1
+            continue
+
+        if not name.endswith(".json"):
+            continue
+
+        try:
+            with open(
+                candidate,
+                "r",
+                encoding="utf-8",
+            ) as handle:
+                record = json.load(handle)
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "IDENTITY_STAGE_MANIFEST_INVALID "
+                "manifest=%r error=%s",
+                candidate,
+                exc,
+            )
+            if not _remove_journal_file(candidate):
+                deferred += 1
+            continue
+        except OSError as exc:
+            logger.warning(
+                "IDENTITY_STAGE_MANIFEST_READ_FAILED "
+                "manifest=%r error=%s",
+                candidate,
+                exc,
+            )
+            deferred += 1
+            continue
+
+        if _process_is_running(record.get("pid")):
+            deferred += 1
+            continue
+
+        staged = _validated_staged_path(record)
+        if staged is None:
+            logger.warning(
+                "IDENTITY_STAGE_MANIFEST_UNSAFE "
+                "manifest=%r",
+                candidate,
+            )
+            if not _remove_journal_file(candidate):
+                deferred += 1
+            continue
+
+        try:
+            if os.path.lexists(staged):
+                os.remove(staged)
+                _fsync_directory(os.path.dirname(staged))
+                removed_stages += 1
+        except OSError as exc:
+            logger.warning(
+                "IDENTITY_STAGE_STALE_REMOVE_FAILED "
+                "path=%r manifest=%r error=%s",
+                staged,
+                candidate,
+                exc,
+            )
+            deferred += 1
+            continue
+
+        if not _remove_journal_file(candidate):
+            deferred += 1
+
+    try:
+        os.rmdir(journal_root)
+    except OSError:
+        pass
+
+    logger.info(
+        "IDENTITY_STAGE_STARTUP_CLEANUP "
+        "removed_stages=%d deferred=%d",
+        removed_stages,
+        deferred,
+    )
+    return removed_stages
 
 
 def apply_one(
@@ -796,47 +1143,59 @@ def apply_one(
                 proposal.signature,
             )
             return "Indexed without changing audio file"
-        # Full byte-for-byte backup permits recovery of unknown tags and padding,
-        # not just the fields this application understands.
-        recovery = os.path.join(backup_root(), uuid.uuid4().hex)
-        os.makedirs(recovery, exist_ok=False)
-        backup = os.path.join(recovery, os.path.basename(path))
         original_hash = _file_hash(path, cancelled)
-        shutil.copy2(path, backup)
-        with open(backup, "rb+") as handle:
-            os.fsync(handle.fileno())
-        if _file_hash(backup, cancelled) != original_hash or index.signature(path) != proposal.signature:
-            raise index.IdentityConflict("Backup verification failed or source changed; source was not modified.")
-        record = {
-            "version": 1, "original_path": path, "backup_path": backup,
-            "original_sha256": original_hash, "fingerprint": fingerprint,
-            "identity": identity.__dict__, "utc": datetime.now(timezone.utc).isoformat(),
-            "recovery": "Close audio editors. Preserve the current file separately, then copy this backup to original_path. This restores ALL tags to their pre-registration values. Do not discard later DJ edits inadvertently.",
-        }
-        fd, staged = tempfile.mkstemp(prefix=".tidal-identity-", suffix=os.path.splitext(path)[1], dir=os.path.dirname(path))
-        os.close(fd)
+        staged, manifest = _begin_stage_transaction(path)
+
         try:
-            shutil.copy2(backup, staged)
+            shutil.copy2(path, staged)
+
+            with open(staged, "rb+") as handle:
+                os.fsync(handle.fileno())
+
+            if (
+                _file_hash(staged, cancelled) != original_hash
+                or index.signature(path) != proposal.signature
+            ):
+                raise index.IdentityConflict(
+                    "Staging verification failed or source changed; "
+                    "source was not modified."
+                )
+
             audio = MutagenFile(staged)
             if audio is None:
-                raise ValueError("Staged audio could not be opened for identity writing.")
+                raise ValueError(
+                    "Staged audio could not be opened for identity writing."
+                )
+
             previous = _snapshot(audio)
             _add_missing(audio, identity)
+
             if isinstance(audio, MP3):
-                version = getattr(audio.tags, "version", (2, 4, 0))[1]
-                audio.save(v2_version=version if version in (3, 4) else 4)
+                version = getattr(
+                    audio.tags,
+                    "version",
+                    (2, 4, 0),
+                )[1]
+                audio.save(
+                    v2_version=version
+                    if version in (3, 4)
+                    else 4
+                )
             else:
                 audio.save()
+
             if _snapshot(MutagenFile(staged)) != previous:
                 raise index.IdentityConflict(
                     "Tag writer changed nonidentity metadata. "
                     "Staged changes rejected; original untouched."
                 )
+
             if embedded_identity(staged) != identity:
                 raise index.IdentityConflict(
                     "Identity-tag verification failed; "
                     "original untouched."
                 )
+
             if (
                 index.audio_fingerprint(
                     staged,
@@ -849,29 +1208,49 @@ def apply_one(
                     "Staged audio verification failed; "
                     "original untouched."
                 )
+
             with open(staged, "rb+") as handle:
                 os.fsync(handle.fileno())
-            record["registered_sha256"] = _file_hash(staged, cancelled)
-            with open(os.path.join(recovery, "recovery.json"), "x", encoding="utf-8") as handle:
-                json.dump(record, handle, ensure_ascii=False, indent=2)
-                handle.flush()
-                os.fsync(handle.fileno())
+
             if cancelled():
                 raise index.IdentityCancelled()
-            if index.signature(path) != proposal.signature or _file_hash(path, cancelled) != original_hash:
-                raise index.IdentityConflict("Source changed during registration; staged changes rejected.")
+
+            if (
+                index.signature(path) != proposal.signature
+                or _file_hash(path, cancelled) != original_hash
+            ):
+                raise index.IdentityConflict(
+                    "Source changed during registration; "
+                    "staged changes rejected."
+                )
+
             os.replace(staged, path)
-            # If DB commit fails, keep the valid tags and full backup; report the
-            # partial result instead of rolling back over possible external edits.
+            _fsync_directory(os.path.dirname(path))
+
             try:
-                index.register(path, fingerprint, identity, index.signature(path))
+                index.register(
+                    path,
+                    fingerprint,
+                    identity,
+                    index.signature(path),
+                )
             except Exception as exc:
-                raise RuntimeError(f"Identity tags saved, but index update failed: {exc}. Backup: {backup}. Scan again to repair the index.") from exc
-            logger.info("IDENTITY_REGISTERED path=%r uid=%s backup=%r", path, identity.uid, backup)
-            return f"Identity tags added; backup: {backup}"
+                raise RuntimeError(
+                    "Identity tags saved, but index update failed: "
+                    f"{exc}. Scan again to repair the index."
+                ) from exc
+
+            logger.info(
+                "IDENTITY_REGISTERED path=%r uid=%s",
+                path,
+                identity.uid,
+            )
+            return "Identity tags added"
         finally:
-            if os.path.exists(staged):
-                os.remove(staged)
+            _finish_stage_transaction(
+                staged,
+                manifest,
+            )
 
 
 def summary(proposals):
@@ -882,6 +1261,7 @@ def summary(proposals):
 
 
 def apply_selected(selections, root, write_tags, progress=lambda text: None, cancelled=lambda: False):
+    cleanup_stale_identity_staging()
     results = []
     for proposal, identity in selections:
         if cancelled():

@@ -169,7 +169,8 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
         explanation = QtWidgets.QLabel(
             "Give existing downloads a durable identity so downloads stay recognized after descriptive tags are edited or files are renamed in VirtualDJ.\n"
             "Only dedicated TIDAL-DL identity fields are written; title, artist, key, BPM, genre, artwork and comments are never modified. "
-            "Nothing is selected automatically; conflicting or unreadable files are reported, not changed. A full backup is made before each tag write."
+            "Nothing is selected automatically; conflicting or unreadable files are reported, not changed. "
+            "Tag writes use one temporary verified staging copy at a time; no persistent audio backup is created, and crash leftovers are cleaned automatically on a later launch."
         )
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
@@ -312,13 +313,10 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
         self.apply_button = QtWidgets.QPushButton("Register selected files...")
         self.apply_button.setEnabled(False)
         self.apply_button.clicked.connect(self.apply_selected)
-        self.backups = QtWidgets.QPushButton("Open backups folder")
-        self.backups.clicked.connect(self.open_backups)
         self.close_button = QtWidgets.QPushButton("Close")
         self.close_button.clicked.connect(self.reject)
         buttons.addWidget(self.write_tags_box)
         buttons.addWidget(self.apply_button)
-        buttons.addWidget(self.backups)
         buttons.addStretch()
         buttons.addWidget(self.close_button)
         layout.addLayout(buttons)
@@ -786,13 +784,16 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
         if write_tags:
             mode_text = (
                 "Dedicated identity fields (TIDAL_DL_ID, SPOTIFY_TRACK_ID, TIDAL_TRACK_ID) "
-                "will be added where missing. A full byte-for-byte backup will be stored "
-                "for every audio file that is modified. "
+                "will be added where missing. Each modified file will temporarily use one "
+                "same-folder staging copy, which will be verified before atomic replacement "
+                "and deleted as soon as that file finishes. A small machine-local transaction "
+                "record will allow automatic cleanup on a later launch if the application "
+                "terminates unexpectedly. No persistent audio-file backup will be created. "
             )
         else:
             mode_text = (
                 "Only the local identity index will be updated. Audio files will not be "
-                "modified, so no audio-file backup will be created. "
+                "modified, so no staging copy will be created. "
             )
 
         confirm.setInformativeText(
@@ -830,7 +831,10 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
         self.details.setPlainText(
             "\n".join(failed_lines)
             if failed_lines
-            else "Identity registration completed. Full backups are created only for audio files whose tags are modified."
+            else (
+                "Identity registration completed. No persistent audio-file backups "
+                "were created; temporary staging files were removed after processing."
+            )
         )
         self.proposals = []
         self._ready_count = self._review_count = 0
@@ -843,11 +847,6 @@ class IdentityRegistrationDialog(QtWidgets.QDialog):
     def failed(self, message):
         self.status.setText("Operation could not complete. See details.")
         self.details.setPlainText(message)
-
-    def open_backups(self):
-        path = registration.backup_root()
-        os.makedirs(path, exist_ok=True)
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
 
     def reject(self):
         if self.worker and self.worker.isRunning():

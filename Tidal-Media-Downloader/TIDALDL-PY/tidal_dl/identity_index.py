@@ -1,4 +1,4 @@
- li"""Durable, audio-backed identities with a persistent unchanged-file scan cache.
+"""Durable, audio-backed identities with a persistent unchanged-file scan cache.
 
 Descriptive metadata is never written by this module. A minimal read-only snapshot
 of matching fields may be stored locally so unchanged files need not be reopened on

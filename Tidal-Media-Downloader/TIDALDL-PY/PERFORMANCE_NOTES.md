@@ -37,10 +37,17 @@ was executing; they do not by themselves establish the cost of individual calls.
 ## Safety and remaining costs
 
 No identity conflicts are automatically resolved. Metadata-only associations still
-require review and explicit confirmation. Full audio backups, backup hash checks,
-staged audio verification, source-change checks, and durable database commits have
-not been removed or weakened to gain speed. Applying identity tags can therefore
-remain I/O-intensive, especially with backups stored in a cloud-synchronized folder.
+require review and explicit confirmation. Persistent full-audio backup sets are not
+created. Identity-tag writes still hash the source, create and verify one temporary
+same-filesystem staging copy, verify non-identity metadata, artwork and audio identity,
+re-check the source, and use atomic replacement. Registration therefore remains
+I/O-intensive for the file currently being processed, but full-sized temporary storage
+does not accumulate across the library.
+
+Each staging transaction is journaled before its audio copy is created. Normal cleanup
+removes both the staged file and journal immediately; hard-crash leftovers are reclaimed
+during a later application launch after confirming that the creator process is no longer
+running.
 
 The unchanged-file scan cache already existed before these changes. Its future hit
 rate depends on successful cache writes and unchanged file signatures. A cold scan

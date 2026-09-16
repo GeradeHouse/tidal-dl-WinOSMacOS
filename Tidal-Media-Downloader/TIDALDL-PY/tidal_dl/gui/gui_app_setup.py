@@ -431,10 +431,23 @@ class AppRunner:
         # Correct order: Set up logging first, then initialize everything else.
         setup_logging(self.log_level)
         setup_global_exception_handler()
-        
+
+        # Reclaim identity-registration staging files left by a terminated
+        # process before authentication or the main GUI starts.
+        try:
+            from ..identity_registration import cleanup_stale_identity_staging
+
+            cleanup_stale_identity_staging()
+        except Exception as exc:
+            logger.warning(
+                "Identity staging startup cleanup could not complete: %s",
+                exc,
+                exc_info=True,
+            )
+
         # This function now handles settings, tokens, AND login attempts.
         initialize_and_login()
-        
+
         self.app = create_qapp_instance()
 
         if self.app:

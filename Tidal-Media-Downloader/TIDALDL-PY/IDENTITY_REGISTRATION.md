@@ -91,28 +91,46 @@ confirmed, unregistered rows. **Select ready + review** also includes metadata-o
 ## Registration safety
 
 - **Identity-only writes.** Before saving, the tool snapshots every non-identity
-  tag value and FLAC picture, applies changes to a staged copy, and rejects the
-  write if semantic non-identity metadata or artwork changes. MP3 writes
-  explicitly preserve a detected ID3v2.3 or ID3v2.4 major version. Full-file
-  backups protect container-level details that are not represented by the
-  semantic snapshot.
-- **Full byte-for-byte backup** for every file whose audio tags are written,
-  stored under the profile directory (`identity-backups/<session>/`) with a
-  `recovery.json` containing original path, SHA-256 checksums before/after,
-  fingerprint, identity and recovery instructions. Backups are verified by hash
-  before the original is touched. Index-only registrations do not modify audio
-  files and therefore do not create audio-file backups.
-- **Atomic replacement.** The staged file is verified (identity tags re-read,
-  fingerprint recomputed) and then moved over the original with
-  `os.replace` only after the source is re-verified unchanged.
+  tag value and FLAC picture, applies changes only to a temporary staged copy,
+  and rejects the write if semantic non-identity metadata or artwork changes.
+  MP3 writes explicitly preserve a detected ID3v2.3 or ID3v2.4 major version.
+- **No persistent full-audio backups.** Registration does not retain complete
+  recovery copies of modified audio files. Each tag-writing operation creates
+  only one temporary `.tidal-identity-*` copy beside the source file so the
+  final `os.replace` remains on the same filesystem.
+- **Bounded temporary storage.** Selected files are registered sequentially, so
+  one registration worker retains at most one full-sized staged audio file at a
+  time. The staged copy is removed immediately after that file completes,
+  fails, or is cancelled through the normal code path.
+- **Crash-recovery journal.** Before a staged audio copy can be created, a tiny
+  transaction manifest is atomically written and flushed to machine-local
+  application state (`%LOCALAPPDATA%\Tidal-DL\identity-staging` on Windows).
+  Full audio data is never written to that journal directory.
+- **Automatic stale cleanup.** Normal cleanup removes the staged audio file and
+  its transaction manifest. If hard termination, operating-system failure or
+  power loss prevents normal cleanup, the next application launch examines the
+  journal and removes staged files owned by processes that no longer exist.
+  Pending journal writes from dead processes are also removed.
+- **Concurrent-instance safety.** Transaction manifests contain the creator PID.
+  Startup cleanup leaves transactions belonging to a still-running process
+  untouched, preventing another active application instance from having its
+  staging file removed.
+- **Verified staging.** The temporary audio copy is SHA-256 checked against the
+  original before mutation. After identity tags are written, non-identity
+  metadata, artwork, embedded identity and the audio fingerprint are verified
+  before replacement.
+- **Atomic replacement.** The verified staged file is moved over the original
+  with `os.replace` only after the source is re-verified unchanged.
 - **Conflict refusal.** If an existing identity value disagrees with the index
-  or the proposed association, that file is aborted, never silently overwritten.
-- **Interrupt-safe.** Cancellation between steps always leaves the original
-  file and any completed backup intact; a leftover `.tidal-identity-*` staging
-  file in the music folder can simply be deleted.
+  or the proposed association, that file is aborted and never silently
+  overwritten.
+- **Deferred cleanup on file locks.** If a staging file cannot be deleted
+  immediately because another process still holds it, its transaction manifest
+  is retained so cleanup can be retried on a later application launch.
 
-If "identity tags saved, but index update failed" is reported, the audio file
-is valid and the backup exists; re-running the scan repairs the index.
+If "identity tags saved, but index update failed" is reported, the audio file is
+valid and re-running the scan repairs the index. No persistent rollback copy is
+retained.
 
 ## Integration with downloads
 
@@ -174,6 +192,9 @@ Useful detailed events include `IDENTITY_FINGERPRINT_CACHE_HIT`,
   table is only an acceleration layer; a signature mismatch makes its row unusable.
 - Cached Spotify metadata can be incomplete or outdated. Identity maintenance
   never contacts Spotify to fill those gaps automatically.
-- Restoring a registration backup restores all tags to their pre-registration
-  values.
-- The registration scan never deletes, renames or moves audio files.
+- Registration does not retain full-file rollback backups; source protection
+  relies on verified staging followed by atomic replacement.
+- Legacy `identity-backups` directories created by earlier versions are not
+  deleted automatically because they contain intentionally retained recovery
+  material. New registrations do not add files to those directories.
+- The registration scan never deletes, renames or moves normal audio files.
