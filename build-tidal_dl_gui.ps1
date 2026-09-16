@@ -1023,6 +1023,13 @@ $pyinstallerArgs = @(
     "--exclude-module", "matplotlib", # Exclude Matplotlib
     # --- End Excludes ---
     "--hidden-import", "aigpy", # Explicitly include missing module
+
+    # Identity modules are imported through package-relative paths and must be
+    # explicitly retained in frozen Windows builds, including Fast builds.
+    "--hidden-import", "tidal_dl.identity_index",
+    "--hidden-import", "tidal_dl.local_identity",
+    "--hidden-import", "tidal_dl.identity_registration",
+
     "--icon=$IconFile",
     "--splash", $SplashImage, # Add the splash screen
     # Add data files (Syntax: SRC;DEST where SRC is relative to CWD, DEST is relative to bundle root)
