@@ -29,6 +29,7 @@ from ..printf import Printf
 from ..tidal import TIDAL_API, AudioQuality, Track, Album, Playlist, Artist
 from ..download import downloadTrack as core_downloadTrack
 from ..download_item import DownloadItem
+from ..local_identity import ExistingRecordingReviewRequired
 from ..format import getAudioTypeFolder, getTrackPath
 from ..playlist_folders import validate_linked_playlist_folder
 from ..model import StreamUrl
@@ -60,6 +61,7 @@ class DownloadWorker(QObject):
     progress = pyqtSignal(str, int)              # track_id, percentage
     trackStarted = pyqtSignal(str)               # track_id
     trackFinished = pyqtSignal(str, bool, str)   # track_id, ok, error_msg
+    trackReviewRequired = pyqtSignal(str, str)   # track_id, review message
     allFinished = pyqtSignal(str, bool, str, str)  # title, result, msg, path
     actuallyPaused = pyqtSignal()
 
@@ -83,6 +85,7 @@ class DownloadWorker(QObject):
         )
         final_path = None
         failures: List[tuple[str, str, str]] = []
+        review_required: List[tuple[str, str, str]] = []
         completed_source_ids = set()
         try:
             # Fail once for an unavailable explicit destination, rather than
@@ -175,6 +178,7 @@ class DownloadWorker(QObject):
                         userProgress=progress_handler,
                         downloadQuality=self.download_quality,
                         download_item=download_item,
+                        raise_review_required=True,
                     )
                     if ok:
                         completed_source_ids.add(source_identity)
@@ -184,10 +188,43 @@ class DownloadWorker(QObject):
                             (track_id_str, str(track_item.title or track_id_str), err or "Unknown download error")
                         )
                     self.trackFinished.emit(track_id_str, bool(ok), err or "")
+                except ExistingRecordingReviewRequired as exc:
+                    review_message = str(exc)
+                    review_required.append(
+                        (
+                            track_id_str,
+                            str(track_item.title or track_id_str),
+                            review_message,
+                        )
+                    )
+                    logger.warning(
+                        "DOWNLOAD_TRACK_REVIEW_REQUIRED "
+                        "track_id=%s title=%r candidates=%d",
+                        track_id_str,
+                        str(track_item.title or track_id_str),
+                        len(exc.paths),
+                    )
+                    self.trackReviewRequired.emit(
+                        track_id_str,
+                        review_message,
+                    )
                 except Exception as e:
-                    logger.exception("Download failed for track %s", track_id_str)
-                    failures.append((track_id_str, str(track_item.title or track_id_str), str(e)))
-                    self.trackFinished.emit(track_id_str, False, str(e))
+                    logger.exception(
+                        "Download failed for track %s",
+                        track_id_str,
+                    )
+                    failures.append(
+                        (
+                            track_id_str,
+                            str(track_item.title or track_id_str),
+                            str(e),
+                        )
+                    )
+                    self.trackFinished.emit(
+                        track_id_str,
+                        False,
+                        str(e),
+                    )
                     # IMPORTANT: do not raise; continue with next track
 
             # Determine final path for "Show in Folder" by computing the same path as downloadTrack
@@ -263,17 +300,72 @@ class DownloadWorker(QObject):
                 if len(failures) > 10:
                     failure_lines.append(f"- ...and {len(failures) - 10} more failure(s); see the log for details.")
                 failure_message = (
-                    f"{len(failures)} of {len(self.items_to_download)} track(s) failed. "
-                    "The download is not considered successful.\n\n"
+                    f"{len(failures)} of {len(self.items_to_download)} "
+                    "track(s) failed. The download is not considered "
+                    "successful.\n\n"
                     + "\n".join(failure_lines)
                 )
+
+                if review_required:
+                    review_lines = [
+                        f"- {title} (TIDAL ID {track_id}): {message}"
+                        for track_id, title, message in review_required[:10]
+                    ]
+                    if len(review_required) > 10:
+                        review_lines.append(
+                            f"- ...and {len(review_required) - 10} more "
+                            "review item(s); see the log for details."
+                        )
+                    failure_message += (
+                        "\n\nIdentity review is also required for "
+                        f"{len(review_required)} track(s). These are not "
+                        "counted as download failures:\n"
+                        + "\n".join(review_lines)
+                    )
+
                 logger.error(
-                    "DOWNLOAD_BATCH_FAILED failed=%d total=%d details=%s",
+                    "DOWNLOAD_BATCH_FAILED failed=%d review_required=%d "
+                    "total=%d details=%s",
                     len(failures),
+                    len(review_required),
                     len(self.items_to_download),
                     failures,
                 )
                 self.allFinished.emit("Download Failed", False, failure_message, final_path or "")
+            elif review_required:
+                review_lines = [
+                    f"- {title} (TIDAL ID {track_id}): {message}"
+                    for track_id, title, message in review_required[:10]
+                ]
+                if len(review_required) > 10:
+                    review_lines.append(
+                        f"- ...and {len(review_required) - 10} more "
+                        "review item(s); see the log for details."
+                    )
+
+                review_message = (
+                    f"{len(review_required)} of "
+                    f"{len(self.items_to_download)} track(s) were not "
+                    "downloaded because an existing local recording needs "
+                    "identity review. No duplicate copy was created.\n\n"
+                    + "\n".join(review_lines)
+                    + "\n\nUse Settings → Register existing files / repair "
+                    "identity tags to verify the association."
+                )
+
+                logger.warning(
+                    "DOWNLOAD_BATCH_REVIEW_REQUIRED review_required=%d "
+                    "total=%d details=%s",
+                    len(review_required),
+                    len(self.items_to_download),
+                    review_required,
+                )
+                self.allFinished.emit(
+                    "Download Complete - Review Needed",
+                    True,
+                    review_message,
+                    final_path or "",
+                )
             else:
                 self.allFinished.emit("Download Success!", True, "", final_path or "")
 
@@ -762,6 +854,9 @@ class DownloadHandler(QObject):
         self.download_worker.progress.connect(self.onProgressUpdate)
         self.download_worker.trackStarted.connect(self.onTrackStarted)
         self.download_worker.trackFinished.connect(self.onTrackFinished)
+        self.download_worker.trackReviewRequired.connect(
+            self.onTrackReviewRequired
+        )
         self.download_worker.allFinished.connect(self.downloadEnd)
         self.download_worker.actuallyPaused.connect(self.onActuallyPaused)
 
@@ -843,19 +938,72 @@ class DownloadHandler(QObject):
                 error_msg,
             )
 
-        # MODIFIED: Increment counter and emit progress  
-        # CRITICAL FIX: Use stored processing ID, not current selection which may have changed
+        self._advance_download_progress(track_id)
+
+    def _advance_download_progress(self, track_id: str) -> None:
         processing_playlist_id = self._current_processing_playlist_id
-        
         if processing_playlist_id:
-            current_count = self._processed_counters.get(processing_playlist_id, 0) + 1
-            self._processed_counters[processing_playlist_id] = current_count
-            logger.debug(f"Emitting downloadProgress for processing playlist {processing_playlist_id} count {current_count}")
-            self.downloadProgress.emit(str(processing_playlist_id), current_count)
+            current_count = (
+                self._processed_counters.get(
+                    processing_playlist_id,
+                    0,
+                )
+                + 1
+            )
+            self._processed_counters[
+                processing_playlist_id
+            ] = current_count
+            logger.debug(
+                "Emitting downloadProgress for processing playlist "
+                "%s count %s",
+                processing_playlist_id,
+                current_count,
+            )
+            self.downloadProgress.emit(
+                str(processing_playlist_id),
+                current_count,
+            )
         else:
-            # CRITICAL FIX: No fallback - this prevents cross-contamination
-            logger.debug(f"DOWNLOAD CRITICAL: No processing playlist ID available - not emitting progress signal")
-            logger.debug(f"DOWNLOAD SKIPPING: Track {track_id} finished but no valid processing playlist ID")
+            logger.debug(
+                "DOWNLOAD CRITICAL: No processing playlist ID "
+                "available - not emitting progress signal"
+            )
+            logger.debug(
+                "DOWNLOAD SKIPPING: Track %s finished but no valid "
+                "processing playlist ID",
+                track_id,
+            )
+
+    @pyqtSlot(str, str)
+    def onTrackReviewRequired(
+        self,
+        track_id: str,
+        review_message: str,
+    ) -> None:
+        state = self.active_downloads.get(track_id)
+        is_visible_context = self._is_visible_table_context_for_playlist(
+            self._current_processing_playlist_id,
+            state.get("playlist_context") if state else None,
+        )
+
+        if state:
+            state["status"] = "review_required"
+            state["review_message"] = review_message
+
+        if is_visible_context:
+            self.main_view.table_handler.mark_track_review_required(
+                track_id,
+                review_message,
+            )
+        else:
+            logger.debug(
+                "Skipping non-visible identity-review table update | "
+                "track_id=%s playlist_id=%s",
+                track_id,
+                self._current_processing_playlist_id,
+            )
+
+        self._advance_download_progress(track_id)
 
     def onPauseResumeClicked(self):
         if not self.main_view.download_active:
@@ -892,10 +1040,23 @@ class DownloadHandler(QObject):
             logger.info("Stop requested. Finishing current track...")
 
     @pyqtSlot(str, bool, str, str)
-    def downloadEnd(self, title: str, result: bool, msg: str, path: Optional[str] = None):
+    def downloadEnd(
+        self,
+        title: str,
+        result: bool,
+        msg: str,
+        path: Optional[str] = None,
+    ):
         logger.debug(
             f"[GUI] Entering downloadEnd: title='{title}', result={result}, msg='{msg}', path='{path}'"
         )
+
+        review_needed = title == "Download Complete - Review Needed"
+        review_required_tracks = {
+            track_id: str(state.get("review_message") or "")
+            for track_id, state in self.active_downloads.items()
+            if state.get("status") == "review_required"
+        }
 
         self.main_view.download_active = False
         self.main_view.download_paused = False
@@ -922,13 +1083,27 @@ class DownloadHandler(QObject):
         self._update_download_button_text()
         self.main_view.table_handler.refresh_table_view()
 
+        for track_id, review_message in review_required_tracks.items():
+            self.main_view.table_handler.mark_track_review_required(
+                track_id,
+                review_message,
+            )
+
         # The TaskQueueManager will now handle the final dialog
         if self.main_view.task_queue_manager and self.main_view.task_queue_manager.is_running_task:
             # Finish the queue job before presenting any notification. The
             # warning is deliberately non-modal, so the next queued playlist
             # can start immediately and never depends on user interaction.
             self.main_view.task_queue_manager.job_finished()
-            if not result:
+            if review_needed:
+                CustomQMessageBox.timed_warning(
+                    self.main_view,
+                    title,
+                    "Download completed with identity review needed.",
+                    msg,
+                    timeout_ms=30000,
+                )
+            elif not result:
                 CustomQMessageBox.timed_warning(
                     self.main_view,
                     title or "Download Failed",
@@ -937,8 +1112,14 @@ class DownloadHandler(QObject):
                     timeout_ms=30000,
                 )
         else:
-            # If not part of a queue, show the dialog as before
-            if result:
+            if review_needed:
+                CustomQMessageBox.warning(
+                    self.main_view,
+                    title,
+                    "Download completed with identity review needed.",
+                    msg,
+                )
+            elif result:
                 CustomQMessageBox.information(
                     self.main_view,
                     "Download Complete",

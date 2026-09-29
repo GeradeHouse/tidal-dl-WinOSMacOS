@@ -116,6 +116,7 @@ class LinkPersistenceManager:
         self.links_data: Optional[Dict[str, Any]] = None  # Use more specific type hint
         self._io_lock = RLock()
         self._disk_write_lock = RLock()
+        self._deferred_save_lock = RLock()
         self._load_failed_due_to_unresolved_corruption = False
         self._last_recovery_source: Optional[str] = None
         self._deferred_save_depth = 0
@@ -486,15 +487,16 @@ class LinkPersistenceManager:
                 newline="\n",
             ) as f:
                 json_started = time.perf_counter()
-                json.dump(
+                serialized_json = json.dumps(
                     links_data_to_save,
-                    f,
                     ensure_ascii=False,
                     sort_keys=False,
                     separators=(",", ":"),
                 )
+                f.write(serialized_json)
                 f.write("\n")
                 json_ms = (time.perf_counter() - json_started) * 1000.0
+                del serialized_json
 
                 fsync_started = time.perf_counter()
                 f.flush()
@@ -922,21 +924,30 @@ class LinkPersistenceManager:
     def get_performance_state(self) -> Dict[str, Any]:
         """Return lightweight persistence state without waiting for disk I/O."""
         with self._async_save_lock:
-            return {
-                "async_running": self._async_save_running,
-                "async_pending": self._async_save_pending,
-                "async_requests_total": self._async_save_requests_total,
-                "async_coalesced_total": self._async_save_coalesced_total,
-                "deferred_depth": self._deferred_save_depth,
-                "deferred_pending": self._deferred_save_pending,
-            }
+            async_running = self._async_save_running
+            async_pending = self._async_save_pending
+            async_requests_total = self._async_save_requests_total
+            async_coalesced_total = self._async_save_coalesced_total
+
+        with self._deferred_save_lock:
+            deferred_depth = self._deferred_save_depth
+            deferred_pending = self._deferred_save_pending
+
+        return {
+            "async_running": async_running,
+            "async_pending": async_pending,
+            "async_requests_total": async_requests_total,
+            "async_coalesced_total": async_coalesced_total,
+            "deferred_depth": deferred_depth,
+            "deferred_pending": deferred_pending,
+        }
 
     def begin_deferred_save(self, reason: str = "bulk") -> None:
         """
         Defers disk writes while bulk link/cache mutations are in progress.
         Mutations still update the in-memory structure immediately.
         """
-        with self._io_lock:
+        with self._deferred_save_lock:
             self._deferred_save_depth += 1
             self._deferred_save_reason = str(reason or "bulk")
             if self._deferred_save_depth == 1:
@@ -959,9 +970,10 @@ class LinkPersistenceManager:
         Ends one deferred-save scope and flushes one atomic save if pending.
         """
         should_flush = False
-        flush_reason = str(reason or self._deferred_save_reason or "bulk")
 
-        with self._io_lock:
+        with self._deferred_save_lock:
+            flush_reason = str(reason or self._deferred_save_reason or "bulk")
+
             if self._deferred_save_depth <= 0:
                 logger.debug(
                     "Deferred persistence save end requested without active scope | reason=%s",
@@ -1020,7 +1032,7 @@ class LinkPersistenceManager:
         should_checkpoint = False
         checkpoint_reason = "bulk"
 
-        with self._io_lock:
+        with self._deferred_save_lock:
             if self._deferred_save_depth > 0:
                 self._deferred_save_pending = True
                 self._deferred_save_mutations_since_flush += 1
@@ -1058,7 +1070,7 @@ class LinkPersistenceManager:
                 result,
             )
             if not result:
-                with self._io_lock:
+                with self._deferred_save_lock:
                     if self._deferred_save_depth > 0:
                         self._deferred_save_pending = True
             return result

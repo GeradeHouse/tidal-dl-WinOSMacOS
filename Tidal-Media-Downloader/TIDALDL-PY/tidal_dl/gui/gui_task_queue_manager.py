@@ -979,7 +979,7 @@ class TaskQueueManager(QObject):
                         if self.main_view.linking_worker:
                             try:
                                 self.main_view.linking_worker.allTasksFinished.disconnect(on_linking_done)
-                            except TypeError:
+                            except (TypeError, RuntimeError):
                                 pass
 
                         self.jobFinished.emit(str(playlist_id))

@@ -402,6 +402,59 @@ def _scan(root, catalog, progress, cancelled):
                         cached or "",
                     )
                 )
+
+                catalog_entries = catalog.get(
+                    index.path_key(directory),
+                    (),
+                )
+                provider_match_reasons = []
+
+                for target, _title in catalog_entries:
+                    same_spotify = bool(
+                        identity.spotify_id
+                        and target.spotify_id
+                        and identity.spotify_id
+                        == target.spotify_id
+                    )
+                    same_tidal = bool(
+                        identity.tidal_id
+                        and target.tidal_id
+                        and identity.tidal_id
+                        == target.tidal_id
+                    )
+                    if not (same_spotify or same_tidal):
+                        continue
+
+                    target_identity = index.Identity(
+                        uid=identity.uid or target.uid,
+                        spotify_id=(
+                            target.spotify_id
+                            or identity.spotify_id
+                        ),
+                        tidal_id=(
+                            target.tidal_id
+                            or identity.tidal_id
+                        ),
+                    )
+                    identity = index.merge_identity(
+                        identity
+                        if (
+                            identity.uid
+                            or identity.spotify_id
+                            or identity.tidal_id
+                        )
+                        else None,
+                        target_identity,
+                    )
+
+                    reason = (
+                        "Spotify track ID"
+                        if same_spotify
+                        else "TIDAL track ID"
+                    )
+                    if reason not in provider_match_reasons:
+                        provider_match_reasons.append(reason)
+
                 legacy_identity = bool(
                     cached
                     and not current_cached
@@ -535,17 +588,37 @@ def _scan(root, catalog, progress, cancelled):
                 choices = []
                 evidence = ""
 
-                if not identity.spotify_id:
-                    for target, title in catalog.get(
-                        index.path_key(directory),
-                        (),
+                for target, title in catalog_entries:
+                    reason = match_recording(
+                        local_recording,
+                        target,
+                        allow_legacy=True,
+                    )
+                    if not reason:
+                        continue
+
+                    if (
+                        reason
+                        == "Possible duplicate: artist, title and duration only"
                     ):
-                        reason = match_recording(
-                            local_recording,
-                            target,
-                            allow_legacy=True,
+                        if provider_match_reasons:
+                            continue
+
+                        conflicting_provider = bool(
+                            (
+                                identity.spotify_id
+                                and target.spotify_id
+                                and identity.spotify_id
+                                != target.spotify_id
+                            )
+                            or (
+                                identity.tidal_id
+                                and target.tidal_id
+                                and identity.tidal_id
+                                != target.tidal_id
+                            )
                         )
-                        if reason:
+                        if not conflicting_provider:
                             choices.append(
                                 (
                                     target,
@@ -553,6 +626,34 @@ def _scan(root, catalog, progress, cancelled):
                                     reason,
                                 )
                             )
+                        continue
+
+                    target_identity = index.Identity(
+                        uid=identity.uid or target.uid,
+                        spotify_id=(
+                            target.spotify_id
+                            or identity.spotify_id
+                        ),
+                        tidal_id=(
+                            target.tidal_id
+                            or identity.tidal_id
+                        ),
+                    )
+                    identity = index.merge_identity(
+                        identity
+                        if (
+                            identity.uid
+                            or identity.spotify_id
+                            or identity.tidal_id
+                        )
+                        else None,
+                        target_identity,
+                    )
+                    if reason not in provider_match_reasons:
+                        provider_match_reasons.append(reason)
+
+                if provider_match_reasons:
+                    choices.clear()
 
                 has_identity = bool(
                     identity.uid
@@ -575,6 +676,13 @@ def _scan(root, catalog, progress, cancelled):
                         evidence = (
                             "Dedicated identity tags and "
                             "the content index agree."
+                        )
+                    elif provider_match_reasons:
+                        status = "Identified"
+                        evidence = (
+                            "Verified provider/ISRC association found; "
+                            "missing dedicated identity fields are ready "
+                            "to register."
                         )
                     elif content_known:
                         status = "Identified"
@@ -1251,6 +1359,68 @@ def apply_one(
                 staged,
                 manifest,
             )
+
+
+def repair_verified_download_identity(path, targets):
+    """Make a strong download-time existing-recording match durable."""
+    path = os.path.abspath(path)
+    current = embedded_identity(path)
+
+    identity = (
+        current
+        if (
+            current.uid
+            or current.spotify_id
+            or current.tidal_id
+        )
+        else None
+    )
+
+    for target in targets:
+        spotify_id = str(
+            getattr(target, "spotify_id", "") or ""
+        )
+        tidal_id = str(
+            getattr(target, "tidal_id", "") or ""
+        )
+        if not spotify_id and not tidal_id:
+            continue
+
+        candidate = index.Identity(
+            uid=identity.uid if identity is not None else "",
+            spotify_id=spotify_id,
+            tidal_id=tidal_id,
+        )
+        identity = index.merge_identity(
+            identity,
+            candidate,
+        )
+
+    if identity is None:
+        return "No provider identity available for repair"
+
+    if current.uid and current == identity:
+        indexed = index.identity_for_uid(current.uid)
+        if indexed == identity:
+            return "Identity already complete"
+
+    proposal = Proposal(
+        path=path,
+        signature=index.signature(path),
+        fingerprint=index.cached_fingerprint(path) or "",
+        identity=current,
+        status="Identified",
+        evidence=(
+            "Strong existing-recording match verified during download."
+        ),
+    )
+
+    return apply_one(
+        proposal,
+        identity,
+        os.path.dirname(path),
+        True,
+    )
 
 
 def summary(proposals):

@@ -3733,6 +3733,40 @@ class TableHandler(QObject):
             item.setText("Failed")
             item.setToolTip(error_msg)
 
+    def mark_track_review_required(
+        self,
+        track_id: str,
+        review_message: str = "",
+    ) -> None:
+        if (
+            not self.table_widget
+            or "Status" not in self.column_indices
+        ):
+            return
+
+        row = self._find_row_for_track_id(track_id)
+        if row is None:
+            return
+
+        status_col = self.column_indices["Status"]
+        if self.table_widget.cellWidget(row, status_col):
+            self.table_widget.removeCellWidget(
+                row,
+                status_col,
+            )
+
+        item = self.table_widget.item(row, status_col)
+        if not item:
+            item = QTableWidgetItem()
+            self.table_widget.setItem(
+                row,
+                status_col,
+                item,
+            )
+
+        item.setText("Identity review required")
+        item.setToolTip(review_message)
+
     def collapse_sub_row(self, main_row_index: int):
         if not self.table_widget:
             return

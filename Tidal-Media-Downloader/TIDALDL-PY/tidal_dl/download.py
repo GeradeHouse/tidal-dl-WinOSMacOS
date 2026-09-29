@@ -41,7 +41,12 @@ from .metadata.track import TrackMetadata
 from .metadata.tagger import tag_file
 from .model import Album, Artist, Playlist, StreamUrl, Track
 from .download_item import DownloadItem
-from .local_identity import download_recordings, find_existing_recording, folder_lock
+from .local_identity import (
+    ExistingRecordingReviewRequired,
+    download_recordings,
+    find_existing_recording,
+    folder_lock,
+)
 from .metadata.enrichment import MISSING_METADATA_TEXT, format_spotify_key
 from .paths import get_user_download_path
 from .printf import *
@@ -458,7 +463,52 @@ def _find_existing_playlist_track_path(
         )
         return result_path
 
-    target_recordings = download_recordings(track, download_item) if read_audio_tags else []
+    target_recordings = (
+        download_recordings(track, download_item)
+        if read_audio_tags
+        else []
+    )
+
+    def _repair_verified_match(
+        match_path: str,
+        match_reason: str,
+    ) -> None:
+        try:
+            from .identity_registration import (
+                repair_verified_download_identity,
+            )
+
+            repair_result = repair_verified_download_identity(
+                match_path,
+                target_recordings,
+            )
+            logger.info(
+                "DL_EXISTING_IDENTITY_REPAIR "
+                "track_id=%s path=%r reason=%s result=%s",
+                str(getattr(track, "id", "") or ""),
+                match_path,
+                match_reason,
+                repair_result,
+            )
+        except identity_index.IdentityConflict as exc:
+            logger.warning(
+                "DL_EXISTING_IDENTITY_REPAIR_CONFLICT "
+                "track_id=%s path=%r reason=%s error=%s",
+                str(getattr(track, "id", "") or ""),
+                match_path,
+                match_reason,
+                exc,
+            )
+        except Exception as exc:
+            logger.warning(
+                "DL_EXISTING_IDENTITY_REPAIR_FAILED "
+                "track_id=%s path=%r reason=%s error=%s",
+                str(getattr(track, "id", "") or ""),
+                match_path,
+                match_reason,
+                exc,
+                exc_info=logger.isEnabledFor(logging.DEBUG),
+            )
 
     for candidate_path in candidate_paths:
         if os.path.exists(candidate_path) and aigpy.file.getSize(candidate_path) > 0:
@@ -469,6 +519,7 @@ def _find_existing_playlist_track_path(
                 os.path.dirname(candidate_path),
                 target_recordings,
                 {os.path.splitext(candidate_path)[1].lower()},
+                on_verified_match=_repair_verified_match,
             )
             if matched:
                 return _finish(matched, "recording_identity")
@@ -481,7 +532,12 @@ def _find_existing_playlist_track_path(
     linked_folder = get_linked_playlist_folder(playlist_context)
     if linked_folder:
         if read_audio_tags:
-            matched = find_existing_recording(linked_folder, target_recordings, expected_extensions)
+            matched = find_existing_recording(
+                linked_folder,
+                target_recordings,
+                expected_extensions,
+                on_verified_match=_repair_verified_match,
+            )
         else:
             matched = _scan_single_playlist_folder_for_track(
                 linked_folder, expected_stems, expected_extensions,
@@ -529,6 +585,7 @@ def _find_existing_playlist_track_path(
                 candidate_dir,
                 target_recordings,
                 expected_extensions,
+                on_verified_match=_repair_verified_match,
             )
             if matched:
                 return _finish(matched, "recording_identity")
@@ -1198,6 +1255,7 @@ def downloadTrack(
     partSize: int = 1048576,
     downloadQuality: Optional[str] = None,
     download_item: Optional[Any] = None,
+    raise_review_required: bool = False,
 ):
     check = False
     actual_download_part_path = None
@@ -1527,6 +1585,17 @@ def downloadTrack(
                     track,
                     f"found={bool(existing_playlist_track_path)} path={existing_playlist_track_path!r}",
                 )
+            except ExistingRecordingReviewRequired as review_required:
+                _log_phase_end(
+                    "playlist_existing_check",
+                    phase_started,
+                    track,
+                    (
+                        "found=False review_required=True "
+                        f"candidate_count={len(review_required.paths)}"
+                    ),
+                )
+                raise
             except Exception as existing_check_error:
                 _log_phase_error(
                     "playlist_existing_check",
@@ -1729,6 +1798,17 @@ def downloadTrack(
         logger.info(track.title or f"Track {track.id}")
         return True, ""
 
+    except ExistingRecordingReviewRequired as exc:
+        logger.warning(
+            "DL_EXISTING_RECORDING_REVIEW_REQUIRED "
+            "track_id=%s title=%r candidates=%d",
+            str(getattr(track, "id", "") or ""),
+            getattr(track, "title", "Unknown"),
+            len(exc.paths),
+        )
+        if raise_review_required:
+            raise
+        return False, str(exc)
     except Exception as e:
         logger.error(f"DL Track '{getattr(track, 'title', 'Unknown')}' failed: {e}")
         logger.error(f"Exception in downloadTrack for '{getattr(track, 'title', 'Unknown')}': {e}", exc_info=True)

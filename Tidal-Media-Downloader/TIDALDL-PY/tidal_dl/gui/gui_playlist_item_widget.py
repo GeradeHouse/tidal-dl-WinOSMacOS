@@ -76,11 +76,6 @@ class PlaylistItemProgressWidget(QWidget):
         self.folder_button.setAutoRaise(True)
         self.folder_button.setFixedSize(22, 22)
         self.folder_button.setIconSize(QSize(14, 14))
-        widget_style = self.style()
-        if widget_style is not None:
-            self.folder_button.setIcon(
-                widget_style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon)
-            )
         self.folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.folder_button.setToolTip("Open local playlist folder")
         self.folder_button.setAccessibleName(f"Open local folder for {name}")

@@ -20,6 +20,29 @@ from . import identity_index
 
 logger = logging.getLogger(__name__)
 AUDIO_EXTENSIONS = {".flac", ".mp3", ".m4a", ".mp4", ".aac", ".wav", ".aiff", ".ogg", ".opus"}
+
+
+class ExistingRecordingReviewRequired(ValueError):
+    """An existing file looks like the recording, but available evidence is not proof."""
+
+    def __init__(self, paths):
+        self.paths = tuple(
+            sorted(
+                {
+                    str(path)
+                    for path in paths
+                    if str(path or "").strip()
+                }
+            )
+        )
+        super().__init__(
+            "Possible existing recording with matching artist, title/version and duration "
+            "but no reliable shared ID. No additional copy was downloaded. "
+            "Review the existing audio before retrying: "
+            + "; ".join(self.paths)
+        )
+
+
 # Serialize check-through-finalization within a destination folder. Different
 # playlists can still download concurrently. Cleanup uses the same lock.
 _locks_guard = threading.Lock()
@@ -208,10 +231,31 @@ def identity_match(identity, targets):
     return ""
 
 
-def find_existing_recording(folder, targets, extensions):
+def find_existing_recording(
+    folder,
+    targets,
+    extensions,
+    on_verified_match=None,
+):
     """Only inspect this destination, never suppress intentional copies elsewhere."""
     if not os.path.isdir(folder):
         return None
+
+    def _verified(path, reason):
+        if on_verified_match is not None:
+            try:
+                on_verified_match(path, reason)
+            except Exception as exc:
+                logger.warning(
+                    "Verified existing recording could not repair durable identity: "
+                    "%s | reason=%s | error=%s",
+                    path,
+                    reason,
+                    exc,
+                    exc_info=logger.isEnabledFor(logging.DEBUG),
+                )
+        return path
+
     possible_matches = []
     with os.scandir(folder) as entries:
         for entry in entries:
@@ -221,7 +265,7 @@ def find_existing_recording(folder, targets, extensions):
                 reason = identity_match(identity_index.resolve_identity(entry.path), targets)
                 if reason:
                     logger.info("Skip existing recording via identity index: %s | %s", entry.path, reason)
-                    return entry.path
+                    return _verified(entry.path, reason)
             local = read_local_audio(entry.path)
             if not local:
                 continue
@@ -237,18 +281,14 @@ def find_existing_recording(folder, targets, extensions):
                             entry.path,
                             reason,
                         )
-                        return entry.path
+                        return _verified(entry.path, reason)
             for target in targets:
                 reason = match_recording(local.recording, target)
                 if reason:
                     logger.info("Skip existing recording: %s | %s", entry.path, reason)
-                    return entry.path
+                    return _verified(entry.path, reason)
                 if match_recording(local.recording, target, allow_legacy=True):
                     possible_matches.append(entry.path)
     if possible_matches:
-        raise ValueError(
-            "Possible existing recording with matching artist, title/version and duration but no reliable shared ID. "
-            "No additional copy was downloaded. Review the existing audio before retrying: "
-            + "; ".join(sorted(set(possible_matches)))
-        )
+        raise ExistingRecordingReviewRequired(possible_matches)
     return None

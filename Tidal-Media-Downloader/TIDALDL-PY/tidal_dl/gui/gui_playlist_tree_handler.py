@@ -342,6 +342,7 @@ class PlaylistTreeHandler(QObject):
         self.item_widgets: Dict[str, PlaylistItemProgressWidget] = {}
         self.original_item_data: Dict[str, Dict[str, Any]] = {}
         self._spotify_playlist_cache: List[Dict[str, Any]] = []
+        self._spotify_render_signature: Optional[tuple[Any, ...]] = None
         self._spotify_sort_mode = "default"
         self._spotify_drop_target_item: Optional[QTreeWidgetItem] = None
         self.active_job_actions: Dict[str, str] = {}  # Track active job actions per playlist ID
@@ -744,6 +745,14 @@ class PlaylistTreeHandler(QObject):
     ) -> None:
         if not self.folder_icon.isNull():
             widget.folder_button.setIcon(self.folder_icon)
+        else:
+            widget_style = widget.style()
+            if widget_style is not None:
+                widget.folder_button.setIcon(
+                    widget_style.standardIcon(
+                        QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon
+                    )
+                )
         widget.openFolderRequested.connect(
             partial(self._open_playlist_folder, playlist_id)
         )
@@ -1614,6 +1623,13 @@ class PlaylistTreeHandler(QObject):
         playlists_to_render: List[Dict[str, Any]] = []
         folder_items: Dict[str, QTreeWidgetItem] = {}
         widget_count = 0
+        skipped_unchanged = False
+        current_render_signature = (
+            bool(SETTINGS.spotifyUsePlaylistFolders),
+            bool(SETTINGS.showPlaylistIcons),
+            getattr(SETTINGS, "playlistIconSize", None),
+            self._spotify_sort_mode,
+        )
 
         updates_enabled = self.tree_widget.updatesEnabled()
         self.tree_widget.setUpdatesEnabled(False)
@@ -1626,7 +1642,32 @@ class PlaylistTreeHandler(QObject):
                 if isinstance(playlist, dict)
             ]
 
+            incoming_playlist_cache = self._spotify_playlist_cache
             if refresh_cache:
+                incoming_playlist_cache = [
+                    dict(playlist)
+                    for playlist in playlists
+                    if isinstance(playlist, dict)
+                ]
+
+                if (
+                    incoming_playlist_cache == self._spotify_playlist_cache
+                    and current_render_signature == self._spotify_render_signature
+                    and self.spotify_root_item.childCount() > 0
+                ):
+                    for playlist_id in previous_spotify_playlist_ids:
+                        if playlist_id:
+                            self._invalidate_playlist_download_count(playlist_id)
+
+                    self._schedule_visible_download_count_scan()
+                    prepare_ms = (time.perf_counter() - operation_started) * 1000.0
+                    skipped_unchanged = True
+                    logger.info(
+                        "Spotify playlist refresh unchanged; preserving existing tree | playlists=%d",
+                        len(incoming_playlist_cache),
+                    )
+                    return
+
                 for playlist_id in previous_spotify_playlist_ids:
                     if playlist_id:
                         self._invalidate_playlist_download_count(playlist_id)
@@ -1638,11 +1679,7 @@ class PlaylistTreeHandler(QObject):
                     self.original_item_data.pop(playlist_id, None)
 
             if refresh_cache:
-                self._spotify_playlist_cache = [
-                    dict(playlist)
-                    for playlist in playlists
-                    if isinstance(playlist, dict)
-                ]
+                self._spotify_playlist_cache = incoming_playlist_cache
 
             playlists_to_render = self._get_ordered_spotify_playlists()
             prepare_ms = (time.perf_counter() - operation_started) * 1000.0
@@ -1723,15 +1760,16 @@ class PlaylistTreeHandler(QObject):
                     downloaded_tracks,
                 )
                 
-                current_icon = self.default_music_icon
                 images = p_data.get("images", [])
                 image_url = None
                 if images:
                     image_url = images[-1].get("url") if images else None
-                    if image_url:
-                        cached_pixmap = self.cover_cache.get(image_url)
-                        if cached_pixmap:
-                            current_icon = QIcon(cached_pixmap)
+
+                current_icon = (
+                    self.default_playlist_icon
+                    if image_url
+                    else self.default_music_icon
+                )
                 
                 self.original_item_data[str(playlist_id)] = {
                     "text": item_text,
@@ -1748,7 +1786,6 @@ class PlaylistTreeHandler(QObject):
                 # Connect geometry signal to resize handler
                 widget.geometryRequest.connect(partial(self._on_widget_geometry_request, str(playlist_id)))
 
-                widget.updateGeometry()
                 item.setSizeHint(0, widget.sizeHint())
 
                 font_child_spotify = item.font(0)
@@ -1761,23 +1798,14 @@ class PlaylistTreeHandler(QObject):
                     "data": p_data,
                     "image_url": image_url,
                     "icon_update_pending": False,
+                    "icon_needs_refresh": bool(image_url),
+                    "icon_displayed_from_cache": False,
                     "is_folder_child": is_folder_child,
                 }
                 item.setData(0, QtCore.Qt.ItemDataRole.UserRole, item_data_dict)
 
                 if SETTINGS.showPlaylistIcons:
-                    if image_url:
-                        cached_pixmap = self.cover_cache.get(image_url)
-                        if cached_pixmap:
-                            icon = QIcon(cached_pixmap)
-                            widget.set_icon(icon)
-                            if str(playlist_id) in self.original_item_data:
-                                self.original_item_data[str(playlist_id)]["icon"] = icon
-                        else:
-                            widget.set_icon(self.default_playlist_icon)
-                            self._start_icon_fetch(item, "spotify", p_data.get("id"), image_url)
-                    else:
-                        widget.set_icon(self.default_music_icon)
+                    widget.set_icon(current_icon)
             
             if render_started is not None:
                 render_ms = (time.perf_counter() - render_started) * 1000.0
@@ -1792,6 +1820,7 @@ class PlaylistTreeHandler(QObject):
                             folder_item.setExpanded(True)
                 QTimer.singleShot(0, _expand_spotify_root)
             self._apply_playlist_filter()
+            self._spotify_render_signature = current_render_signature
 
         except Exception as e:
             logger.error(f"Error updating Spotify playlist tree: {e}", exc_info=True)
@@ -1812,7 +1841,7 @@ class PlaylistTreeHandler(QObject):
                 "PERF Spotify playlist tree population | total_ms=%.1f "
                 "prepare_ms=%.1f render_ms=%.1f post_ms=%.1f "
                 "input_playlists=%d rendered_playlists=%d widgets=%d "
-                "folders=%d refresh_cache=%s",
+                "folders=%d refresh_cache=%s skipped_unchanged=%s",
                 total_ms,
                 prepare_ms,
                 render_ms,
@@ -1822,6 +1851,7 @@ class PlaylistTreeHandler(QObject):
                 widget_count,
                 len(folder_items),
                 refresh_cache,
+                skipped_unchanged,
             )
 
     def update_spotify_root_item(
@@ -2610,49 +2640,56 @@ class PlaylistTreeHandler(QObject):
             return
         viewport_rect = viewport.rect()
 
-        for i in range(self.spotify_root_item.childCount()):
-            child_item = self.spotify_root_item.child(i)
-            if not child_item:
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.spotify_root_item)
+        while True:
+            child_item = iterator.value()
+            if child_item is None:
+                break
+            iterator += 1
+
+            if child_item is self.spotify_root_item:
                 continue
 
             item_data = child_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-            if not isinstance(item_data, dict):
+            if not isinstance(item_data, dict) or item_data.get("type") != "spotify":
                 continue
-                
-            if item_data.get("type") == "spotify":
-                needs_refresh = item_data.get("icon_needs_refresh", True)
-                is_pending = item_data.get("icon_update_pending", False)
 
-                if needs_refresh and not is_pending:
-                    image_url = item_data.get("image_url")
-                    item_rect = self.tree_widget.visualItemRect(child_item)
-                    if viewport_rect.intersects(item_rect):
-                        if image_url:
-                            item_data["icon_update_pending"] = True
-                            child_item.setData(
-                                0, QtCore.Qt.ItemDataRole.UserRole, item_data
-                            )
-                            playlist_data = item_data.get("data")
-                            playlist_id = None
-                            if playlist_data is not None:
-                                playlist_id = playlist_data.get("id")
-                            self._start_icon_fetch(child_item, "spotify", playlist_id, image_url)
-                        else:
-                            if (
-                                not item_data.get("icon_displayed_from_cache", False)
-                                and not self.default_playlist_icon.isNull()
-                            ):
-                                child_item.setIcon(0, self.default_playlist_icon)
-                else:
-                    continue
-                    
+            needs_refresh = item_data.get("icon_needs_refresh", True)
+            is_pending = item_data.get("icon_update_pending", False)
+            if not needs_refresh or is_pending:
+                continue
+
+            image_url = item_data.get("image_url")
+            if not image_url:
+                continue
+
             try:
-                # Use viewport.update(QRect) to avoid ambiguity with QAbstractItemView.update(QModelIndex)
-                rect = self.tree_widget.visualItemRect(child_item)
-                # Use the local 'viewport' variable which is already checked for None
-                viewport.update(rect)
-            except (AttributeError, RuntimeError):
-                pass
+                item_rect = self.tree_widget.visualItemRect(child_item)
+            except RuntimeError:
+                continue
+
+            if not item_rect.isValid() or not viewport_rect.intersects(item_rect):
+                continue
+
+            item_data["icon_update_pending"] = True
+            child_item.setData(
+                0,
+                QtCore.Qt.ItemDataRole.UserRole,
+                item_data,
+            )
+
+            playlist_data = item_data.get("data")
+            playlist_id = (
+                playlist_data.get("id")
+                if isinstance(playlist_data, dict)
+                else None
+            )
+            self._start_icon_fetch(
+                child_item,
+                "spotify",
+                playlist_id,
+                image_url,
+            )
 
     @pyqtSlot(int)
     def _onSpotifyScroll(self, value: int) -> None:

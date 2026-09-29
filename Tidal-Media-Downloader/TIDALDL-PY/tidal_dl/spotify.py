@@ -394,16 +394,26 @@ class SpotifyAPI:
         if not features_map:
             return
 
+        cacheable_features = {
+            str(track_id): dict(features)
+            for track_id, features in features_map.items()
+            if isinstance(features, dict)
+            and str(features.get("status") or "").strip().lower()
+            not in {"unsupported", "unavailable"}
+        }
+        if not cacheable_features:
+            return
+
         started = time.perf_counter()
         try:
             manager = self._get_persistence_manager()
             manager.set_cached_spotify_audio_features_bulk(
-                features_map,
+                cacheable_features,
                 background=True,
             )
             logger.info(
                 "Spotify Audio Features cache batch queued | tracks=%d elapsed_ms=%.1f",
-                len(features_map),
+                len(cacheable_features),
                 (time.perf_counter() - started) * 1000.0,
             )
         except Exception:
