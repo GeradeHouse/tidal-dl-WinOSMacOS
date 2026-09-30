@@ -7,6 +7,15 @@
 # - Collects qt_material data + all PyQt6 submodules
 # - Excludes conflicting libraries from ffpyplayer via a robust custom hook
 # - Produces dist/tidal-dl-gui.app and dist/tidal-dl-gui-macos.zip
+# - Optionally encrypts and bundles .tidal-dl.token.json for TIDAL trial mode
+#
+# Build mode on macOS:
+# - Full build: always
+# - Windowed build: always
+#
+# Usage:
+#   ./build-tidal_dl_gui.sh
+#   ./build-tidal_dl_gui.sh --tidal-token
 #
 # FINALIZED STRATEGY:
 # - Bundles a single, correct version of OpenSSL from Homebrew.
@@ -14,8 +23,52 @@
 # - Intelligently and robustly ensures the bundled OpenSSL dylibs are in Contents/Frameworks.
 # - Rewrites ALL binary load paths via install_name_tool to use the single
 #   bundled copy via @rpath, making the .app fully self-contained and portable.
+# - When --tidal-token is supplied, the raw .tidal-dl.token.json is encrypted first;
+#   only the encrypted .tidal-dl.trial-token.bundle is added to the application.
 
 set -Eeuo pipefail
+
+# --- Arguments ---
+TIDAL_TOKEN=false
+
+print_usage() {
+  cat <<'USAGE'
+Usage:
+  ./build-tidal_dl_gui.sh [--tidal-token]
+
+Build behavior:
+  Full build     Always enabled
+  Windowed build Always enabled
+
+Options:
+  --tidal-token, -TidalToken
+      Encrypt .tidal-dl.token.json and bundle the encrypted trial token artifact.
+
+  -h, --help
+      Show this help.
+
+Trial build example:
+  ./build-tidal_dl_gui.sh --tidal-token
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tidal-token|-TidalToken)
+      TIDAL_TOKEN=true
+      shift
+      ;;
+    -h|--help)
+      print_usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown argument: $1" >&2
+      print_usage >&2
+      exit 2
+      ;;
+  esac
+done
 
 # --- Robust Homebrew Environment Setup ---
 if [[ -x "/opt/homebrew/bin/brew" ]]; then
@@ -44,6 +97,11 @@ DIST_PATH="${SCRIPT_DIR}/dist"
 BUILD_PATH="${SCRIPT_DIR}/build"
 HOOKS_PATH="${SCRIPT_DIR}/hooks"
 
+TIDAL_TRIAL_TOKEN_SOURCE_PATH="${SCRIPT_DIR}/.tidal-dl.token.json"
+TIDAL_TRIAL_TOKEN_BUILD_DIR="${SCRIPT_DIR}/.trial-token-build"
+TIDAL_TRIAL_TOKEN_BUNDLE_PATH="${TIDAL_TRIAL_TOKEN_BUILD_DIR}/.tidal-dl.trial-token.bundle"
+TIDAL_TRIAL_TOKEN_BUNDLE_DEST="tidal_dl/trial_token"
+
 VENV_DIR="${SCRIPT_DIR}/.venv-macos"
 PY_SYS="$(command -v python3.11 || true)"
 PY_SYS="${PY_SYS:-$(command -v python3 || true)}"
@@ -56,6 +114,11 @@ PY_SYS="${PY_SYS:-$(command -v python || true)}"
 [[ -d "${ASSETS_DIR}" ]]   || { echo "Error: assets dir not found: ${ASSETS_DIR}"; exit 1; }
 [[ -d "${METADATA_DIR}" ]] || { echo "Error: metadata dir not found: ${METADATA_DIR}"; exit 1; }
 [[ -f "${AIGPY_DIR}/aigpy/__init__.py" ]] || { echo "Error: AIGPY submodule/package not populated: ${AIGPY_DIR}/aigpy/__init__.py"; exit 1; }
+
+if [[ "${TIDAL_TOKEN}" == true && ! -f "${TIDAL_TRIAL_TOKEN_SOURCE_PATH}" ]]; then
+  echo "Error: --tidal-token was specified, but the token file was not found at: ${TIDAL_TRIAL_TOKEN_SOURCE_PATH}" >&2
+  exit 1
+fi
 
 ICON_OPT=()
 [[ -f "${ICON_PATH}" ]] && ICON_OPT=(--icon "${ICON_PATH}") || echo "Warning: icon not found (${ICON_PATH}); using default."
@@ -108,9 +171,81 @@ else
   exit 1
 fi
 
+# --- Trial token bundle creation ---
+create_tidal_trial_token_bundle() {
+  local source_path="$1"
+  local output_path="$2"
+
+  mkdir -p "$(dirname "${output_path}")"
+
+  "${PY}" - "${source_path}" "${output_path}" <<'PY'
+import base64
+import hashlib
+import json
+import os
+import sys
+
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
+
+source_path = sys.argv[1]
+output_path = sys.argv[2]
+
+with open(source_path, "rb") as handle:
+    plaintext = handle.read()
+
+key = get_random_bytes(32)
+nonce = get_random_bytes(12)
+salt = get_random_bytes(16)
+iterations = 200000
+
+secret_parts = ("Tidal", "-", "DL", "::", "GUI", "::", "Trial", "::", "Token", "::", "2026")
+secret = hashlib.sha256("".join(secret_parts).encode("utf-8")).digest()
+mask = hashlib.pbkdf2_hmac("sha256", secret, salt, iterations, dklen=len(key))
+wrapped_key = bytes(a ^ b for a, b in zip(key, mask))
+
+cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+cipher.update(b"Tidal-DL GUI trial token bundle v1")
+ciphertext, tag = cipher.encrypt_and_digest(plaintext)
+
+def b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+bundle = {
+    "version": 1,
+    "algorithm": "AES-256-GCM",
+    "kdf": "PBKDF2-HMAC-SHA256",
+    "iterations": iterations,
+    "salt": b64(salt),
+    "nonce": b64(nonce),
+    "tag": b64(tag),
+    "wrappedKey": b64(wrapped_key),
+    "ciphertext": b64(ciphertext),
+}
+
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
+with open(output_path, "w", encoding="utf-8") as handle:
+    json.dump(bundle, handle, separators=(",", ":"))
+PY
+}
+
 # --- Clean outputs BEFORE creating build artifacts ---
-rm -rf "${DIST_PATH}" "${BUILD_PATH}" "${HOOKS_PATH}"
+rm -rf "${DIST_PATH}" "${BUILD_PATH}" "${HOOKS_PATH}" "${TIDAL_TRIAL_TOKEN_BUILD_DIR}"
 mkdir -p "${DIST_PATH}" "${BUILD_PATH}" "${HOOKS_PATH}"
+
+if [[ "${TIDAL_TOKEN}" == true ]]; then
+  echo "Creating encrypted TIDAL trial token bundle..."
+  create_tidal_trial_token_bundle \
+    "${TIDAL_TRIAL_TOKEN_SOURCE_PATH}" \
+    "${TIDAL_TRIAL_TOKEN_BUNDLE_PATH}"
+
+  [[ -f "${TIDAL_TRIAL_TOKEN_BUNDLE_PATH}" ]] || {
+    echo "Error: failed to create encrypted TIDAL trial token bundle." >&2
+    exit 1
+  }
+
+  echo "Encrypted TIDAL trial token bundle created: ${TIDAL_TRIAL_TOKEN_BUNDLE_PATH}"
+fi
 
 # --- Create Custom Hooks ---
 # Robust hook for ffpyplayer that filters its vendored OpenSSL from both datas and binaries.
@@ -163,7 +298,7 @@ OPENSSL_PREFIX="$(brew --prefix openssl@3 || true)"
 if [[ -n "${OPENSSL_PREFIX}" && -d "${OPENSSL_PREFIX}/lib" ]]; then
     echo "Found Homebrew OpenSSL. Bundling correct libssl and libcrypto."
     # Use destination '.' and let PyInstaller place dylibs where it wants.
-    # We will robustly move them to Frameworks post-build.
+    # The post-build step will robustly move them to Frameworks.
     EXTRA_OPTS+=( --add-binary "${OPENSSL_PREFIX}/lib/libssl.3.dylib:." )
     EXTRA_OPTS+=( --add-binary "${OPENSSL_PREFIX}/lib/libcrypto.3.dylib:." )
 else
@@ -184,7 +319,15 @@ except Exception:
 PY
 
 # --- Build ---
+echo "-------------------------------------"
+echo "Starting Build for '${APP_NAME}'"
+echo "Build Type: Windowed"
+echo "Build Mode: Full"
+echo "TIDAL Trial Token: $(if [[ "${TIDAL_TOKEN}" == true ]]; then echo 'Enabled'; else echo 'Disabled'; fi)"
+echo "Project Source: ${PROJECT_SOURCE_DIR}"
+echo "-------------------------------------"
 echo "Starting PyInstaller build..."
+
 PYINSTALLER_ARGS=(
   --noconfirm
   --name "${APP_NAME}"
@@ -211,6 +354,13 @@ PYINSTALLER_ARGS=(
   "${EXTRA_OPTS[@]}"
   "${MAIN_SCRIPT}"
 )
+
+if [[ "${TIDAL_TOKEN}" == true ]]; then
+  PYINSTALLER_ARGS+=(
+    --add-data "${TIDAL_TRIAL_TOKEN_BUNDLE_PATH}:${TIDAL_TRIAL_TOKEN_BUNDLE_DEST}"
+  )
+  echo "Bundling encrypted TIDAL trial token artifact. Raw token file is not added to PyInstaller."
+fi
 
 PYINSTALLER_BOOTSTRAP='import sys; import PyQt6; from PyInstaller.__main__ import run; run(sys.argv[1:])'
 OLD_PYTHONPATH="${PYTHONPATH-}"
@@ -251,7 +401,7 @@ if [[ -n "$OPENSSL_PREFIX" && -d "$OPENSSL_PREFIX/lib" ]]; then
     FRAMEWORKS_DIR="$APP_BUNDLE/Contents/Frameworks"
     SSL_SRC="$OPENSSL_PREFIX/lib/libssl.3.dylib"
     CRYPTO_SRC="$OPENSSL_PREFIX/lib/libcrypto.3.dylib"
-    
+
     echo "[DEBUG] Source Homebrew SSL: $SSL_SRC"
     echo "[DEBUG] Source Homebrew Crypto: $CRYPTO_SRC"
     echo "[DEBUG] Target directory: $FRAMEWORKS_DIR"
@@ -286,11 +436,11 @@ if [[ -n "$OPENSSL_PREFIX" && -d "$OPENSSL_PREFIX/lib" ]]; then
   SSL_BASENAME="libssl.3.dylib"
   CRYPTO_BASENAME="libcrypto.3.dylib"
   FRAMEWORKS_DIR="$APP_BUNDLE/Contents/Frameworks"
-  
+
   # Generic, non-versioned paths for widespread patching
   SSL_GENERIC_PATH="$OPENSSL_PREFIX/lib/$SSL_BASENAME"
   CRYPTO_GENERIC_PATH="$OPENSSL_PREFIX/lib/$CRYPTO_BASENAME"
-  
+
   echo "[DEBUG] Using generic Homebrew paths for patching:"
   echo "[DEBUG]   SSL Source: $SSL_GENERIC_PATH"
   echo "[DEBUG]   Crypto Source: $CRYPTO_GENERIC_PATH"
@@ -310,36 +460,34 @@ if [[ -n "$OPENSSL_PREFIX" && -d "$OPENSSL_PREFIX/lib" ]]; then
   echo "[ACTION] Setting install name for bundled $CRYPTO_BASENAME..."
   install_name_tool -id "@rpath/$CRYPTO_BASENAME" "$FRAMEWORKS_DIR/$CRYPTO_BASENAME"
 
-  # --- CRITICAL FIX ---
-  # Discover the exact, hardcoded, versioned path to libcrypto inside the just-copied libssl.
+  # Discover the exact, hardcoded, versioned path to libcrypto inside the copied libssl.
   echo "[DEBUG] Discovering hardcoded libcrypto path within bundled libssl..."
-  HARCODED_CRYPTO_PATH=$(otool -L "$FRAMEWORKS_DIR/$SSL_BASENAME" | grep 'libcrypto' | awk '{print $1}')
-  
-  if [[ -z "$HARCODED_CRYPTO_PATH" ]]; then
+  HARDCODED_CRYPTO_PATH=$(otool -L "$FRAMEWORKS_DIR/$SSL_BASENAME" | grep 'libcrypto' | awk '{print $1}')
+
+  if [[ -z "$HARDCODED_CRYPTO_PATH" ]]; then
       echo "[ERROR] Could not discover the hardcoded path to libcrypto within libssl. Patching cannot proceed."
       exit 1
   fi
-  echo "[DEBUG]   Discovered path: $HARCODED_CRYPTO_PATH"
+  echo "[DEBUG]   Discovered path: $HARDCODED_CRYPTO_PATH"
 
   # Use that exact discovered path in the -change command to fix the inter-library dependency.
   echo "[ACTION] Patching $SSL_BASENAME to depend on @rpath/$CRYPTO_BASENAME..."
-  install_name_tool -change "$HARCODED_CRYPTO_PATH" "@rpath/$CRYPTO_BASENAME" "$FRAMEWORKS_DIR/$SSL_BASENAME"
-  # --- END CRITICAL FIX ---
+  install_name_tool -change "$HARDCODED_CRYPTO_PATH" "@rpath/$CRYPTO_BASENAME" "$FRAMEWORKS_DIR/$SSL_BASENAME"
 
   # Find ALL binaries and repoint ALL known bad paths to the single @rpath source.
   echo "[ACTION] Starting recursive patch of all binaries in the app bundle..."
   find "$APP_BUNDLE" -type f \( -name "*.so" -o -name "*.dylib" -o -perm -111 \) -print0 | while IFS= read -r -d '' BINFILE; do
-    # Use a conditional to avoid printing errors for files that don't have the dependency
+    # Use a conditional to avoid printing errors for files that do not have the dependency.
     if otool -L "$BINFILE" 2>/dev/null | grep -q -E 'openssl|libcrypto|libssl'; then
         echo "[DEBUG]   Patching file: $BINFILE"
-        # Rewrite generic Homebrew paths
+        # Rewrite generic Homebrew paths.
         install_name_tool -change "$SSL_GENERIC_PATH" "@rpath/$SSL_BASENAME" "$BINFILE" 2>/dev/null || true
         install_name_tool -change "$CRYPTO_GENERIC_PATH" "@rpath/$CRYPTO_BASENAME" "$BINFILE" 2>/dev/null || true
-        
-        # Also rewrite the specific, hardcoded path in case any other library uses it
-        install_name_tool -change "$HARCODED_CRYPTO_PATH" "@rpath/$CRYPTO_BASENAME" "$BINFILE" 2>/dev/null || true
 
-        # Rewrite ffpyplayer's vendored paths (in case any binary still references them)
+        # Also rewrite the specific, hardcoded path in case any other library uses it.
+        install_name_tool -change "$HARDCODED_CRYPTO_PATH" "@rpath/$CRYPTO_BASENAME" "$BINFILE" 2>/dev/null || true
+
+        # Rewrite ffpyplayer's vendored paths in case any binary still references them.
         install_name_tool -change "@loader_path/../__dot__dylibs/libssl.3.dylib"     "@rpath/$SSL_BASENAME"    "$BINFILE" 2>/dev/null || true
         install_name_tool -change "@loader_path/../__dot__dylibs/libcrypto.3.dylib"  "@rpath/$CRYPTO_BASENAME" "$BINFILE" 2>/dev/null || true
         install_name_tool -change "@loader_path/./__dot__dylibs/libssl.3.dylib"      "@rpath/$SSL_BASENAME"    "$BINFILE" 2>/dev/null || true
@@ -381,7 +529,7 @@ otool -L "$FRAMEWORKS_DIR/libssl.3.dylib" | grep -i 'crypto'
 echo "--- [Final Sanity Check: Complete] ---"
 
 # --- Zip ---
-# Use -y to preserve symlinks, which is important for PyInstaller 6+
+# Use -y to preserve symlinks, which is important for PyInstaller 6+.
 ( cd "${DIST_PATH}" && zip -qry9 -y "${APP_NAME}-macos.zip" "$(basename "${APP_BUNDLE}")" )
 echo "ZIP: ${DIST_PATH}/${APP_NAME}-macos.zip"
 
